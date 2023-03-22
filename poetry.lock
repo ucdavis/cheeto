@@ -336,22 +336,7 @@ files = [
 mypy-extensions = ">=0.3.0"
 typing-extensions = ">=3.7.4"
 
-[[package]]
-name = "yamale"
-version = "4.0.4"
-description = "A schema and validator for YAML."
-category = "main"
-optional = false
-python-versions = ">=3.6"
-files = [
-    {file = "yamale-4.0.4-py3-none-any.whl", hash = "sha256:04f914c0886bda03ac20f8468272cfd9374a634a062549490eff2beedeb30497"},
-    {file = "yamale-4.0.4.tar.gz", hash = "sha256:e524caf71cbbbd15aa295e8bdda01688ac4b5edaf38dd60851ddff6baef383ba"},
-]
-
-[package.dependencies]
-pyyaml = "*"
-
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "3e352b3eb2bb78db2c23a3707c97bb07cf09184e98335c187e28bffb423ee605"
+content-hash = "719b2ec86638734ac1aa87f490e0e64fbdcbb010a5d869176e5aa05970e76b63"

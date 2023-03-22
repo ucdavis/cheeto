@@ -16,7 +16,6 @@ cheeto = "cheeto.__main__:main"
 python = "^3.10"
 mashumaro = {extras = ["yaml"], version = "^3.5"}
 rich = "^13.3.1"
-yamale = "^4.0.4"
 ruamel-yaml = "^0.17.21"
 marshmallow-dataclass = {extras = ["union"], version = "^8.5.12"}
 mergedeep = "^1.3.4"
