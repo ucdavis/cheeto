@@ -77,6 +77,6 @@ def convert_to_puppet(args):
 
     yaml_output = user_map.to_yaml(omit_none=True)
 
-    with open(puppet_file, 'w') as fp:
+    with open(args.puppet_file, 'w') as fp:
         print(yaml_output, file=fp)
 
