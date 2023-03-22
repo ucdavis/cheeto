@@ -1,4 +1,4 @@
-# cheeto: HPCCF core utilities.
+# cheeto: HPCCF utilities.
 
 `cheeto` provides a library and schemas for validating our puppet
 YAML files, merging account data, and converting from the HiPPO
