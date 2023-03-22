@@ -80,3 +80,9 @@ def convert_to_puppet(args):
     with open(args.puppet_file, 'w') as fp:
         print(yaml_output, file=fp)
 
+    if args.key_dir:
+        key_dest = os.path.join(args.key_dir,
+                                f'{hippo_record.account.kerb}.pub')
+        with open(key_dest, 'w') as fp:
+            print(hippo_record.account.key, file=fp)
+
