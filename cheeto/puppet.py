@@ -10,8 +10,13 @@
 from dataclasses import dataclass
 import os
 from typing import Optional, List, Mapping, Union
+import sys
 
+import marshmallow
 import marshmallow_dataclass
+from rich import print as rprint
+from rich.console import Console
+from rich.syntax import Syntax
 
 from .types import *
 from .utils import require_kwargs
@@ -76,19 +81,49 @@ def add_validate_args(parser):
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
+    parser.add_argument('--strict', action='store_true', default=False,
+                        help='Terminate on validation errors.')
+    parser.add_argument('--quiet', default=False, action='store_true')
 
 
 def validate_yamls(args):
+
+    console = Console(stderr=True)
+
     parsed_yamls = []
     for filename in args.files:
         parsed_yamls.append(parse_yaml(filename))
 
     if args.merge:
-        parsed_yamls = [puppet_merge(*parsed_yamls)]
+        parsed_yamls = [('merged', puppet_merge(*parsed_yamls))]
+    else:
+        parsed_yamls = zip(args.files, parsed_yamls)
     
-    for yaml_obj in parsed_yamls:
-        puppet_data = PuppetUserMapSchema().load(yaml_obj)
+    for source_file, yaml_obj in parsed_yamls:
+        if not args.quiet:
+            console.rule(source_file, style='blue')
+
+        try:
+            puppet_data = PuppetUserMapSchema().load(yaml_obj)
+        except marshmallow.exceptions.ValidationError as e:
+            rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
+            if args.strict:
+                sys.exit(1)
+            continue
+
+        output_yaml = puppet_data.to_yaml(omit_none=True)
+        hl_yaml = Syntax(output_yaml,
+                         'yaml',
+                         theme='github-dark',
+                         background_color='default')
+
         if args.dump:
             with open(args.dump, 'w') as fp:
-                print(puppet_data.to_yaml(omit_none=True), file=fp)
+                if args.dump == '/dev/stdout':
+                    rprint(hl_yaml, file=fp)
+                else:
+                    print(output_yaml, file=fp)
+
+        if args.dump != '/dev/stdout' and not args.quiet:
+            console.print()
 
