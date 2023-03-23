@@ -62,7 +62,7 @@ LinuxGID = NewType(
 
 # TODO: Needs to actually be "x" or "min length"
 LinuxPassword = NewType(
-    "LinuxPassword", str, validate=mv.Length(min=1)
+    "LinuxPassword", str, validate=mv.Length(min=0)
 )
 
 Shell = NewType(
