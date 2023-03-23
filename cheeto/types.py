@@ -66,7 +66,16 @@ LinuxPassword = NewType(
 )
 
 Shell = NewType(
-    "Shell", str, validate=mv.OneOf(("/bin/sh", "/bin/bash", "/bin/zsh"))
+    "Shell", str, validate=mv.OneOf(
+        ("/bin/sh",
+         "/bin/bash",
+         "/bin/zsh",
+         "/usr/bin/zsh",
+         "/usr/bin/bash",
+         "/usr/sbin/nologin-account-disabled",
+         "/bin/false",
+         "/usr/sbin/nologin")
+    )
 )
 
 ZFSQuota = NewType(
