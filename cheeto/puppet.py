@@ -54,6 +54,7 @@ class PuppetUserRecord(BaseModel):
     password: Optional[LinuxPassword] = None
     shell: Optional[Shell] = None
     tag: Optional[List[str]] = None
+    home: Optional[str] = None
 
     ensure: Optional[PuppetEnsure] = None
     membership: Optional[PuppetMembership] = None
