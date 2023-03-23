@@ -70,8 +70,65 @@ class PuppetUserMap(BaseModel):
     user: Mapping[KerberosID, PuppetUserRecord]
 
 
-PuppetUserRecordSchema = marshmallow_dataclass.class_schema(PuppetUserRecord)
-PuppetUserMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetGroupStorage(BaseModel):
+    name: str
+    owner: KerberosID
+    zfs: Union[PuppetZFS, bool]
+    autofs: Optional[PuppetAutofs]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetGroupRecord(BaseModel):
+    gid: LinuxGID
+    ensure: Optional[PuppetEnsure] = None
+    tag: Optional[List[str]] = None
+
+    storage: Optional[List[PuppetGroupStorage]] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetGroupMap(BaseModel):
+    group: Mapping[KerberosID, PuppetGroupRecord]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetShareStorage(BaseModel):
+    owner: KerberosID
+    group: Optional[KerberosID]
+    zfs: Union[PuppetZFS, bool]
+    autofs: Optional[PuppetAutofs]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetShareRecord(BaseModel):
+    storage: PuppetShareStorage
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetShareMap(BaseModel):
+    share: Mapping[str, PuppetShareRecord]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetAccountMap(BaseModel):
+    group: Optional[Mapping[KerberosID, PuppetGroupRecord]] = None
+    user: Optional[Mapping[KerberosID, PuppetUserRecord]] = None
+    share: Optional[Mapping[str, PuppetShareRecord]] = None
+
+
+PuppetUserRecordSchema  = marshmallow_dataclass.class_schema(PuppetUserRecord)
+PuppetUserMapSchema     = marshmallow_dataclass.class_schema(PuppetUserMap)
+PuppetGroupRecordSchema = marshmallow_dataclass.class_schema(PuppetGroupRecord)
+PuppetGroupMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)
+PuppetAccountMapSchema  = marshmallow_dataclass.class_schema(PuppetAccountMap)
 
 
 def add_validate_args(parser):
@@ -104,7 +161,7 @@ def validate_yamls(args):
             console.rule(source_file, style='blue')
 
         try:
-            puppet_data = PuppetUserMapSchema().load(yaml_obj)
+            puppet_data = PuppetAccountMapSchema().load(yaml_obj)
         except marshmallow.exceptions.ValidationError as e:
             rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
             if args.strict:
