@@ -76,8 +76,8 @@ class PuppetUserMap(BaseModel):
 class PuppetGroupStorage(BaseModel):
     name: str
     owner: KerberosID
-    zfs: Union[PuppetZFS, bool]
     autofs: Optional[PuppetAutofs]
+    zfs: Optional[Union[PuppetZFS, bool]] = None
 
 
 @require_kwargs
