@@ -79,5 +79,5 @@ Shell = NewType(
 )
 
 ZFSQuota = NewType(
-    "ZFSQuota", str, validate=mv.Regexp(r'[0-9]+[MGTP]')
+    "ZFSQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MGTP]')
 )
