@@ -15,7 +15,8 @@ from jinja2 import Environment, FileSystemLoader
 
 from .utils import __pkg_dir__
 
-PKG_TEMPLATES = os.path.join(__pkg_dir__, 'templates')
+
+PKG_TEMPLATES = __pkg_dir__ / 'templates'
 
 
 def add_render_args(parser):
@@ -47,7 +48,9 @@ def render(args):
 
     environment = Environment(loader=FileSystemLoader(
                                         [str(args.templates_dir),
-                                         PKG_TEMPLATES]
+                                         str(args.templates_dir / 'layouts'),
+                                         str(PKG_TEMPLATES),
+                                         str(PKG_TEMPLATES / 'layouts')]
                                       )
                               )
 

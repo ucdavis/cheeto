@@ -9,10 +9,11 @@
 
 from dataclasses import is_dataclass
 import os
+from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
 
-__pkg_dir__ = os.path.abspath(os.path.dirname(__file__))
+__pkg_dir__ = Path(__file__).resolve().parent
 
 _T = TypeVar("_T")
 _Self = TypeVar("_Self")
