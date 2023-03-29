@@ -10,6 +10,7 @@
 import argparse
 
 from . import hippo
+from . import nocloud
 from . import puppet
 
 
@@ -32,6 +33,11 @@ def main():
     validate_puppet_parser.set_defaults(func=puppet.validate_yamls)
     add_common_args(validate_puppet_parser)
     puppet.add_validate_args(validate_puppet_parser)
+
+    nocloud_parser = commands.add_parser('nocloud-render')
+    nocloud_parser.set_defaults(func=nocloud.render)
+    add_common_args(nocloud_parser)
+    nocloud.add_render_args(nocloud_parser)
 
     args = parser.parse_args()
     args.func(args)

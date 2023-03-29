@@ -8,6 +8,9 @@ authors = [
 ]
 readme = "README.md"
 repository = "https://github.com/ucdavis/cheeto"
+include = [
+	{ path = "cheeto/templates" }
+]
 
 [tool.poetry.scripts]
 cheeto = "cheeto.__main__:main"
