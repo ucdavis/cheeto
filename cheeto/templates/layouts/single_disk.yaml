@@ -1,8 +1,9 @@
 {%- extends "user-data.yaml.j2" %}
 {%- block disks %}
-# Physical disk, these systems only have 1
+# Physical disk, these systems have 1
 - id: disk-sda
-  match: {}
+  match:
+    size: smallest
   ptable: gpt
   name: ''
   grub_device: true
@@ -61,4 +62,4 @@
   device: format-tmp
   path: /scratch
   type: mount
-{% endblock disks %}
+{%- endblock disks %}
