@@ -44,7 +44,7 @@ def render(args):
     print(PKG_TEMPLATES)
 
     hosts_base = args.templates_dir / "hosts"
-    host_paths = list(hosts_base.glob('*'))
+    host_paths = list(hosts_base.glob('*.j2'))
 
     environment = Environment(loader=FileSystemLoader(
                                         [str(args.templates_dir),
@@ -60,7 +60,7 @@ def render(args):
         hostname = host_path.stem
         print(f"Processing: {hostname}")
 
-        host_j2 = environment.get_template(f"hosts/{hostname}")
+        host_j2 = environment.get_template(f"hosts/{hostname}.j2")
         
         nocloud_host_dir = args.output_dir / hostname
         nocloud_host_dir.mkdir(mode=0o755, parents=False, exist_ok=True)
