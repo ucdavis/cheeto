@@ -297,6 +297,11 @@ autoinstall:
     - echo "^^^^^^^^^^ Puppet finished ^^^^^^^^^^"
     - wget -O /dev/null http://{{cobbler_ip}}/cblr/svc/op/nopxe/system/{{ hostname }} 2>/dev/null || true
     - curtin in-target --target=/target -- /usr/bin/ssh-keygen -A
+    # Make /tmp/ a symlink into /scratch/tmp/
+    - curtin in-target --target=/target -- mkdir /scratch/tmp
+    - curtin in-target --target=/target -- chmod 1777 /scratch/ /scratch/tmp/
+    - curtin in-target --target=/target -- rm -rf /tmp/
+    - curtin in-target --target=/target -- ln -s /scratch/tmp /tmp
 
   # run commands
   # default: none
