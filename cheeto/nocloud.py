@@ -40,9 +40,6 @@ def add_render_args(parser):
 
 
 def render(args):
-
-    print(PKG_TEMPLATES)
-
     hosts_base = args.templates_dir / "hosts"
     host_paths = list(hosts_base.glob('*.j2'))
 
@@ -67,6 +64,9 @@ def render(args):
 
         meta_data_f = nocloud_host_dir / "meta-data"
         meta_data_f.touch(mode=0o644, exist_ok=True)
+
+        vendor_data_f = nocloud_host_dir / "vendor-data"
+        vendor_data_f.touch(mode=0o644, exist_ok=True)
 
         contents = host_j2.render(
             hostname=hostname,
