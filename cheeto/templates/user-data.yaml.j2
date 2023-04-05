@@ -3,9 +3,10 @@
 chpasswd:
   expire: false
   users:
-    # gieY3Ui3a
+    # echo newpasswordhere | mkpasswd -m sha-512 -s
+    # See cluster_info.conf::CLOUD_CONFIG_PASS
     - name: installer
-      password: $6$.CH4sJFJOlMlB4Z9$J5usbTx/S.6aBxDwJJ4onTPn7yRWX8Tk22Wy8ur4sZNWlx7tNXLAcgzXoxnGAdrQpnMLw41PMm0smCPg3sQuv.
+      password: "$6$ydvTS67k7tLbrI6Q$rVXQVkecMmVF.SvrVeT2dAeMZgmHq53Fz30uK3iONdN60Gp.iGi2TxOihI85IkxNLtX3V/29J/kIk6NXn76e3."
 
 ssh_authorized_keys:
   {%- for key in ssh_authorized_keys %}
@@ -28,7 +29,8 @@ autoinstall:
   identity:
     hostname: {{ hostname }}
     # echo newpasswordhere | mkpasswd -m sha-512 -s
-    password: "$6$.1eHH0iY$ArGzKX2YeQ3G6U.mlOO3A.NaL22Ewgz8Fi4qqz.Ns7EMKjEJRIW2Pm/TikDptZpuu7I92frytmk5YeL.9fRY4."
+    # See cluster_info.conf::CLOUD_CONFIG_PASS
+    password: "$6$ydvTS67k7tLbrI6Q$rVXQVkecMmVF.SvrVeT2dAeMZgmHq53Fz30uK3iONdN60Gp.iGi2TxOihI85IkxNLtX3V/29J/kIk6NXn76e3."
     username: ubuntu
 
   apt:
@@ -264,20 +266,8 @@ autoinstall:
       {%- endfor %}
 
   packages:
+    # All other packages brought in by the curtin puppet run
     - puppet-agent
-
-    # Are these even necessary with the fully automated Puppet install?
-    # - dirmngr
-    # - ifupdown
-    # - infiniband-diags
-    # - ipmitool
-    # - jed
-    # - net-tools
-    # - screen
-    # - tmux
-    # - vim
-    # - zsh
-
 
   storage:
     config:
