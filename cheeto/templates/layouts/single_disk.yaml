@@ -32,8 +32,8 @@
           
 - id: partition-scratch
   device: disk-sda
-  size: 1T
-  flag: scratch
+  size: -1
+  flag: linux
   number: 3
   preserve: false
   grub_device: false
@@ -59,7 +59,7 @@
   type: mount
   
 - id: mount-scratch
-  device: format-tmp
+  device: format-scratch
   path: /scratch
   type: mount
 {%- endblock disks %}
