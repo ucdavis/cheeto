@@ -291,7 +291,7 @@ autoinstall:
   package_upgrade: true
 
   late-commands:
-  - echo "{{ puppet_ip}} {{ puppet_fqdn }} puppet" >> /target/etc/hosts
+    - echo "{{ puppet_ip}} {{ puppet_fqdn }} puppet" >> /target/etc/hosts
     - echo "vvvvvvvvvv Running puppet, this can take a while vvvvvvvvvv"
     - curtin in-target --target=/target -- /opt/puppetlabs/puppet/bin/puppet agent -t --server=puppet.hpc.ucdavis.edu --environment={{ puppet_environment}} 2>&1 > /target/root/puppet.install || true
     - echo "^^^^^^^^^^ Puppet finished ^^^^^^^^^^"
@@ -319,4 +319,6 @@ autoinstall:
   runcmd:
     # Run puppet agent again at boot
     - |
-    /opt/puppetlabs/puppet/bin/puppet agent -t --server={{ puppet_fqdn }} --environment={{ puppet_environment }} 2>&1 | tee /root/puppet.boot
+      /opt/puppetlabs/puppet/bin/puppet agent -t --server={{ puppet_fqdn }} --environment={{ puppet_environment }} 2>&1 | tee /root/puppet.boot
+
+#end-of-file-marker
