@@ -51,7 +51,9 @@ def render(args):
                                       )
                               )
 
-    ssh_authorized_keys = args.authorized_keys.read_text().splitlines()
+    ak = args.authorized_keys
+    ssh_authorized_keys = [line for line in ak.read_text().splitlines() \
+                           if not line.strip().startswith('#')]
 
     for host_path in host_paths: 
         hostname = host_path.stem
