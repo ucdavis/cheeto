@@ -4,7 +4,7 @@
     size: largest
   ptable: gpt
   name: ''
-  grub_device: true
+  grub_device: false
   type: disk
   preserve: false
   wipe: superblock-recursive
@@ -14,7 +14,7 @@
     size: largest
   ptable: gpt
   name: ''
-  grub_device: true
+  grub_device: false
   type: disk
   preserve: false
   wipe: superblock-recursive
