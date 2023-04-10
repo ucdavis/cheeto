@@ -33,7 +33,7 @@ class PuppetAutofs(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetZFS(BaseModel):
-    quota: ZFSQuota
+    quota: DataQuota
 
 
 @require_kwargs
@@ -41,6 +41,35 @@ class PuppetZFS(BaseModel):
 class PuppetUserStorage(BaseModel):
     zfs: Union[PuppetZFS, bool]
     autofs: Optional[PuppetAutofs]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetSlurmQOSTRES(BaseModel):
+    cpus: Optional[UInt32] = None
+    gpus: Optional[UInt32] = None
+    mem: Optional[DataQuota] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetSlurmQOS(BaseModel):
+    group: PuppetSlurmQOSTRES
+    job: Optional[PuppetSlurmQOSTRES] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetSlurmPartition(BaseModel):
+    name: str
+    qos: Optional[PuppetSlurmQOS] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetSlurmRecord(BaseModel):
+    partitions: List[PuppetSlurmPartition]
+    account: Optional[KerberosID] = None
 
 
 @require_kwargs
@@ -88,6 +117,7 @@ class PuppetGroupRecord(BaseModel):
     tag: Optional[List[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
+    slurm: Optional[PuppetSlurmRecord] = None
 
 
 @require_kwargs

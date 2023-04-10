@@ -52,13 +52,13 @@ PuppetMembership = NewType(
     "PuppetMembership", str, validate=mv.OneOf(("inclusive", "minimum"))
 )
 
-LinuxUID = NewType(
-    "LinuxUID", int, validate=mv.Range(min=0, max=UINT_MAX)
+UInt32 = NewType(
+    "UInt32", int, validate=mv.Range(min=0, max=UINT_MAX)
 )
 
-LinuxGID = NewType(
-    "LinuxGID", int, validate=mv.Range(min=0, max=UINT_MAX)
-)
+LinuxUID = UInt32
+
+LinuxGID = UInt32
 
 # TODO: Needs to actually be "x" or "min length"
 LinuxPassword = NewType(
@@ -78,6 +78,6 @@ Shell = NewType(
     )
 )
 
-ZFSQuota = NewType(
-    "ZFSQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MGTP]')
+DataQuota = NewType(
+    "DataQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]')
 )
