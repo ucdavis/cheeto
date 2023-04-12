@@ -48,7 +48,7 @@ class PuppetUserStorage(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
-class PuppetSlurmQOSTRES(BaseModel):
+class SlurmQOSTRES(BaseModel):
     cpus: Optional[UInt32] = None
     gpus: Optional[UInt32] = None
     mem: Optional[DataQuota] = None
@@ -56,23 +56,35 @@ class PuppetSlurmQOSTRES(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
-class PuppetSlurmQOS(BaseModel):
-    group: PuppetSlurmQOSTRES
-    job: Optional[PuppetSlurmQOSTRES] = None
+class SlurmQOS(BaseModel):
+    group: SlurmQOSTRES
+    job: Optional[SlurmQOSTRES] = None
+
+    def to_slurm(self):
+        tokens = []
+        for res, val in asdict(self.group).items():
+            if val is not None:
+                tokens.append(f'Grp{res.capitalize()}={val}')
+        if self.job is not None:
+            for res, val in asdict(self.job).items():
+                if val is not None:
+                    tokens.append(f'Max{res.capitalize()}={val}')
+        return tokens
 
 
 @require_kwargs
 @dataclass(frozen=True)
-class PuppetSlurmPartition(BaseModel):
+class SlurmPartition(BaseModel):
     name: str
-    qos: Optional[PuppetSlurmQOS] = None
+    qos: Optional[SlurmQOS] = None
 
 
 @require_kwargs
 @dataclass(frozen=True)
-class PuppetSlurmRecord(BaseModel):
-    partitions: List[PuppetSlurmPartition]
+class SlurmRecord(BaseModel):
+    partitions: Mapping[str, SlurmPartition]
     account: Optional[KerberosID] = None
+    max_jobs: Optional[UInt32] = None
 
 
 @require_kwargs
@@ -92,9 +104,6 @@ class PuppetUserRecord(BaseModel):
     membership: Optional[PuppetMembership] = None
 
     storage: Optional[PuppetUserStorage] = None
-
-    class Meta:
-        ordered = True
 
 
 @require_kwargs
@@ -120,8 +129,8 @@ class PuppetGroupRecord(BaseModel):
     tag: Optional[List[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
-    slurm: Optional[PuppetSlurmRecord] = None
-
+    slurm: Optional[SlurmRecord] = None
+    
 
 @require_kwargs
 @dataclass(frozen=True)
