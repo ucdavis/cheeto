@@ -12,8 +12,20 @@ import os
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
+from mergedeep import merge, Strategy
+from ruamel import yaml as ryaml
 
 __pkg_dir__ = Path(__file__).resolve().parent
+
+
+def parse_yaml(filename):
+    with open(filename) as fp:
+        return ryaml.safe_load(fp)
+
+
+def puppet_merge(*dicts):
+    return merge(*dicts, strategy=Strategy.ADDITIVE)
+
 
 _T = TypeVar("_T")
 _Self = TypeVar("_Self")

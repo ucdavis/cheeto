@@ -7,7 +7,8 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 21.02.2023
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
+from enum import StrEnum, auto
 import os
 from typing import Optional, List, Mapping, Union
 import sys
@@ -19,9 +20,8 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from .types import *
-from .utils import require_kwargs
-from .yaml import parse_yaml, puppet_merge
-
+from .utils import require_kwargs, parse_yaml, puppet_merge
+from . import _yaml
 
 @require_kwargs
 @dataclass(frozen=True)

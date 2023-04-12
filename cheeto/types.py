@@ -7,21 +7,36 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 22.03.2023
 
+from collections import OrderedDict
+import dataclasses
+
 from marshmallow import validate as mv
 from marshmallow import fields as mf
+from marshmallow import post_dump
 from marshmallow_dataclass import NewType
 
-from mashumaro.config import (BaseConfig,
-                              TO_DICT_ADD_OMIT_NONE_FLAG)
-from mashumaro.mixins.yaml import DataClassYAMLMixin
-
+from . import _yaml
 
 UINT_MAX = 4_294_967_296
 
 
-class BaseModel(DataClassYAMLMixin):
-    class Config(BaseConfig):
-        code_generation_options = [TO_DICT_ADD_OMIT_NONE_FLAG]
+class BaseModel:
+
+    SKIP_VALUES = [None]
+
+    def items(self):
+        return dataclasses.asdict(self).items()
+
+    @post_dump
+    def remove_skip_values(self, data, **kwargs):
+        return OrderedDict([
+            (key, value) for key, value in data.items()
+            if value not in BaseModel.SKIP_VALUES
+        ])
+
+    class Meta:
+        ordered = True
+        render_module = _yaml
 
 
 KerberosID = NewType(
