@@ -20,7 +20,10 @@ from rich.console import Console
 from rich.syntax import Syntax
 
 from .types import *
-from .utils import require_kwargs, parse_yaml, puppet_merge
+from .utils import (require_kwargs,
+                    parse_yaml,
+                    puppet_merge,
+                    EnumAction)
 from . import _yaml
 
 @require_kwargs
@@ -155,15 +158,47 @@ class PuppetAccountMap(BaseModel):
     share: Optional[Mapping[str, PuppetShareRecord]] = None
 
 
-PuppetUserRecordSchema  = marshmallow_dataclass.class_schema(PuppetUserRecord)
-PuppetUserMapSchema     = marshmallow_dataclass.class_schema(PuppetUserMap)
-PuppetGroupRecordSchema = marshmallow_dataclass.class_schema(PuppetGroupRecord)
-PuppetGroupMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)
-PuppetAccountMapSchema  = marshmallow_dataclass.class_schema(PuppetAccountMap)
+PuppetUserRecordSchema  = marshmallow_dataclass.class_schema(PuppetUserRecord)()
+PuppetUserMapSchema     = marshmallow_dataclass.class_schema(PuppetUserMap)()
+PuppetGroupRecordSchema = marshmallow_dataclass.class_schema(PuppetGroupRecord)()
+PuppetGroupMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)()
+PuppetAccountMapSchema  = marshmallow_dataclass.class_schema(PuppetAccountMap)()
+
+
+class MergeStrategy(StrEnum):
+    ALL = auto()
+    PREFIX = auto()
+    NONE = auto()
+
+
+def load_yaml_tree(yaml_files,
+                   merge_on=MergeStrategy.NONE,
+                   strict=True):
+
+    yaml_tree = {}
+    if merge_on is MergeStrategy.ALL:
+        parsed_yamls = (parse_yaml(f) for f in yaml_files)
+        yaml_tree = {'merged-all': puppet_merge(*parsed_yamls)}
+    elif merge_on is MergeStrategy.NONE:
+        yaml_tree = {f: parse_yaml(f) for f in yaml_files}
+    elif merge_on is MergeStrategy.PREFIX:
+        file_groups = {}
+        for filename in yaml_files:
+            prefix, _, _ = os.path.basename(filename).partition('.')
+            if prefix in file_groups:
+                file_groups[prefix].append(parse_yaml(filename))
+            else:
+                file_groups[prefix] = [parse_yaml(filename)]
+        yaml_tree = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
+
+    return yaml_tree
 
 
 def add_validate_args(parser):
-    parser.add_argument('--merge', action='store_true', default=False,
+    parser.add_argument('--merge',
+                        default=MergeStrategy.NONE,
+                        type=MergeStrategy,
+                        action=EnumAction,
                         help='Merge the given YAML files before validation.')
     parser.add_argument('--dump', default='/dev/stdout',
                         help='Dump the validated YAML to the given file')
@@ -178,28 +213,23 @@ def validate_yamls(args):
 
     console = Console(stderr=True)
 
-    parsed_yamls = []
-    for filename in args.files:
-        parsed_yamls.append(parse_yaml(filename))
-
-    if args.merge:
-        parsed_yamls = [('merged', puppet_merge(*parsed_yamls))]
-    else:
-        parsed_yamls = zip(args.files, parsed_yamls)
+    yaml_tree = load_yaml_tree(args.files,
+                               merge_on=args.merge,
+                               strict=args.strict)
     
-    for source_file, yaml_obj in parsed_yamls:
+    for source_file, yaml_obj in yaml_tree.items():
         if not args.quiet:
             console.rule(source_file, style='blue')
 
         try:
-            puppet_data = PuppetAccountMapSchema().load(yaml_obj)
+            puppet_data = PuppetAccountMapSchema.load(yaml_obj)
         except marshmallow.exceptions.ValidationError as e:
             rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
             if args.strict:
                 sys.exit(1)
             continue
 
-        output_yaml = puppet_data.to_yaml(omit_none=True)
+        output_yaml = PuppetAccountMapSchema.dumps(puppet_data)
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',
