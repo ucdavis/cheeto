@@ -60,6 +60,7 @@ class SlurmQOSTRES(BaseModel):
 class SlurmQOS(BaseModel):
     group: SlurmQOSTRES
     job: Optional[SlurmQOSTRES] = None
+    priority: Optional[int] = None
 
     def to_slurm(self):
         tokens = []
