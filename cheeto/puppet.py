@@ -7,7 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 21.02.2023
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 from enum import StrEnum, auto
 import os
 from typing import Optional, List, Mapping, Union
@@ -15,6 +15,7 @@ import sys
 
 import marshmallow
 import marshmallow_dataclass
+from marshmallow_dataclass import dataclass
 from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
@@ -43,7 +44,7 @@ class PuppetZFS(BaseModel):
 @dataclass(frozen=True)
 class PuppetUserStorage(BaseModel):
     zfs: Union[PuppetZFS, bool]
-    autofs: Optional[PuppetAutofs]
+    autofs: Optional[PuppetAutofs] = None
 
 
 @require_kwargs
@@ -75,16 +76,21 @@ class SlurmQOS(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmPartition(BaseModel):
-    name: str
     qos: Optional[SlurmQOS] = None
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    partitions: Mapping[str, SlurmPartition]
-    account: Optional[KerberosID] = None
+    partitions: Optional[Mapping[str, SlurmPartition]] = None
+    account: Optional[Union[KerberosID, List[KerberosID]]] = None
     max_jobs: Optional[UInt32] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmRecordMap(BaseModel):
+    pass
 
 
 @require_kwargs
@@ -167,20 +173,13 @@ class PuppetAccountMap(BaseModel):
     share: Optional[Mapping[str, PuppetShareRecord]] = None
 
 
-PuppetUserRecordSchema  = marshmallow_dataclass.class_schema(PuppetUserRecord)()
-PuppetUserMapSchema     = marshmallow_dataclass.class_schema(PuppetUserMap)()
-PuppetGroupRecordSchema = marshmallow_dataclass.class_schema(PuppetGroupRecord)()
-PuppetGroupMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)()
-PuppetAccountMapSchema  = marshmallow_dataclass.class_schema(PuppetAccountMap)()
-
-
 class MergeStrategy(StrEnum):
     ALL = auto()
     PREFIX = auto()
     NONE = auto()
 
 
-def load_yaml_tree(yaml_files,
+def parse_yaml_tree(yaml_files,
                    merge_on=MergeStrategy.NONE,
                    strict=True):
 
@@ -209,6 +208,10 @@ def add_validate_args(parser):
                         type=MergeStrategy,
                         action=EnumAction,
                         help='Merge the given YAML files before validation.')
+    parser.add_argument('--partial',
+                        default=False,
+                        action='store_true',
+                        help='Allow partial loading (ie missing keys).')
     parser.add_argument('--dump', default='/dev/stdout',
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
@@ -222,23 +225,24 @@ def validate_yamls(args):
 
     console = Console(stderr=True)
 
-    yaml_tree = load_yaml_tree(args.files,
-                               merge_on=args.merge,
-                               strict=args.strict)
+    yaml_tree = parse_yaml_tree(args.files,
+                                merge_on=args.merge,
+                                strict=args.strict)
     
     for source_file, yaml_obj in yaml_tree.items():
         if not args.quiet:
             console.rule(source_file, style='blue')
 
         try:
-            puppet_data = PuppetAccountMapSchema.load(yaml_obj)
+            puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
+                                                         partial=args.partial)
         except marshmallow.exceptions.ValidationError as e:
             rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
             if args.strict:
                 sys.exit(1)
             continue
 
-        output_yaml = PuppetAccountMapSchema.dumps(puppet_data)
+        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data)
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',
