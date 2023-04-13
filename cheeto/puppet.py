@@ -58,7 +58,7 @@ class SlurmQOSTRES(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOS(BaseModel):
-    group: SlurmQOSTRES
+    group: SlurmQOSTRES = None
     job: Optional[SlurmQOSTRES] = None
     priority: Optional[int] = None
 
@@ -83,8 +83,8 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    partitions: Optional[Mapping[str, SlurmPartition]] = None
     account: Optional[Union[KerberosID, List[KerberosID]]] = None
+    partitions: Optional[Mapping[str, SlurmPartition]] = None
     max_jobs: Optional[UInt32] = None
 
 
