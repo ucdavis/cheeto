@@ -123,7 +123,8 @@ class PuppetUserMap(BaseModel):
 class PuppetGroupStorage(BaseModel):
     name: str
     owner: KerberosID
-    autofs: Optional[PuppetAutofs]
+    group: Optional[KerberosID] = None
+    autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
 
 
@@ -237,7 +238,8 @@ def validate_yamls(args):
             puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
                                                          partial=args.partial)
         except marshmallow.exceptions.ValidationError as e:
-            rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
+            rprint(f'[red]ValidationError:[/]', file=sys.stderr)
+            rprint(e.messages, file=sys.stderr)
             if args.strict:
                 sys.exit(1)
             continue
