@@ -20,13 +20,24 @@ from ruamel import yaml as ryaml
 __pkg_dir__ = Path(__file__).resolve().parent
 
 
-def parse_yaml(filename):
+def parse_yaml(filename: str) -> dict:
     with open(filename) as fp:
         return ryaml.safe_load(fp)
 
 
-def puppet_merge(*dicts):
+def puppet_merge(*dicts: dict) -> dict:
     return merge(*dicts, strategy=Strategy.ADDITIVE)
+
+
+def filter_nulls(d: dict) -> dict:
+    return {key: val for key, val in d.items() if val}
+
+
+def check_filter(d: dict, filter_on: dict):
+    for key, val in d.items():
+        if val in filter_on.get(key, []):
+            return True
+    return False
 
 
 class EnumAction(argparse.Action):

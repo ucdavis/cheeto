@@ -9,6 +9,7 @@
 
 from collections import OrderedDict
 import dataclasses
+from typing import TextIO
 
 from marshmallow import validate as mv
 from marshmallow import fields as mf
