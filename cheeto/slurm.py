@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.04.2023
 
+import csv
 from dataclasses import dataclass
 from io import StringIO
 import os
@@ -23,11 +24,13 @@ from .puppet import (SlurmQOSTRES,
                      SlurmQOS,
                      SlurmPartition,
                      SlurmRecord)
-from .utils import parse_yaml, puppet_merge
+from .utils import (parse_yaml,
+                    puppet_merge,
+                    check_filter)
 
 
 
-class SAcctMgrCmd:
+class SAcctMgr:
 
     def __init__(self, sacctmgr_path: str = None):
         if sacctmgr_path is None:
@@ -96,14 +99,28 @@ class SAcctMgrCmd:
         buf = StringIO()
         cmd = self.show_qos()
         cmd(_out=buf)
+        buf.seek(0)
         return build_qos_map(buf)
+
+
+def sanitize_tres(tres_string: str) -> dict:
+    if not tres_string:
+        return {}
+    tokens = tres_string.strip().split(',')
+    tres = {}
+    for token in tokens:
+        resource, _, value = token.partition('=')
+        resource = resource.removeprefix('gres/')
+        resource, _, resource_type = resource.partition(':') # for now we discard the type from resource:type
+        tres[resource] = value
+    return tres
 
 
 def build_qos_map(qos_file_pointer: TextIO,
                   filter_on: dict = {'Name': 'normal'}):
     qos_map = {}
     filtered_map = {}
-    for row in SAcctMgrCmd.get_show_parser(qos_file_pointer):
+    for row in SAcctMgr.get_show_parser(qos_file_pointer):
         
         filter_row = check_filter(row, filter_on)
     

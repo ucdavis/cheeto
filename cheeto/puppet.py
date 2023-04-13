@@ -8,7 +8,7 @@
 # Date   : 21.02.2023
 
 from dataclasses import asdict
-from enum import StrEnum, auto
+from enum import Enum
 import os
 from typing import Optional, List, Mapping, Union
 import sys
@@ -175,10 +175,10 @@ class PuppetAccountMap(BaseModel):
     share: Optional[Mapping[str, PuppetShareRecord]] = None
 
 
-class MergeStrategy(StrEnum):
-    ALL = auto()
-    PREFIX = auto()
-    NONE = auto()
+class MergeStrategy(Enum):
+    ALL = 'all'
+    PREFIX = 'prefix'
+    NONE = 'none'
 
 
 def parse_yaml_tree(yaml_files,
