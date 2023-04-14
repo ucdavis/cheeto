@@ -258,6 +258,13 @@ autoinstall:
           =h0KC
           -----END PGP PUBLIC KEY BLOCK-----
 
+  storage:
+    config:
+      {%- filter indent(6) %}
+      {%- block disks %}
+      {%- endblock disks %}
+      {%- endfilter %}
+
   ssh:
     install-server: yes
     authorized-keys:
@@ -268,23 +275,13 @@ autoinstall:
   packages:
     # All other packages brought in by the curtin puppet run
     - puppet-agent
-
-  storage:
-    config:
-      {%- filter indent(6) %}
-      {%- block disks %}
-      {%- endblock disks %}
-      {%- endfilter %}
+    - linux-generic-hwe-22.04
 
   # Auto-upgrade everything
   package_update: true
   package_upgrade: true
 
   late-commands:
-    - echo "{{ puppet_ip}} {{ puppet_fqdn }} puppet" >> /target/etc/hosts
-    - echo "vvvvvvvvvv Running puppet, this can take a while vvvvvvvvvv"
-    - curtin in-target --target=/target -- /opt/puppetlabs/puppet/bin/puppet agent -t --server=puppet.hpc.ucdavis.edu --environment={{ puppet_environment}} 2>&1 > /target/root/puppet.install || true
-    - echo "^^^^^^^^^^ Puppet finished ^^^^^^^^^^"
     - wget -O /dev/null http://{{cobbler_ip}}/cblr/svc/op/nopxe/system/{{ hostname }} 2>/dev/null || true
     - curtin in-target --target=/target -- /usr/bin/ssh-keygen -A
     # Make /tmp/ a symlink into /scratch/tmp/
@@ -292,6 +289,10 @@ autoinstall:
     - curtin in-target --target=/target -- chmod 1777 /scratch/ /scratch/tmp/
     - curtin in-target --target=/target -- rm -rf /tmp/
     - curtin in-target --target=/target -- ln -s /scratch/tmp /tmp
+    - echo "vvvvvvvvvv Running puppet, this can take a while vvvvvvvvvv"
+    - echo "[main]\nuse_srv_records = true\nsrv_domain = farm.hpc.ucdavis.edu.\n" >> /target/etc/puppetlabs/puppet/puppet.conf
+    - curtin in-target --target=/target -- /opt/puppetlabs/puppet/bin/puppet agent -t --server={{ puppet_fqdn }} --environment={{ puppet_environment}} 2>&1 > /target/root/puppet.install || true
+    - echo "^^^^^^^^^^ Puppet finished ^^^^^^^^^^"
 
   # run commands
   # default: none
@@ -306,9 +307,9 @@ autoinstall:
   #
   # Note, that the list has to be proper yaml, so you have to quote
   # any characters yaml would eat (':' can be problematic)
-  runcmd:
-    # Run puppet agent again at boot
-    - |
-      /opt/puppetlabs/puppet/bin/puppet agent -t --server={{ puppet_fqdn }} --environment={{ puppet_environment }} 2>&1 | tee /root/puppet.boot
+  #runcmd:
+  #  # Run puppet agent again at boot
+  #  - |
+  #    /opt/puppetlabs/puppet/bin/puppet agent -t --server={{ puppet_fqdn }} --environment={{ puppet_environment }} 2>&1 | tee /root/puppet.boot
 
 #end-of-file-marker
