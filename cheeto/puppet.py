@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 21.02.2023
 
+import argparse
 from dataclasses import asdict
 from enum import Enum
 import os
@@ -197,16 +198,17 @@ class MergeStrategy(Enum):
     NONE = 'none'
 
 
-def parse_yaml_tree(yaml_files,
-                   merge_on=MergeStrategy.NONE,
-                   strict=True):
+def parse_yaml_forest(yaml_files: list,
+                      merge_on: Optional[MergeStrategy] = MergeStrategy.NONE) -> dict:
 
-    yaml_tree = {}
+    yaml_forest = {}
     if merge_on is MergeStrategy.ALL:
         parsed_yamls = (parse_yaml(f) for f in yaml_files)
-        yaml_tree = {'merged-all': puppet_merge(*parsed_yamls)}
+        yaml_forest = {'merged-all': puppet_merge(*parsed_yamls)}
+
     elif merge_on is MergeStrategy.NONE:
-        yaml_tree = {f: parse_yaml(f) for f in yaml_files}
+        yaml_forest = {f: parse_yaml(f) for f in yaml_files}
+
     elif merge_on is MergeStrategy.PREFIX:
         file_groups = {}
         for filename in yaml_files:
@@ -215,51 +217,65 @@ def parse_yaml_tree(yaml_files,
                 file_groups[prefix].append(parse_yaml(filename))
             else:
                 file_groups[prefix] = [parse_yaml(filename)]
-        yaml_tree = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
+        yaml_forest = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
 
-    return yaml_tree
+    return yaml_forest
 
 
-def add_validate_args(parser):
+def validate_yaml_forest(yaml_forest: dict,
+                         strict: Optional[bool] = False,
+                         partial: Optional[bool] = False): 
+
+    for source_root, yaml_obj in yaml_forest.items():
+
+        try:
+            puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
+                                                         partial=partial)
+        except marshmallow.exceptions.ValidationError as e:
+            rprint(f'[red]ValidationError: {source_root}[/]', file=sys.stderr)
+            rprint(e.messages, file=sys.stderr)
+            if strict:
+                sys.exit(1)
+            continue
+        else:
+            yield source_root, puppet_data
+
+
+def add_yaml_load_args(parser: argparse.ArgumentParser):
     parser.add_argument('--merge',
                         default=MergeStrategy.NONE,
                         type=MergeStrategy,
                         action=EnumAction,
                         help='Merge the given YAML files before validation.')
+    parser.add_argument('--strict', action='store_true', default=False,
+                        help='Terminate on validation errors.')
     parser.add_argument('--partial',
                         default=False,
                         action='store_true',
                         help='Allow partial loading (ie missing keys).')
+
+
+def add_validate_args(parser: argparse.ArgumentParser):
+    add_yaml_load_args(parser)
     parser.add_argument('--dump', default='/dev/stdout',
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
-    parser.add_argument('--strict', action='store_true', default=False,
-                        help='Terminate on validation errors.')
     parser.add_argument('--quiet', default=False, action='store_true')
 
 
-def validate_yamls(args):
+def validate_yamls(args: argparse.Namespace):
 
     console = Console(stderr=True)
 
-    yaml_tree = parse_yaml_tree(args.files,
-                                merge_on=args.merge,
-                                strict=args.strict)
+    yaml_forest = parse_yaml_forest(args.files,
+                                    merge_on=args.merge,
+                                    strict=args.strict)
     
-    for source_file, yaml_obj in yaml_tree.items():
+    for source_file, puppet_data in validate_yaml_forest(yaml_forest,
+                                                         args.strict):
         if not args.quiet:
             console.rule(source_file, style='blue')
-
-        try:
-            puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
-                                                         partial=args.partial)
-        except marshmallow.exceptions.ValidationError as e:
-            rprint(f'[red]ValidationError:[/]', file=sys.stderr)
-            rprint(e.messages, file=sys.stderr)
-            if args.strict:
-                sys.exit(1)
-            continue
 
         output_yaml = PuppetAccountMap.Schema().dumps(puppet_data)
         hl_yaml = Syntax(output_yaml,
@@ -275,5 +291,5 @@ def validate_yamls(args):
                     print(output_yaml, file=fp)
 
         if args.dump != '/dev/stdout' and not args.quiet:
-            console.print()
+            console.print(hl_yaml)
 
