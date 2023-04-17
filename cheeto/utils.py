@@ -40,6 +40,18 @@ def check_filter(d: dict, filter_on: dict):
     return False
 
 
+def size_to_megs(size: str) -> int:
+    size = size.strip()
+    if size[-1] in 'Mm':
+        return int(float(size[:-1]))
+    if size[-1] in 'Gg':
+        return int(float(size[:-1]) * 1024)
+    if size[-1] in 'Tt':
+        return int(float(size[:-1]) * 1024 * 1024)
+    else:
+        raise ValueError(f'{size} is not an allowed value.')
+
+
 class EnumAction(argparse.Action):
     """
     Argparse action for handling Enums

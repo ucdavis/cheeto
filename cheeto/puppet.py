@@ -24,8 +24,10 @@ from .types import *
 from .utils import (require_kwargs,
                     parse_yaml,
                     puppet_merge,
-                    EnumAction)
+                    EnumAction,
+                    size_to_megs)
 from . import _yaml
+
 
 @require_kwargs
 @dataclass(frozen=True)
@@ -54,6 +56,12 @@ class SlurmQOSTRES(BaseModel):
     gpus: Optional[UInt32] = None
     mem: Optional[DataQuota] = None
 
+    @marshmallow.post_load
+    def convert_mem(self, in_data, **kwargs):
+        if in_data['mem'] is not None:
+            in_data['mem'] = f'{size_to_megs(in_data["mem"])}M'
+        return in_data
+
 
 @require_kwargs
 @dataclass(frozen=True)
@@ -64,13 +72,20 @@ class SlurmQOS(BaseModel):
 
     def to_slurm(self):
         tokens = []
-        for res, val in asdict(self.group).items():
-            if val is not None:
-                tokens.append(f'Grp{res.capitalize()}={val}')
+        if self.group is not None:
+            tres = {}
+            for k, v in asdict(self.group).items():
+                if v is None:
+                    v = -1
+                tres[k] = v
+            tokens.append(f'GrpCPUs={tres["cpus"]}')
+            tokens.append(f'GrpMem={size_to_megs(tres["mem"])}')
+            tokens.append(f'GrpTres=gres/gpu={tres["gpus"]}')
         if self.job is not None:
-            for res, val in asdict(self.job).items():
-                if val is not None:
-                    tokens.append(f'Max{res.capitalize()}={val}')
+            cpus = -1 if self.job.cpus is None else self.job.cpus
+            if self.job.cpus is not None:
+                tokens.append(f'MaxCpus={cpus}')
+        tokens.append(f'Priority={self.priority}')
         return tokens
 
 
@@ -111,6 +126,7 @@ class PuppetUserRecord(BaseModel):
     membership: Optional[PuppetMembership] = None
 
     storage: Optional[PuppetUserStorage] = None
+    slurm: Optional[SlurmRecord] = None
 
 
 @require_kwargs
