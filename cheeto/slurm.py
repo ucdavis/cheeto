@@ -442,10 +442,10 @@ def sync(args):
         if args.apply:
             for command in track(command_group):
                 try:
-                    console.out(f'Run: {command}', highlight=False)
+                    #console.out(f'Run: {command}', highlight=False)
                     command()
                 except sh.ErrorReturnCode_1 as e:
-                    console.print(f'Command Error: {e}')
+                    console.print(f'Command Error: {e}', highlight=False)
         else:
             for command in command_group:
                 console.out(str(command), highlight=False)
