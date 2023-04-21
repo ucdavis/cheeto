@@ -244,14 +244,26 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
 
 
 def build_puppet_qos_state(puppet_mapping: PuppetAccountMap) -> dict:
+    # Mapping of name-of-QOS => SlurmQOS
     qos_map = {}
 
+    qos_references = []
     for group_name, group in puppet_mapping.group.items():
         if group.slurm is None or group.slurm.partitions is None:
             continue
         for partition_name, partition in group.slurm.partitions.items():
+            # If it is a reference to another QOS, it will be put in the map
+            # where it is defined
+            if type(partition.qos) is str:
+                qos_references.append((group_name, partition_name, partition.qos))
+                continue
             qos_name = get_qos_name(group_name, partition_name)
             qos_map[qos_name] = partition.qos
+
+    # Validate that all QOS references actually exist
+    for group_name, partition_name, qos_name in qos_references:
+        if qos_name not in qos_map:
+            raise ValueError(f'{group_name} has invalid QoS for {partition_name}: {qos_name}')
 
     return qos_map
 
@@ -275,6 +287,7 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
                     group = puppet_mapping.group[group_name]
                     if group.slurm is not None and group.slurm.partitions is not None:
                         inherited_partitions.append((group_name, group.slurm.partitions))
+
         # Now via account associations
         if user.slurm is not None and user.slurm.account is not None:
             for account in user.slurm.account:
@@ -283,7 +296,10 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
 
         for account_name, partitions in inherited_partitions:
             for partition_name, partition in partitions.items():
-                qos_name = get_qos_name(account_name, partition_name)
+                if type(partition.qos) is str:
+                    qos_name = partition.qos
+                else:
+                    qos_name = get_qos_name(account_name, partition_name)
                 puppet_associations['users'][(user_name, account_name, partition_name)] = qos_name
 
     return puppet_associations
@@ -300,12 +316,13 @@ def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]
         else:
             new_qos = new_qoses[qos_name]
             if old_qos != new_qos:
+                print(f'old qos={qos_name} new_qos=', new_qos)
                 updates.append((qos_name, new_qos))
     
     for qos_name, new_qos in new_qoses.items():
         if qos_name not in old_qoses:
             additions.append((qos_name, new_qos))
-    
+   
     return deletions, updates, additions
 
 
@@ -445,7 +462,7 @@ def sync(args):
                     #console.out(f'Run: {command}', highlight=False)
                     command()
                 except sh.ErrorReturnCode_1 as e:
-                    console.print(f'Command Error: {e}', highlight=False)
+                    console.print(f'\nCommand Error: {e}', highlight=False)
         else:
             for command in command_group:
                 console.out(str(command), highlight=False)
