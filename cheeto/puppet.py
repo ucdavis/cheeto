@@ -93,7 +93,7 @@ class SlurmQOS(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmPartition(BaseModel):
-    qos: Optional[SlurmQOS] = None
+    qos: Optional[Union[SlurmQOS, str]] = None
 
 
 @require_kwargs
