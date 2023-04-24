@@ -12,6 +12,7 @@ import argparse
 from . import hippo
 from . import nocloud
 from . import puppet
+from . import slurm
 
 
 def add_common_args(parser):
@@ -38,6 +39,19 @@ def main():
     nocloud_parser.set_defaults(func=nocloud.render)
     add_common_args(nocloud_parser)
     nocloud.add_render_args(nocloud_parser)
+
+
+    slurm_parser = commands.add_parser('slurm')
+    slurm_commands = slurm_parser.add_subparsers()
+    slurm_show_qos_parser = slurm_commands.add_parser('show-qos')
+    add_common_args(slurm_show_qos_parser)
+    slurm_show_qos_parser.set_defaults(func=lambda args: print('QOS'))
+
+    slurm_sync_parser = slurm_commands.add_parser('sync')
+    add_common_args(slurm_sync_parser)
+    slurm.add_sync_args(slurm_sync_parser)
+    slurm_sync_parser.set_defaults(func = slurm.sync)
+    
 
     args = parser.parse_args()
     args.func(args)

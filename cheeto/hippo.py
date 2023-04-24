@@ -16,7 +16,7 @@ import marshmallow_dataclass
 from .puppet import PuppetUserRecord, PuppetUserMap
 from .utils import require_kwargs
 from .types import *
-from .yaml import parse_yaml
+from .utils import parse_yaml
 
 
 @require_kwargs

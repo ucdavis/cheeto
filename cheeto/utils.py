@@ -7,13 +7,77 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 17.02.2023
 
+import argparse
 from dataclasses import is_dataclass
+from enum import Enum
 import os
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
+from mergedeep import merge, Strategy
+from ruamel import yaml as ryaml
 
 __pkg_dir__ = Path(__file__).resolve().parent
+
+
+def parse_yaml(filename: str) -> dict:
+    with open(filename) as fp:
+        return ryaml.safe_load(fp)
+
+
+def puppet_merge(*dicts: dict) -> dict:
+    return merge(*dicts, strategy=Strategy.ADDITIVE)
+
+
+def filter_nulls(d: dict) -> dict:
+    return {key: val for key, val in d.items() if val}
+
+
+def check_filter(d: dict, filter_on: dict):
+    for key, val in d.items():
+        if val in filter_on.get(key, []):
+            return True
+    return False
+
+
+def size_to_megs(size: str) -> int:
+    size = size.strip()
+    if size[-1] in 'Mm':
+        return int(float(size[:-1]))
+    if size[-1] in 'Gg':
+        return int(float(size[:-1]) * 1024)
+    if size[-1] in 'Tt':
+        return int(float(size[:-1]) * 1024 * 1024)
+    else:
+        raise ValueError(f'{size} is not an allowed value.')
+
+
+class EnumAction(argparse.Action):
+    """
+    Argparse action for handling Enums
+    """
+    def __init__(self, **kwargs):
+        # Pop off the type value
+        enum = kwargs.pop("type", None)
+
+        # Ensure an Enum subclass is provided
+        if enum is None:
+            raise ValueError("type must be assigned an Enum when using EnumAction")
+        if not issubclass(enum, Enum):
+            raise TypeError("type must be an Enum when using EnumAction")
+
+        # Generate choices from the Enum
+        kwargs.setdefault("choices", tuple(e.name for e in enum))
+
+        super(EnumAction, self).__init__(**kwargs)
+
+        self._enum = enum
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # Convert value back into an Enum
+        enum = self._enum[values]
+        setattr(namespace, self.dest, enum)
+
 
 _T = TypeVar("_T")
 _Self = TypeVar("_Self")

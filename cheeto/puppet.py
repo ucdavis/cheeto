@@ -7,20 +7,27 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 21.02.2023
 
-from dataclasses import dataclass
+import argparse
+from dataclasses import asdict
+from enum import Enum
 import os
 from typing import Optional, List, Mapping, Union
 import sys
 
 import marshmallow
 import marshmallow_dataclass
+from marshmallow_dataclass import dataclass
 from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
 
 from .types import *
-from .utils import require_kwargs
-from .yaml import parse_yaml, puppet_merge
+from .utils import (require_kwargs,
+                    parse_yaml,
+                    puppet_merge,
+                    EnumAction,
+                    size_to_megs)
+from . import _yaml
 
 
 @require_kwargs
@@ -33,14 +40,74 @@ class PuppetAutofs(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetZFS(BaseModel):
-    quota: ZFSQuota
+    quota: DataQuota
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetUserStorage(BaseModel):
     zfs: Union[PuppetZFS, bool]
-    autofs: Optional[PuppetAutofs]
+    autofs: Optional[PuppetAutofs] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmQOSTRES(BaseModel):
+    cpus: Optional[UInt32] = None
+    gpus: Optional[UInt32] = None
+    mem: Optional[DataQuota] = None
+
+    @marshmallow.post_load
+    def convert_mem(self, in_data, **kwargs):
+        if in_data['mem'] is not None:
+            in_data['mem'] = f'{size_to_megs(in_data["mem"])}M'
+        return in_data
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmQOS(BaseModel):
+    group: SlurmQOSTRES = None
+    job: Optional[SlurmQOSTRES] = None
+    priority: Optional[int] = 0
+
+    def to_slurm(self):
+        tokens = []
+        if self.group is not None:
+            tres = {}
+            for k, v in asdict(self.group).items():
+                if v is None:
+                    v = -1
+                tres[k] = v
+            tokens.append(f'GrpCPUs={tres["cpus"]}')
+            tokens.append(f'GrpMem={size_to_megs(tres["mem"])}')
+            tokens.append(f'GrpTres=gres/gpu={tres["gpus"]}')
+        if self.job is not None:
+            cpus = -1 if self.job.cpus is None else self.job.cpus
+            if self.job.cpus is not None:
+                tokens.append(f'MaxCpus={cpus}')
+        tokens.append(f'Priority={self.priority}')
+        return tokens
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmPartition(BaseModel):
+    qos: Union[SlurmQOS, str]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmRecord(BaseModel):
+    account: Optional[Union[KerberosID, List[KerberosID]]] = None
+    partitions: Optional[Mapping[str, SlurmPartition]] = None
+    max_jobs: Optional[UInt32] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmRecordMap(BaseModel):
+    pass
 
 
 @require_kwargs
@@ -60,9 +127,7 @@ class PuppetUserRecord(BaseModel):
     membership: Optional[PuppetMembership] = None
 
     storage: Optional[PuppetUserStorage] = None
-
-    class Meta:
-        ordered = True
+    slurm: Optional[SlurmRecord] = None
 
 
 @require_kwargs
@@ -76,7 +141,8 @@ class PuppetUserMap(BaseModel):
 class PuppetGroupStorage(BaseModel):
     name: str
     owner: KerberosID
-    autofs: Optional[PuppetAutofs]
+    group: Optional[KerberosID] = None
+    autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
 
 
@@ -88,7 +154,8 @@ class PuppetGroupRecord(BaseModel):
     tag: Optional[List[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
-
+    slurm: Optional[SlurmRecord] = None
+    
 
 @require_kwargs
 @dataclass(frozen=True)
@@ -125,51 +192,92 @@ class PuppetAccountMap(BaseModel):
     share: Optional[Mapping[str, PuppetShareRecord]] = None
 
 
-PuppetUserRecordSchema  = marshmallow_dataclass.class_schema(PuppetUserRecord)
-PuppetUserMapSchema     = marshmallow_dataclass.class_schema(PuppetUserMap)
-PuppetGroupRecordSchema = marshmallow_dataclass.class_schema(PuppetGroupRecord)
-PuppetGroupMapSchema    = marshmallow_dataclass.class_schema(PuppetUserMap)
-PuppetAccountMapSchema  = marshmallow_dataclass.class_schema(PuppetAccountMap)
+class MergeStrategy(Enum):
+    ALL = 'all'
+    PREFIX = 'prefix'
+    NONE = 'none'
 
 
-def add_validate_args(parser):
-    parser.add_argument('--merge', action='store_true', default=False,
+def parse_yaml_forest(yaml_files: list,
+                      merge_on: Optional[MergeStrategy] = MergeStrategy.NONE) -> dict:
+
+    yaml_forest = {}
+    if merge_on is MergeStrategy.ALL:
+        parsed_yamls = (parse_yaml(f) for f in yaml_files)
+        yaml_forest = {'merged-all': puppet_merge(*parsed_yamls)}
+
+    elif merge_on is MergeStrategy.NONE:
+        yaml_forest = {f: parse_yaml(f) for f in yaml_files}
+
+    elif merge_on is MergeStrategy.PREFIX:
+        file_groups = {}
+        for filename in yaml_files:
+            prefix, _, _ = os.path.basename(filename).partition('.')
+            if prefix in file_groups:
+                file_groups[prefix].append(parse_yaml(filename))
+            else:
+                file_groups[prefix] = [parse_yaml(filename)]
+        yaml_forest = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
+
+    return yaml_forest
+
+
+def validate_yaml_forest(yaml_forest: dict,
+                         strict: Optional[bool] = False,
+                         partial: Optional[bool] = False): 
+
+    for source_root, yaml_obj in yaml_forest.items():
+
+        try:
+            puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
+                                                         partial=partial)
+        except marshmallow.exceptions.ValidationError as e:
+            rprint(f'[red]ValidationError: {source_root}[/]', file=sys.stderr)
+            rprint(e.messages, file=sys.stderr)
+            if strict:
+                sys.exit(1)
+            continue
+        else:
+            yield source_root, puppet_data
+
+
+def add_yaml_load_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--merge',
+                        default=MergeStrategy.NONE,
+                        type=MergeStrategy,
+                        action=EnumAction,
                         help='Merge the given YAML files before validation.')
+    parser.add_argument('--strict', action='store_true', default=False,
+                        help='Terminate on validation errors.')
+    parser.add_argument('--partial',
+                        default=False,
+                        action='store_true',
+                        help='Allow partial loading (ie missing keys).')
+
+
+def add_validate_args(parser: argparse.ArgumentParser):
+    add_yaml_load_args(parser)
     parser.add_argument('--dump', default='/dev/stdout',
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
-    parser.add_argument('--strict', action='store_true', default=False,
-                        help='Terminate on validation errors.')
     parser.add_argument('--quiet', default=False, action='store_true')
 
 
-def validate_yamls(args):
+def validate_yamls(args: argparse.Namespace):
 
     console = Console(stderr=True)
 
-    parsed_yamls = []
-    for filename in args.files:
-        parsed_yamls.append(parse_yaml(filename))
-
-    if args.merge:
-        parsed_yamls = [('merged', puppet_merge(*parsed_yamls))]
-    else:
-        parsed_yamls = zip(args.files, parsed_yamls)
+    yaml_forest = parse_yaml_forest(args.files,
+                                    merge_on=args.merge,
+                                    strict=args.strict)
     
-    for source_file, yaml_obj in parsed_yamls:
+    for source_file, puppet_data in validate_yaml_forest(yaml_forest,
+                                                         args.strict):
         if not args.quiet:
             console.rule(source_file, style='blue')
 
-        try:
-            puppet_data = PuppetAccountMapSchema().load(yaml_obj)
-        except marshmallow.exceptions.ValidationError as e:
-            rprint(f'[red]ValidationError:[/] {e}', file=sys.stderr)
-            if args.strict:
-                sys.exit(1)
-            continue
-
-        output_yaml = puppet_data.to_yaml(omit_none=True)
+        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data)
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',
@@ -183,5 +291,5 @@ def validate_yamls(args):
                     print(output_yaml, file=fp)
 
         if args.dump != '/dev/stdout' and not args.quiet:
-            console.print()
+            console.print(hl_yaml)
 

@@ -151,28 +151,6 @@ tests = ["pytest (>=5.4)", "pytest-mypy-plugins (>=1.2.0)"]
 union = ["typeguard (>=2.0.0,<4.0.0)"]
 
 [[package]]
-name = "mashumaro"
-version = "3.5"
-description = "Fast serialization framework on top of dataclasses"
-category = "main"
-optional = false
-python-versions = ">=3.7"
-files = [
-    {file = "mashumaro-3.5-py3-none-any.whl", hash = "sha256:2fc228b9153aef6273c86a33b049b819d62abea850ad60ba54b8801a546720a3"},
-    {file = "mashumaro-3.5.tar.gz", hash = "sha256:0b33fda1cd711950eab2bc0f28fecdf72b5ce80724095927146f70de23929451"},
-]
-
-[package.dependencies]
-pyyaml = {version = ">=3.13", optional = true, markers = "extra == \"yaml\""}
-typing-extensions = ">=4.1.0"
-
-[package.extras]
-msgpack = ["msgpack (>=0.5.6)"]
-orjson = ["orjson"]
-toml = ["tomli (>=1.1.0)", "tomli-w (>=1.0)"]
-yaml = ["pyyaml (>=3.13)"]
-
-[[package]]
 name = "mdurl"
 version = "0.1.2"
 description = "Markdown URL utilities"
@@ -368,6 +346,18 @@ files = [
 ]
 
 [[package]]
+name = "sh"
+version = "2.0.3"
+description = "Python subprocess replacement"
+category = "main"
+optional = false
+python-versions = ">=3.8.1,<4.0"
+files = [
+    {file = "sh-2.0.3-py3-none-any.whl", hash = "sha256:351f8968a2ed99755665fef62f038d60b5245999d73c2f1b1705f48b22e2a853"},
+    {file = "sh-2.0.3.tar.gz", hash = "sha256:800efeda403b63879b0a5625f65a0021fd1ea61ed181954da0346372a7b2a341"},
+]
+
+[[package]]
 name = "typeguard"
 version = "3.0.2"
 description = "Run-time type checker for Python"
@@ -417,4 +407,4 @@ typing-extensions = ">=3.7.4"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "bba0feab8e758765e26e795524293ed2c1e206651a0a7f90bcd3cf29b1eb3576"
+content-hash = "e7e2333cabb34d1bc7a011ee2536e4e2673035ebc7bd50dbc8558b6e4bf83faf"
