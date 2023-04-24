@@ -69,7 +69,7 @@ class SlurmQOSTRES(BaseModel):
 class SlurmQOS(BaseModel):
     group: SlurmQOSTRES = None
     job: Optional[SlurmQOSTRES] = None
-    priority: Optional[int] = None
+    priority: Optional[int] = 0
 
     def to_slurm(self):
         tokens = []
@@ -93,7 +93,7 @@ class SlurmQOS(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmPartition(BaseModel):
-    qos: Optional[Union[SlurmQOS, str]] = None
+    qos: Union[SlurmQOS, str]
 
 
 @require_kwargs
