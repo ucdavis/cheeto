@@ -316,7 +316,6 @@ def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]
         else:
             new_qos = new_qoses[qos_name]
             if old_qos != new_qos:
-                print(f'old qos={qos_name} new_qos=', new_qos)
                 updates.append((qos_name, new_qos))
     
     for qos_name, new_qos in new_qoses.items():
