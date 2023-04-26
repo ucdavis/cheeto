@@ -75,10 +75,8 @@ def convert_to_puppet(args):
         user = {hippo_record.account.kerb: user_record}
     )
 
-    yaml_output = user_map.to_yaml(omit_none=True)
-
     with open(args.puppet_file, 'w') as fp:
-        print(yaml_output, file=fp)
+        print(PuppetUserMap.Schema().dumps(user_map), file=fp)
 
     if args.key_dir:
         key_dest = os.path.join(args.key_dir,
