@@ -22,7 +22,10 @@ __pkg_dir__ = Path(__file__).resolve().parent
 
 def parse_yaml(filename: str) -> dict:
     with open(filename) as fp:
-        return ryaml.safe_load(fp)
+        parsed = ryaml.safe_load(fp)
+        if parsed is None:
+            return {}
+        return parsed
 
 
 def puppet_merge(*dicts: dict) -> dict:
