@@ -118,6 +118,7 @@ class PuppetUserRecord(BaseModel):
     uid: LinuxUID
     gid: LinuxGID
     groups: Optional[List[str]] = None
+    group_sudo: Optional[List[KerberosID]] = None
     password: Optional[LinuxPassword] = None
     shell: Optional[Shell] = None
     tag: Optional[List[str]] = None
@@ -203,7 +204,7 @@ def parse_yaml_forest(yaml_files: list,
 
     yaml_forest = {}
     if merge_on is MergeStrategy.ALL:
-        parsed_yamls = (parse_yaml(f) for f in yaml_files)
+        parsed_yamls = [parse_yaml(f) for f in yaml_files]
         yaml_forest = {'merged-all': puppet_merge(*parsed_yamls)}
 
     elif merge_on is MergeStrategy.NONE:
