@@ -270,8 +270,7 @@ def validate_yamls(args: argparse.Namespace):
     console = Console(stderr=True)
 
     yaml_forest = parse_yaml_forest(args.files,
-                                    merge_on=args.merge,
-                                    strict=args.strict)
+                                    merge_on=args.merge)
     
     for source_file, puppet_data in validate_yaml_forest(yaml_forest,
                                                          args.strict):
