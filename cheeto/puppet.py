@@ -11,7 +11,7 @@ import argparse
 from dataclasses import asdict
 from enum import Enum
 import os
-from typing import Optional, List, Mapping, Union
+from typing import Optional, List, Mapping, Union, Set
 import sys
 
 import marshmallow
@@ -117,11 +117,11 @@ class PuppetUserRecord(BaseModel):
     email: Email
     uid: LinuxUID
     gid: LinuxGID
-    groups: Optional[List[str]] = None
+    groups: Optional[Set[str]] = None
     group_sudo: Optional[List[KerberosID]] = None
     password: Optional[LinuxPassword] = None
     shell: Optional[Shell] = None
-    tag: Optional[List[str]] = None
+    tag: Optional[Set[str]] = None
     home: Optional[str] = None
 
     ensure: Optional[PuppetEnsure] = None
@@ -152,7 +152,7 @@ class PuppetGroupStorage(BaseModel):
 class PuppetGroupRecord(BaseModel):
     gid: LinuxGID
     ensure: Optional[PuppetEnsure] = None
-    tag: Optional[List[str]] = None
+    tag: Optional[Set[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
     slurm: Optional[SlurmRecord] = None
