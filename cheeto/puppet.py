@@ -15,6 +15,7 @@ from typing import Optional, List, Mapping, Union, Set
 import sys
 
 import marshmallow
+from marshmallow import post_dump
 import marshmallow_dataclass
 from marshmallow_dataclass import dataclass
 from rich import print as rprint
@@ -130,6 +131,13 @@ class PuppetUserRecord(BaseModel):
     storage: Optional[PuppetUserStorage] = None
     slurm: Optional[SlurmRecord] = None
 
+    @post_dump
+    def sort(self, item, **kwargs):
+        if 'groups' in item:
+            item['groups'] = sorted(item['groups'])
+        if 'tag' in item:
+            item['tag'] = sorted(item['tag'])
+        return item
 
 @require_kwargs
 @dataclass(frozen=True)
@@ -156,6 +164,12 @@ class PuppetGroupRecord(BaseModel):
 
     storage: Optional[List[PuppetGroupStorage]] = None
     slurm: Optional[SlurmRecord] = None
+
+    @post_dump
+    def sort(self, item, **kwargs):
+        if 'tag' in item:
+            item['tag'] = sorted(item['tag'])
+        return item
     
 
 @require_kwargs
