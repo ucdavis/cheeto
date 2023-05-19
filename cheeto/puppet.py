@@ -22,6 +22,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
 
+from .errors import ExitCode
 from .types import *
 from .utils import (require_kwargs,
                     parse_yaml,
@@ -139,10 +140,31 @@ class PuppetUserRecord(BaseModel):
             item['tag'] = sorted(item['tag'])
         return item
 
+
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetUserMap(BaseModel):
     user: Mapping[KerberosID, PuppetUserRecord]
+
+    @staticmethod
+    def global_dumper():
+        return PuppetUserMap.Schema(only=['user.fullname',
+                                          'user.email',
+                                          'user.uid',
+                                          'user.gid',
+                                          'user.password',
+                                          'user.shell'])
+
+    @staticmethod
+    def site_dumper():
+        return PuppetUserMap.Schema(only=['user.groups',
+                                          'user.group_sudo',
+                                          'user.tag',
+                                          'user.home',
+                                          'user.ensure',
+                                          'user.membership',
+                                          'user.storage',
+                                          'user.slurm'])
 
 
 @require_kwargs
@@ -215,7 +237,6 @@ class MergeStrategy(Enum):
 
 def parse_yaml_forest(yaml_files: list,
                       merge_on: Optional[MergeStrategy] = MergeStrategy.NONE) -> dict:
-
     yaml_forest = {}
     if merge_on is MergeStrategy.ALL:
         parsed_yamls = [parse_yaml(f) for f in yaml_files]
@@ -238,19 +259,23 @@ def parse_yaml_forest(yaml_files: list,
 
 
 def validate_yaml_forest(yaml_forest: dict,
+                         MapSchema: Union[PuppetAccountMap,
+                                          PuppetGroupMap,
+                                          PuppetUserMap,
+                                          PuppetShareMap],
                          strict: Optional[bool] = False,
                          partial: Optional[bool] = False): 
 
     for source_root, yaml_obj in yaml_forest.items():
 
         try:
-            puppet_data = PuppetAccountMap.Schema().load(yaml_obj,
-                                                         partial=partial)
+            puppet_data = MapSchema.Schema().load(yaml_obj,
+                                                  partial=partial)
         except marshmallow.exceptions.ValidationError as e:
             rprint(f'[red]ValidationError: {source_root}[/]', file=sys.stderr)
             rprint(e.messages, file=sys.stderr)
             if strict:
-                sys.exit(1)
+                sys.exit(ExitCode.VALIDATION_ERROR)
             continue
         else:
             yield source_root, puppet_data
@@ -287,6 +312,7 @@ def validate_yamls(args: argparse.Namespace):
                                     merge_on=args.merge)
     
     for source_file, puppet_data in validate_yaml_forest(yaml_forest,
+                                                         PuppetAccountMap,
                                                          args.strict):
         if not args.quiet:
             console.rule(source_file, style='blue')

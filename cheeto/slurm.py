@@ -429,6 +429,7 @@ def sync(args):
                                     merge_on=MergeStrategy.ALL)
     # Generator only yields one item with MergeStrategy.ALL
     _, puppet_data = next(validate_yaml_forest(yaml_forest,
+                                               PuppetAccountMap,
                                                strict=True))
 
     console.print('Building Puppet associations table...')
