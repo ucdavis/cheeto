@@ -9,7 +9,7 @@
 
 import argparse
 from dataclasses import is_dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 import os
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
@@ -41,6 +41,12 @@ def check_filter(d: dict, filter_on: dict):
         if val in filter_on.get(key, []):
             return True
     return False
+
+
+def get_relative_path(lower_path: Path, upper_path: Path):
+    diff = lower_path.relative_to(upper_path)
+    levels = len(diff.parents)
+    return Path.joinpath(*([Path('..')] * levels))
 
 
 def size_to_megs(size: str) -> int:

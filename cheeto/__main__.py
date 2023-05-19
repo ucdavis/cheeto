@@ -24,11 +24,19 @@ def main():
     parser.set_defaults(func = lambda _: parser.print_help())
     commands = parser.add_subparsers()
 
-    hippo_convert_parser = commands.add_parser('hippo-convert',
-                                               description='Convert HIPPO yaml to puppet.hpc format.')
+
+    hippo_parser = commands.add_parser('hippo')
+    hippo_commands = hippo_parser.add_subparsers()
+    hippo_convert_parser = hippo_commands.add_parser('convert')
     add_common_args(hippo_convert_parser)
     hippo_convert_parser.set_defaults(func=hippo.convert_to_puppet)
     hippo.add_convert_args(hippo_convert_parser)
+
+    hippo_sanitize_parser = hippo_commands.add_parser('sanitize')
+    add_common_args(hippo_sanitize_parser)
+    hippo.add_sanitize_args(hippo_sanitize_parser)
+    hippo_sanitize_parser.set_defaults(func=hippo.sanitize)
+
 
     validate_puppet_parser = commands.add_parser('validate-puppet')
     validate_puppet_parser.set_defaults(func=puppet.validate_yamls)
