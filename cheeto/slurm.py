@@ -462,6 +462,8 @@ def sync(args):
     report = {}
     for command_group_name, slurm_op, command_group in command_queue:
         group_report = {'successes': 0, 'failures': 0, 'commands': len(command_group)}
+        report[slurm_op.name] = group_report
+
         if not command_group:
             continue
 
@@ -479,7 +481,5 @@ def sync(args):
         else:
             for command in command_group:
                 console.out(str(command), highlight=False)
-        
-        report[slurm_op.name] = group_report
 
     print(json.dumps(report)) 
