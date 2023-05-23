@@ -482,4 +482,4 @@ def sync(args):
             for command in command_group:
                 console.out(str(command), highlight=False)
 
-    print(json.dumps(report)) 
+    print(json.dumps(report, indent=2)) 
