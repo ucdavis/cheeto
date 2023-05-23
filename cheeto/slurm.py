@@ -8,8 +8,9 @@
 # Date   : 10.04.2023
 
 import csv
-from dataclasses import dataclass
+from enum import Enum, auto
 from io import StringIO
+import json
 import os
 import sys
 from typing import Tuple, Optional
@@ -17,7 +18,6 @@ from typing import Tuple, Optional
 from rich import print as rprint
 from rich.console import Console
 from rich.progress import track
-from rich.syntax import Syntax
 import sh
 
 from .types import *
@@ -26,12 +26,8 @@ from .puppet import (parse_yaml_forest,
                      MergeStrategy,
                      PuppetAccountMap,
                      SlurmQOSTRES,
-                     SlurmQOS,
-                     SlurmPartition,
-                     SlurmRecord)
-from .utils import (parse_yaml,
-                    puppet_merge,
-                    check_filter,
+                     SlurmQOS)
+from .utils import (check_filter,
                     filter_nulls)
 
 
@@ -41,7 +37,7 @@ class SAcctMgr:
     def __init__(self, sacctmgr_path: str = None,
                        sudo: bool = False):
         if sacctmgr_path is None:
-            self.sacctmgr_path = sh.which('sacctmgr').strip()
+            self.sacctmgr_path = sh.which('sacctmgr').strip() #type: ignore
         else:
             self.sacctmgr_path = sacctmgr_path
 
@@ -67,7 +63,7 @@ class SAcctMgr:
     def modify_account(self, account_name: str,
                              max_jobs: int) -> sh.Command:
         if max_jobs is None:
-            max_jobs = '-1'
+            max_jobs = -1
         return self.modify.bake('account',
                                 account_name,
                                 'set',
@@ -167,13 +163,13 @@ def sanitize_tres(tres_string: str) -> dict:
     for token in tokens:
         resource, _, value = token.partition('=')
         resource = resource.removeprefix('gres/')
-        resource, _, resource_type = resource.partition(':') # for now we discard the type from resource:type
+        resource, _, _ = resource.partition(':') # for now we discard the type from resource:type
         tres[resource] = value
 
     return tres
 
 
-def build_puppet_tres(tres_string: str) -> SlurmQOSTRES:
+def build_puppet_tres(tres_string: str) -> Optional[dict]:
     slurm_tres = sanitize_tres(tres_string)
     if any((item is not None for item in slurm_tres.values())):
         puppet_tres = dict(cpus=slurm_tres.get('cpu', None),
@@ -196,9 +192,9 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         puppet_grp_tres = build_puppet_tres(row['GrpTRES'])
         puppet_max_tres = build_puppet_tres(row['MaxTRES'])
 
-        puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres,
-                              job=puppet_max_tres,
-                              priority=row['Priority']))
+        puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres, #type: ignore
+                                                 job=puppet_max_tres,
+                                                 priority=row['Priority'])) 
         
         if filter_row:
             filtered_map[row['Name']] = puppet_qos
@@ -238,7 +234,7 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
                     print(f'Overwriting {assoc_key}:', associations['users'][assoc_key], 'with', qos_name)
                 associations['users'][assoc_key] = qos_name
         else:
-            print(row)
+            print(row, file=sys.stderr)
 
     return associations
 
@@ -283,15 +279,15 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
         # Get groups first...
         if user.groups is not None:
             for group_name in user.groups:
-                if group_name in puppet_mapping.group:
-                    group = puppet_mapping.group[group_name]
+                if group_name in puppet_mapping.group: #type: ignore
+                    group = puppet_mapping.group[group_name] #type: ignore
                     if group.slurm is not None and group.slurm.partitions is not None:
                         inherited_partitions.append((group_name, group.slurm.partitions))
 
         # Now via account associations
         if user.slurm is not None and user.slurm.account is not None:
             for account in user.slurm.account:
-                group = puppet_mapping.group[account]
+                group = puppet_mapping.group[account] #type: ignore
                 inherited_partitions.append((account, group.slurm.partitions))
 
         for account_name, partitions in inherited_partitions:
@@ -365,6 +361,18 @@ def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, li
     return deletions, updates, additions
 
 
+class SlurmOp(Enum):
+    ADD_QOS = auto()
+    ADD_USER = auto()
+    ADD_ACCOUNT = auto()
+    MODIFY_QOS = auto()
+    MODIFY_USER = auto()
+    MODIFY_ACCOUNT = auto()
+    DELETE_QOS = auto()
+    DELETE_USER = auto()
+    DELETE_ACCOUNT = auto()
+
+
 def generate_commands(slurm_associations: dict,
                       slurm_qoses: dict, 
                       puppet_associations: dict,
@@ -384,23 +392,23 @@ def generate_commands(slurm_associations: dict,
     
     command_queue = []
     
-    command_queue.append(('Add New QOSes', 
+    command_queue.append(('Add New QOSes', SlurmOp.ADD_QOS,
                           [sacctmgr.add_qos(*addition) for addition in qos_additions]))
-    command_queue.append(('Modify QOSes', 
+    command_queue.append(('Modify QOSes', SlurmOp.MODIFY_QOS,
                           [sacctmgr.modify_qos(*update) for update in qos_updates]))
-    command_queue.append(('Modify Users',
+    command_queue.append(('Modify Users', SlurmOp.MODIFY_USER,
                           [sacctmgr.modify_user_qos(*update) for update in user_updates]))
-    command_queue.append(('Delete Users',
+    command_queue.append(('Delete Users', SlurmOp.DELETE_USER,
                           [sacctmgr.remove_user(*deletion) for deletion in user_deletions]))
-    command_queue.append(('Delete QOSes',
+    command_queue.append(('Delete QOSes', SlurmOp.DELETE_QOS,
                           [sacctmgr.remove_qos(deletion) for deletion in qos_deletions]))
-    command_queue.append(('Add New Accounts',
+    command_queue.append(('Add New Accounts', SlurmOp.ADD_ACCOUNT,
                           [sacctmgr.add_account(*addition) for addition in account_additions]))
-    command_queue.append(('Modify Accounts',
+    command_queue.append(('Modify Accounts', SlurmOp.MODIFY_ACCOUNT,
                           [sacctmgr.modify_account(*update) for update in account_updates]))
-    command_queue.append(('Add New Users',
+    command_queue.append(('Add New Users', SlurmOp.ADD_USER,
                           [sacctmgr.add_user(*addition) for addition in user_additions]))
-    command_queue.append(('Delete Accounts',
+    command_queue.append(('Delete Accounts', SlurmOp.DELETE_ACCOUNT,
                           [sacctmgr.remove_account(deletion) for deletion in account_deletions]))
 
     return command_queue
@@ -451,7 +459,9 @@ def sync(args):
                                       puppet_qos_map,
                                       sacctmgr=sacctmgr)
 
-    for command_group_name, command_group in command_queue:
+    report = {}
+    for command_group_name, slurm_op, command_group in command_queue:
+        group_report = {'successes': 0, 'failures': 0, 'commands': len(command_group)}
         if not command_group:
             continue
 
@@ -461,8 +471,15 @@ def sync(args):
                 try:
                     #console.out(f'Run: {command}', highlight=False)
                     command()
-                except sh.ErrorReturnCode_1 as e:
+                except sh.ErrorReturnCode_1 as e: #type: ignore
                     console.print(f'\nCommand Error: {e}', highlight=False)
+                    group_report['failures'] += 1
+                else:
+                    group_report['successes'] += 1
         else:
             for command in command_group:
                 console.out(str(command), highlight=False)
+        
+        report[slurm_op.name] = group_report
+
+    print(json.dumps(report)) 
