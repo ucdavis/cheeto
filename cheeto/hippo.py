@@ -8,12 +8,13 @@
 # Date   : 17.02.2023
 
 from dataclasses import asdict
+import logging
 import os
 from pathlib import Path
 import sys
-from typing import Mapping
+from typing import Mapping, Union
 
-import marshmallow_dataclass
+import marshmallow
 from marshmallow_dataclass import dataclass
 
 from .errors import ExitCode
@@ -100,6 +101,8 @@ def add_sanitize_args(parser):
 
 
 def sanitize(args):
+    logger = logging.getLogger(__name__)
+
     yaml_files = [args.global_file, args.site_file] if args.site_file.exists() \
                  else [args.global_file]
     merged_yaml = parse_yaml_forest(yaml_files,
@@ -109,10 +112,10 @@ def sanitize(args):
                                                PuppetUserMap,
                                                strict=True))
     if len(user_record.user) == 0:
-        print(f'ERROR: No users!', file=sys.stderr)
+        logger.error(f'No users!')
         sys.exit(ExitCode.BAD_MERGE)
     if len(user_record.user) > 1:
-        print(f'ERROR: merge resulted in multiple users.', file=sys.stderr)
+        logger.error(f'Merge resulted in multiple users.')
         sys.exit(ExitCode.BAD_MERGE)
 
     site_dumper = PuppetUserMap.site_dumper()
@@ -125,55 +128,60 @@ def sanitize(args):
         print(site_dumper.dumps(user_record), file=fp)
 
 
-def convert_to_puppet(args):
-    current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml))
-    
-    if args.group_map:
-        group_map = HippoSponsorGroupMapping.Schema().load(parse_yaml(args.group_map))
-    else:
-        group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}})
+def hippo_to_puppet(hippo_file: Path,
+                    global_dir: Path,
+                    site_dir: Path,
+                    key_dir: Path,
+                    current_state: PuppetAccountMap,
+                    group_map: HippoSponsorGroupMapping):
 
-    hippo_yaml = parse_yaml(args.hippo_file)
-    hippo_record = HippoRecord.Schema().load(hippo_yaml)
+    logger = logging.getLogger(__name__)
+
+    hippo_yaml = parse_yaml(str(hippo_file))
+    try:
+        hippo_record = HippoRecord.Schema().load(hippo_yaml) #type: ignore
+    except marshmallow.exceptions.ValidationError as e: #type: ignore
+        logger.error(f'[red]ValidationError: {hippo_file}[/]')
+        logger.error(e.messages)
+        sys.exit(ExitCode.VALIDATION_ERROR)
 
     user_name = hippo_record.account.kerb
     site_dumper = PuppetUserMap.site_dumper()
-    site_filename = args.site_dir / f'{user_name}.site.yaml'
+    site_filename = site_dir / f'{user_name}.site.yaml'
 
     global_dumper = PuppetUserMap.global_dumper()
-    global_filename = args.global_dir / f'{user_name}.yaml'
+    global_filename = global_dir / f'{user_name}.yaml'
 
     if hippo_record.sponsor.kerb in group_map.mapping:
         sponsor = group_map.mapping[hippo_record.sponsor.kerb]
     else:
         sponsor = f'{hippo_record.sponsor.kerb}grp'
 
-    if sponsor not in current_state.group:
-        print(f'ERROR: {args.hippo_file}: {sponsor} is not a valid group.', file=sys.stderr)
+    if sponsor not in current_state.group: #type: ignore
+        logger.error(f'{hippo_file}: {sponsor} is not a valid group.')
         sys.exit(ExitCode.INVALID_SPONSOR)
 
-    user_record = PuppetUserRecord(
+    user_record = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
         email = hippo_record.account.email,
         uid = hippo_record.account.mothra,
         gid = hippo_record.account.mothra,
-        groups = [sponsor]
+        groups = [sponsor] #type: ignore
     )
 
-    user_map = PuppetUserMap(
+    user_map = PuppetUserMap( #type: ignore
         user = {user_name: user_record}
     )
 
     if os.path.exists(site_filename):
-        current_site_yaml = parse_yaml(site_filename)
+        current_site_yaml = parse_yaml(str(site_filename))
         merged_yaml = puppet_merge(asdict(user_map), current_site_yaml)
-        user_map = PuppetUserMap.Schema().load(
+        user_map = PuppetUserMap.Schema().load( #type: ignore
             merged_yaml
         )
 
     if os.path.exists(global_filename):
-        print(f'NOTE: {args.hippo_file}: Global YAML {global_filename} exists, skipping.',
-              file=sys.stderr)
+        logger.info(f'{hippo_file}: Global YAML {global_filename} exists, skipping.')
     else:
         with global_filename.open('w') as fp:
             print(global_dumper.dumps(user_map), file=fp)

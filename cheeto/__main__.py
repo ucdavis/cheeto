@@ -8,15 +8,20 @@
 # Date   : 17.02.2023
 
 import argparse
+import os
+from pathlib import Path
 
 from . import hippo
+from . import log
 from . import nocloud
 from . import puppet
 from . import slurm
 
 
 def add_common_args(parser):
-    pass
+    parser.add_argument('--log', type=Path, default=Path(os.devnull),
+                        help='Log to file.')
+    parser.add_argument('--quiet', default=False, action='store_true')
 
 
 def main():
@@ -62,7 +67,9 @@ def main():
     
 
     args = parser.parse_args()
-    args.func(args)
+    with args.log.open('a') as log_fp:
+        log.setup(log_fp, quiet=args.quiet)
+        args.func(args)
 
 
 if __name__ == '__main__':

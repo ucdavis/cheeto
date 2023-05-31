@@ -11,11 +11,11 @@ import csv
 from enum import Enum, auto
 from io import StringIO
 import json
+import logging
 import os
 import sys
-from typing import Tuple, Optional
+from typing import Tuple, Optional, TextIO
 
-from rich import print as rprint
 from rich.console import Console
 from rich.progress import track
 import sh

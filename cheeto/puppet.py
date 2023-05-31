@@ -10,13 +10,13 @@
 import argparse
 from dataclasses import asdict
 from enum import Enum
+import logging
 import os
 from typing import Optional, List, Mapping, Union, Set
 import sys
 
 import marshmallow
 from marshmallow import post_dump
-import marshmallow_dataclass
 from marshmallow_dataclass import dataclass
 from rich import print as rprint
 from rich.console import Console
@@ -29,7 +29,6 @@ from .utils import (require_kwargs,
                     puppet_merge,
                     EnumAction,
                     size_to_megs)
-from . import _yaml
 
 
 @require_kwargs
@@ -259,21 +258,22 @@ def parse_yaml_forest(yaml_files: list,
 
 
 def validate_yaml_forest(yaml_forest: dict,
-                         MapSchema: Union[PuppetAccountMap,
-                                          PuppetGroupMap,
-                                          PuppetUserMap,
-                                          PuppetShareMap],
+                         MapSchema: Union[type[PuppetAccountMap],
+                                          type[PuppetGroupMap],
+                                          type[PuppetUserMap],
+                                          type[PuppetShareMap]],
                          strict: Optional[bool] = False,
                          partial: Optional[bool] = False): 
+    logger = logging.getLogger(__name__)
 
     for source_root, yaml_obj in yaml_forest.items():
 
         try:
-            puppet_data = MapSchema.Schema().load(yaml_obj,
+            puppet_data = MapSchema.Schema().load(yaml_obj, #type: ignore
                                                   partial=partial)
-        except marshmallow.exceptions.ValidationError as e:
-            rprint(f'[red]ValidationError: {source_root}[/]', file=sys.stderr)
-            rprint(e.messages, file=sys.stderr)
+        except marshmallow.exceptions.ValidationError as e: #type: ignore
+            logger.error(f'[red]ValidationError: {source_root}[/]')
+            logger.error(e.messages)
             if strict:
                 sys.exit(ExitCode.VALIDATION_ERROR)
             continue
@@ -301,7 +301,6 @@ def add_validate_args(parser: argparse.ArgumentParser):
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
-    parser.add_argument('--quiet', default=False, action='store_true')
 
 
 def validate_yamls(args: argparse.Namespace):
