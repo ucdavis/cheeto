@@ -316,7 +316,7 @@ def validate_yamls(args: argparse.Namespace):
         if not args.quiet:
             console.rule(source_file, style='blue')
 
-        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data)
+        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',

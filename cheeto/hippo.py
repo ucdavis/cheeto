@@ -64,31 +64,6 @@ class HippoSponsorGroupMapping(BaseModel):
     mapping: Mapping[KerberosID, KerberosID]
 
 
-def add_convert_args(parser):
-    parser.add_argument('-i', '--hippo-file',
-                        type=Path,
-                        required=True)
-    parser.add_argument('--site-dir', 
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet accounts directory.')
-    parser.add_argument('--global-dir',
-                        type=Path,
-                        required=True,
-                        help='Global puppet accounts directory.')
-    parser.add_argument('--key-dir',
-                        type=Path,
-                        required=True,
-                        help='Puppet SSH keys directory.')
-    parser.add_argument('--cluster-yaml',
-                        type=Path,
-                        required=True,
-                        help='Path to merged cluster YAML.')
-    parser.add_argument('--group-map',
-                        type=Path,
-                        help='Sponsor KerberosID to group name mapping.')
-
-
 def add_sanitize_args(parser):
     parser.add_argument('--site-file',
                         type=Path,
@@ -190,14 +165,60 @@ def hippo_to_puppet(hippo_file: Path,
         print(site_dumper.dumps(user_map), file=fp)
 
     try:
-        relative = get_relative_path(args.site_dir, args.global_dir)
+        relative = get_relative_path(site_dir, global_dir)
         link_src = relative / global_filename.name
-        args.site_dir.joinpath(global_filename.name).symlink_to(link_src)
-    except FileExistsError as e:
-        print(f'NOTE: {global_filename} already linked to {args.site_dir}', file=sys.stderr)
+        site_dir.joinpath(global_filename.name).symlink_to(link_src)
+    except FileExistsError:
+        logger.info(f'{global_filename} already linked to {site_dir}.')
 
-    if args.key_dir:
-        key_dest = args.key_dir / f'{hippo_record.account.kerb}.pub'
+    if key_dir:
+        key_dest = key_dir / f'{hippo_record.account.kerb}.pub'
         with key_dest.open('w') as fp:
             print(hippo_record.account.key, file=fp)
+
+
+def add_convert_args(parser):
+    parser.add_argument('-i', '--hippo-file',
+                        type=Path,
+                        nargs='+',
+                        required=True)
+    parser.add_argument('--site-dir', 
+                        type=Path,
+                        required=True,
+                        help='Site-specific puppet accounts directory.')
+    parser.add_argument('--global-dir',
+                        type=Path,
+                        required=True,
+                        help='Global puppet accounts directory.')
+    parser.add_argument('--key-dir',
+                        type=Path,
+                        required=True,
+                        help='Puppet SSH keys directory.')
+    parser.add_argument('--cluster-yaml',
+                        type=Path,
+                        required=True,
+                        help='Path to merged cluster YAML.')
+    parser.add_argument('--group-map',
+                        type=Path,
+                        help='Sponsor KerberosID to group name mapping.')
+
+
+def convert(args):
+    logger = logging.getLogger(__name__)
+
+    current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
+    
+    if args.group_map:
+        group_map = HippoSponsorGroupMapping.Schema().load(parse_yaml(args.group_map)) #type: ignore
+    else:
+        group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
+
+    for hippo_file in args.hippo_file:
+        logger.info(f'Processing {hippo_file}...')
+        hippo_to_puppet(hippo_file,
+                        args.global_dir,
+                        args.site_dir,
+                        args.key_dir,
+                        current_state,
+                        group_map)
 

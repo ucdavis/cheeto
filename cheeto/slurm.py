@@ -25,7 +25,6 @@ from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
                      PuppetAccountMap,
-                     SlurmQOSTRES,
                      SlurmQOS)
 from .utils import (check_filter,
                     filter_nulls)
@@ -34,7 +33,7 @@ from .utils import (check_filter,
 
 class SAcctMgr:
 
-    def __init__(self, sacctmgr_path: str = None,
+    def __init__(self, sacctmgr_path: Optional[str] = None,
                        sudo: bool = False):
         if sacctmgr_path is None:
             self.sacctmgr_path = sh.which('sacctmgr').strip() #type: ignore
@@ -54,7 +53,7 @@ class SAcctMgr:
         self.show = self.cmd.bake('show', '-P')
 
     def add_account(self, account_name: str,
-                          max_jobs: int = None) -> sh.Command:
+                          max_jobs: Optional[int] = None) -> sh.Command:
         args = ['account', account_name]
         if max_jobs is not None:
             args.append(f'MaxJobs={max_jobs}')
@@ -99,8 +98,8 @@ class SAcctMgr:
                              f'qos={qos_name}')
 
     def remove_user(self, user_name: str,
-                          account_name: str = None,
-                          partition_name: str = None) -> sh.Command:
+                          account_name: Optional[str] = None,
+                          partition_name: Optional[str] = None) -> sh.Command:
 
         args = ['user', f'user={user_name}']
         if account_name is not None:
@@ -218,7 +217,6 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
             filter_row = check_filter(row, filter_accounts_on)
             if not filter_row:
                 extras = int(row['MaxJobs']) if 'MaxJobs' in row else None
-
                 associations['accounts'][row['Account']] = extras
         elif 'User' in row:
             filter_row = check_filter(row, filter_users_on)

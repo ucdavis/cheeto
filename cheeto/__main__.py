@@ -34,7 +34,7 @@ def main():
     hippo_commands = hippo_parser.add_subparsers()
     hippo_convert_parser = hippo_commands.add_parser('convert')
     add_common_args(hippo_convert_parser)
-    hippo_convert_parser.set_defaults(func=hippo.convert_to_puppet)
+    hippo_convert_parser.set_defaults(func=hippo.convert)
     hippo.add_convert_args(hippo_convert_parser)
 
     hippo_sanitize_parser = hippo_commands.add_parser('sanitize')
@@ -58,7 +58,7 @@ def main():
     slurm_commands = slurm_parser.add_subparsers()
     slurm_show_qos_parser = slurm_commands.add_parser('show-qos')
     add_common_args(slurm_show_qos_parser)
-    slurm_show_qos_parser.set_defaults(func=lambda args: print('QOS'))
+    slurm_show_qos_parser.set_defaults(func=lambda _: print('QOS'))
 
     slurm_sync_parser = slurm_commands.add_parser('sync')
     add_common_args(slurm_sync_parser)
