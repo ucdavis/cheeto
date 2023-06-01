@@ -11,7 +11,6 @@ import csv
 from enum import Enum, auto
 from io import StringIO
 import json
-import logging
 import os
 import sys
 from typing import Tuple, Optional, TextIO

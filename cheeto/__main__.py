@@ -37,6 +37,11 @@ def main():
     hippo_convert_parser.set_defaults(func=hippo.convert)
     hippo.add_convert_args(hippo_convert_parser)
 
+    hippo_sync_parser = hippo_commands.add_parser('sync')
+    add_common_args(hippo_sync_parser)
+    hippo_sync_parser.set_defaults(func=hippo.sync)
+    hippo.add_sync_args(hippo_sync_parser)
+
     hippo_sanitize_parser = hippo_commands.add_parser('sanitize')
     add_common_args(hippo_sanitize_parser)
     hippo.add_sanitize_args(hippo_sanitize_parser)
