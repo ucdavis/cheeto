@@ -16,7 +16,7 @@ import shutil
 import socket
 import sys
 import time
-from typing import Mapping, Optional, Tuple
+from typing import Mapping, Optional, Tuple, Union
 
 from filelock import FileLock
 import marshmallow
@@ -110,6 +110,38 @@ def sanitize(args):
         print(site_dumper.dumps(user_record), file=fp)
 
 
+def add_validate_args(parser):
+    parser.add_argument('-i', '--hippo-file',
+                        type=Path,
+                        nargs='+',
+                        required=True)
+
+
+def validate(args) -> None:
+    for hippo_file in args.hippo_file:
+        record = load_hippo(hippo_file, quiet=args.quiet)
+        if record is None:
+            sys.exit(ExitCode.VALIDATION_ERROR)
+
+
+def load_hippo(hippo_file: Path,
+               quiet: Optional[bool] = True) -> Union[None, HippoRecord]:
+
+    logger = logging.getLogger(__name__)
+    
+    hippo_yaml = parse_yaml(str(hippo_file))
+    try:
+        hippo_record = HippoRecord.Schema().load(hippo_yaml) #type: ignore
+    except marshmallow.exceptions.ValidationError as e: #type: ignore
+        logger.error(f'[red]ValidationError: {hippo_file}[/]')
+        logger.error(e.messages)
+        return None
+    else:
+        if not quiet:
+            logger.info(hippo_record)
+        return hippo_record
+
+
 def hippo_to_puppet(hippo_file: Path,
                     global_dir: Path,
                     site_dir: Path,
@@ -119,12 +151,8 @@ def hippo_to_puppet(hippo_file: Path,
 
     logger = logging.getLogger(__name__)
 
-    hippo_yaml = parse_yaml(str(hippo_file))
-    try:
-        hippo_record = HippoRecord.Schema().load(hippo_yaml) #type: ignore
-    except marshmallow.exceptions.ValidationError as e: #type: ignore
-        logger.error(f'[red]ValidationError: {hippo_file}[/]')
-        logger.error(e.messages)
+    hippo_record = load_hippo(hippo_file)
+    if hippo_record is None:
         sys.exit(ExitCode.VALIDATION_ERROR)
 
     user_name = hippo_record.account.kerb

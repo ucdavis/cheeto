@@ -47,6 +47,11 @@ def main():
     hippo.add_sanitize_args(hippo_sanitize_parser)
     hippo_sanitize_parser.set_defaults(func=hippo.sanitize)
 
+    hippo_validate_parser = hippo_commands.add_parser('validate')
+    add_common_args(hippo_validate_parser)
+    hippo.add_validate_args(hippo_validate_parser)
+    hippo_validate_parser.set_defaults(func=hippo.validate)
+
 
     validate_puppet_parser = commands.add_parser('validate-puppet')
     validate_puppet_parser.set_defaults(func=puppet.validate_yamls)
