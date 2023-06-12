@@ -40,11 +40,8 @@ def add_render_args(parser):
 
 
 def render(args):
-
-    print(PKG_TEMPLATES)
-
     hosts_base = args.templates_dir / "hosts"
-    host_paths = list(hosts_base.glob('*'))
+    host_paths = list(hosts_base.glob('*.j2'))
 
     environment = Environment(loader=FileSystemLoader(
                                         [str(args.templates_dir),
@@ -54,19 +51,24 @@ def render(args):
                                       )
                               )
 
-    ssh_authorized_keys = args.authorized_keys.read_text().splitlines()
+    ak = args.authorized_keys
+    ssh_authorized_keys = [line for line in ak.read_text().splitlines() \
+                           if not line.strip().startswith('#')]
 
     for host_path in host_paths: 
         hostname = host_path.stem
         print(f"Processing: {hostname}")
 
-        host_j2 = environment.get_template(f"hosts/{hostname}")
+        host_j2 = environment.get_template(f"hosts/{hostname}.j2")
         
         nocloud_host_dir = args.output_dir / hostname
         nocloud_host_dir.mkdir(mode=0o755, parents=False, exist_ok=True)
 
         meta_data_f = nocloud_host_dir / "meta-data"
         meta_data_f.touch(mode=0o644, exist_ok=True)
+
+        vendor_data_f = nocloud_host_dir / "vendor-data"
+        vendor_data_f.touch(mode=0o644, exist_ok=True)
 
         contents = host_j2.render(
             hostname=hostname,
