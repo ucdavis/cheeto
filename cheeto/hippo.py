@@ -16,22 +16,23 @@ import shutil
 import socket
 import sys
 import time
-from typing import Mapping, Optional, Tuple, Union
+from typing import Mapping, Optional, Tuple, Union, List
 
 from filelock import FileLock
 import marshmallow
+from marshmallow_dataclass import add_schema
 from marshmallow_dataclass import dataclass
 import sh
 
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
-from .puppet import (PuppetAccountMap,
+from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGroupRecord,
                      PuppetUserRecord,
                      PuppetUserMap,
                      parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy)
-from .utils import require_kwargs, get_relative_path
+from .utils import link_relative, require_kwargs, get_relative_path
 from .types import *
 from .utils import parse_yaml, puppet_merge
 
@@ -41,20 +42,20 @@ from .utils import parse_yaml, puppet_merge
 class HippoSponsor(BaseModel):
     accountname: str
     name: str
-    email: Email
-    kerb: KerberosID
-    iam: IAMID
-    mothra: MothraID
+    email: Email #type: ignore
+    kerb: KerberosID #type: ignore
+    iam: IAMID #type: ignore
+    mothra: MothraID #type: ignore
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class HippoAccount(BaseModel):
     name: str
-    email: Email
-    kerb: KerberosID
-    iam: IAMID
-    mothra: MothraID
+    email: Email #type: ignore
+    kerb: KerberosID #type: ignore
+    iam: IAMID #type: ignore
+    mothra: MothraID #type: ignore
     key: str
 
 
@@ -68,7 +69,13 @@ class HippoRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class HippoSponsorGroupMapping(BaseModel):
-    mapping: Mapping[KerberosID, KerberosID]
+    mapping: Mapping[KerberosID, KerberosID] #type: ignore
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class HippoAdminSponsorList(BaseModel):
+    sponsors: List[KerberosID] #type: ignore
 
 
 def add_sanitize_args(parser):
@@ -147,7 +154,10 @@ def hippo_to_puppet(hippo_file: Path,
                     site_dir: Path,
                     key_dir: Path,
                     current_state: PuppetAccountMap,
-                    group_map: HippoSponsorGroupMapping) -> Tuple[str, str, PuppetUserRecord]:
+                    group_map: HippoSponsorGroupMapping,
+                    admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
+                                                                                     Optional[str],
+                                                                                     Optional[PuppetUserRecord]]:
 
     logger = logging.getLogger(__name__)
 
@@ -162,21 +172,29 @@ def hippo_to_puppet(hippo_file: Path,
     global_dumper = PuppetUserMap.global_dumper()
     global_filename = global_dir / f'{user_name}.yaml'
 
-    if hippo_record.sponsor.kerb in group_map.mapping:
-        sponsor = group_map.mapping[hippo_record.sponsor.kerb]
+    sponsor_group = f'{hippo_record.sponsor.kerb}grp'
+    if hippo_record.sponsor.kerb in admin_sponsors.sponsors:
+        logger.info(f'{user_name} appears to be a sponsor account.')
+        sponsor_group = create_sponsor_group(user_name,
+                                             hippo_record.account.mothra,
+                                             global_dir,
+                                             site_dir)
     else:
-        sponsor = f'{hippo_record.sponsor.kerb}grp'
+        logger.info(f'{user_name} appears to be a user account.')
 
-    if sponsor not in current_state.group: #type: ignore
-        logger.error(f'{hippo_file}: {sponsor} is not a valid group.')
-        sys.exit(ExitCode.INVALID_SPONSOR)
+        if hippo_record.sponsor.kerb in group_map.mapping:
+            sponsor_group = group_map.mapping[hippo_record.sponsor.kerb]
+            
+        if sponsor_group not in current_state.group: #type: ignore
+            logger.error(f'{hippo_file}: {sponsor_group} is not a valid group.')
+            return None, None, None
 
     user_record = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
         email = hippo_record.account.email,
         uid = hippo_record.account.mothra,
         gid = hippo_record.account.mothra,
-        groups = [sponsor] #type: ignore
+        groups = [sponsor_group] #type: ignore
     )
 
     user_map = PuppetUserMap( #type: ignore
@@ -200,9 +218,10 @@ def hippo_to_puppet(hippo_file: Path,
         print(site_dumper.dumps(user_map), file=fp)
 
     try:
-        relative = get_relative_path(site_dir, global_dir)
-        link_src = relative / global_filename.name
-        site_dir.joinpath(global_filename.name).symlink_to(link_src)
+        link_relative(site_dir, global_filename)
+        #relative = get_relative_path(site_dir, global_dir)
+        #link_src = relative / global_filename.name
+        #site_dir.joinpath(global_filename.name).symlink_to(link_src)
     except FileExistsError:
         logger.info(f'{global_filename} already linked to {site_dir}.')
 
@@ -211,7 +230,33 @@ def hippo_to_puppet(hippo_file: Path,
         with key_dest.open('w') as fp:
             print(hippo_record.account.key, file=fp)
     
-    return user_name, sponsor, user_record
+    return user_name, sponsor_group, user_record
+
+
+def create_sponsor_group(sponsor_username: str,
+                         sponsor_uid: int,
+                         global_dir: Path,
+                         site_dir: Path):
+    logger = logging.getLogger(__name__)
+    group_name = f'{sponsor_username}grp'
+    group_record = PuppetGroupRecord(
+        gid = MIN_PIGROUP_GID + sponsor_uid
+    )
+    group_map = PuppetGroupMap(
+        group = {group_name: group_record}
+    )
+    group_filename = global_dir / f'{group_name}.yaml'
+    if os.path.exists(group_filename):
+        logger.warning(f'{group_filename} already exists!')
+        #current_yaml = parse_yaml(str(group_filename))
+        #merged_yaml = puppet_merge(asdict(group_map), current_yaml)
+        #group_map = PuppetGroupMap.Schema().load(merged_yaml) #type: ignore
+    else:
+        logger.info(f'Writing out {group_filename}')
+        group_map.save_yaml(group_filename)
+        link_relative(site_dir, group_filename)
+
+    return group_name
 
 
 def add_convert_args(parser):
@@ -238,6 +283,10 @@ def add_convert_args(parser):
     parser.add_argument('--group-map',
                         type=Path,
                         help='Sponsor KerberosID to group name mapping.')
+    parser.add_argument('--admin-sponsors',
+                        type=Path,
+                        required=True,
+                        help='Accounts that sponsor the sponsors.')
 
 
 def convert(args):
@@ -280,12 +329,14 @@ def sync(args):
 
     with lock:
 
-        current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
+        current_state = PuppetAccountMap.load_yaml(args.cluster_yaml) #type: ignore
         
         if args.group_map:
-            group_map = HippoSponsorGroupMapping.Schema().load(parse_yaml(args.group_map)) #type: ignore
+            group_map = HippoSponsorGroupMapping.load_yaml(args.group_map) #type: ignore
         else:
             group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
+
+        admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
 
         gh = Gh(working_dir=args.global_dir)
         git = Git(working_dir=args.global_dir)
@@ -306,15 +357,17 @@ def sync(args):
                                                          args.site_dir,
                                                          args.key_dir,
                                                          current_state,
-                                                         group_map)
+                                                         group_map,
+                                                         admin_sponsors_map)
+            created_users.append((user, sponsor, user_record))
+            if user is None:
+                continue
             message = f'[{fqdn}] user: {user}, sponsor: {sponsor}'
             git.add(Path('.'))()
             try:
                 git.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 logger.info(f'Nothing to commit.')
-            
-            created_users.append((user, sponsor, user_record))
         
         logger.info(f'Pushing and creating branch: {working_branch}.')
         git.push(remote_create=working_branch)()
@@ -332,7 +385,8 @@ def sync(args):
 
         logger.info(f'Moving processed files to {args.processed_dir}')
         for hippo_file, (user, sponsor, record) in zip(args.hippo_file, created_users): #type: ignore
-            shutil.move(hippo_file, args.processed_dir)
+            if user is not None:
+                shutil.move(hippo_file, args.processed_dir)
 
 
 def wait_on_pull_request(gh: Gh,
@@ -341,7 +395,7 @@ def wait_on_pull_request(gh: Gh,
 
     logger = logging.getLogger(__name__)
     logger.info(f'Waiting on CI for pull request.')
-    logger.info(gh.pr_view(branch)())
+    #logger.info(gh.pr_view(branch)())
     pr_url = gh.pr_view_url(branch)().strip() #type: ignore
 
     ticket_created = False
