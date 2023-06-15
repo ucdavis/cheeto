@@ -29,7 +29,7 @@ def parse_yaml(filename: str) -> dict:
 
 
 def puppet_merge(*dicts: dict) -> dict:
-    return merge(*dicts, strategy=Strategy.ADDITIVE)
+    return merge(*dicts, strategy=Strategy.ADDITIVE) #type: ignore
 
 
 def filter_nulls(d: dict) -> dict:
@@ -47,6 +47,12 @@ def get_relative_path(lower_path: Path, upper_path: Path):
     diff = lower_path.relative_to(upper_path)
     levels = len(diff.parents)
     return Path.joinpath(*([Path('..')] * levels))
+
+
+def link_relative(link_dir: Path, target_filename: Path):
+    relative = get_relative_path(link_dir, target_filename.parent)
+    target_filename = relative / target_filename.name
+    link_dir.joinpath(target_filename.name).symlink_to(target_filename)
 
 
 def size_to_megs(size: str) -> int:
