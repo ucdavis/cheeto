@@ -163,7 +163,8 @@ def hippo_to_puppet(hippo_file: Path,
 
     hippo_record = load_hippo(hippo_file)
     if hippo_record is None:
-        sys.exit(ExitCode.VALIDATION_ERROR)
+        logger.error(f'{hippo_file}: validation error!')
+        return None, None, None
 
     user_name = hippo_record.account.kerb
     site_dumper = PuppetUserMap.site_dumper()
@@ -219,9 +220,6 @@ def hippo_to_puppet(hippo_file: Path,
 
     try:
         link_relative(site_dir, global_filename)
-        #relative = get_relative_path(site_dir, global_dir)
-        #link_src = relative / global_filename.name
-        #site_dir.joinpath(global_filename.name).symlink_to(link_src)
     except FileExistsError:
         logger.info(f'{global_filename} already linked to {site_dir}.')
 
@@ -248,9 +246,6 @@ def create_sponsor_group(sponsor_username: str,
     group_filename = global_dir / f'{group_name}.yaml'
     if os.path.exists(group_filename):
         logger.warning(f'{group_filename} already exists!')
-        #current_yaml = parse_yaml(str(group_filename))
-        #merged_yaml = puppet_merge(asdict(group_map), current_yaml)
-        #group_map = PuppetGroupMap.Schema().load(merged_yaml) #type: ignore
     else:
         logger.info(f'Writing out {group_filename}')
         group_map.save_yaml(group_filename)
@@ -295,9 +290,11 @@ def convert(args):
     current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
     
     if args.group_map:
-        group_map = HippoSponsorGroupMapping.Schema().load(parse_yaml(args.group_map)) #type: ignore
+        group_map = HippoSponsorGroupMapping.load_yaml(args.group_map) #type: ignore
     else:
         group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
+
+    admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
 
     for hippo_file in args.hippo_file:
         logger.info(f'Processing {hippo_file}...')
@@ -306,7 +303,8 @@ def convert(args):
                         args.site_dir,
                         args.key_dir,
                         current_state,
-                        group_map)
+                        group_map,
+                        admin_sponsors_map)
 
 
 def add_sync_args(parser):
@@ -348,7 +346,6 @@ def sync(args):
 
         fqdn = socket.getfqdn()
         
-        # TODO: check if a sponsor (should be within hippo_to_puppet)
         created_users = []
         for hippo_file in args.hippo_file:
             logger.info(f'Processing {hippo_file}...')
