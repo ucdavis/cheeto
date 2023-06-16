@@ -46,6 +46,7 @@ class HippoSponsor(BaseModel):
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
+    cluster: Optional[str]
 
 
 @require_kwargs
@@ -156,9 +157,8 @@ def hippo_to_puppet(hippo_file: Path,
                     current_state: PuppetAccountMap,
                     group_map: HippoSponsorGroupMapping,
                     admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
-                                                                                     Optional[str],
-                                                                                     Optional[PuppetUserRecord]]:
-
+                                                                    Optional[str],
+                                                                    Optional[PuppetUserRecord]]:
     logger = logging.getLogger(__name__)
 
     hippo_record = load_hippo(hippo_file)
