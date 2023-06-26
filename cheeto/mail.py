@@ -16,7 +16,7 @@ import sh
 class Mail:
 
     def __init__(self):
-        logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(__name__)
         self.cmd = sh.Command('mailx').bake()
 
     @staticmethod
