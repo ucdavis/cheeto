@@ -37,6 +37,7 @@ class HippoSponsor(BaseModel):
     kerb: KerberosID
     iam: IAMID
     mothra: MothraID
+    cluster: Optional[str]
 
 
 @require_kwargs
