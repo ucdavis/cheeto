@@ -469,7 +469,7 @@ def sync(args):
 
         console.rule(f'Commands: {command_group_name}', style='blue')
         if args.apply:
-            for command in track(command_group):
+            for command in track(command_group, console=console):
                 try:
                     #console.out(f'Run: {command}', highlight=False)
                     command()
