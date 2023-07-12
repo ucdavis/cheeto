@@ -11,7 +11,7 @@ from dataclasses import asdict
 import os
 from pathlib import Path
 import sys
-from typing import Mapping
+from typing import Mapping, Optional
 
 import marshmallow_dataclass
 from marshmallow_dataclass import dataclass
