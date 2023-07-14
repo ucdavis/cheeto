@@ -480,3 +480,18 @@ def sync(args):
                 console.out(str(command), highlight=False)
 
     print(json.dumps(report, indent=2)) 
+
+
+
+
+
+def audit_partitions(args):
+    console = Console(stderr=True)
+
+    yaml_forest = parse_yaml_forest(args.yaml_files,
+                                    merge_on=MergeStrategy.ALL)
+    _, puppet_data = next(validate_yaml_forest(yaml_forest,
+                                               PuppetAccountMap,
+                                               strict=True))
+
+
