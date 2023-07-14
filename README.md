@@ -36,3 +36,52 @@ to standard out.
       -h, --help   show this help message and exit
       --merge      Merge the given YAML files before validation.
       --dump DUMP  Dump the validated YAML to the given file
+
+### Generating: `cheeto nocloud-render`
+
+Generates `nocloud-net` installation files combining a base template with disk-specific layouts defined on a per-host basis.
+
+```bash
+usage: cheeto nocloud-render [-h] [--templates-dir TEMPLATES_DIR] [--authorized-keys AUTHORIZED_KEYS]
+                             [--output-dir OUTPUT_DIR] [--cobbler-ip COBBLER_IP]
+                             [--puppet-environment PUPPET_ENVIRONMENT] [--puppet-ip PUPPET_IP]
+                             [--puppet-fqdn PUPPET_FQDN]
+
+options:
+  -h, --help            show this help message and exit
+  --templates-dir TEMPLATES_DIR, -t TEMPLATES_DIR
+  --authorized-keys AUTHORIZED_KEYS, -k AUTHORIZED_KEYS
+  --output-dir OUTPUT_DIR, -o OUTPUT_DIR
+  --cobbler-ip COBBLER_IP, -c COBBLER_IP
+  --puppet-environment PUPPET_ENVIRONMENT, -e PUPPET_ENVIRONMENT
+  --puppet-ip PUPPET_IP
+  --puppet-fqdn PUPPET_FQDN
+```
+
+Template layout structure:
+```bash
+templates/
+templates/hosts/ # Required: individual HOSTNAME.j2 files
+templates/layouts/ # Optional: additional templates with disk layouts
+templates/snippets/ # Optional: snippets to be available (e.g. for --authorized-keys)
+```
+
+Simple template for a host with a single disk (`templates/hosts/HOSTNAME.j2`):
+```jinja
+{#- HOSTNAME
+Any metadata you want to have as notes about the host.
+-#}
+{% extends "single_disk.yaml" %}
+```
+
+More complex host template that requires multiple drive layouts  (`templates/hosts/HOSTNAME.j2`):
+```jinja
+{#- HOSTNAME
+Any metadata you want to have as notes about the host.
+-#}
+{%- extends "raid1_all_root.yaml" %}
+{%- block disks %}
+{{ super() }}
+{%- include 'raid1_largest_scratch.yaml' %}
+{%- endblock disks %}
+```

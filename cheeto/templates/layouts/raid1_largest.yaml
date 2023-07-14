@@ -3,7 +3,7 @@
 # Physical disk, these systems have 2
 - id: disk-sda
   match:
-    size: smallest
+    size: largest
   ptable: gpt
   name: ''
   grub_device: true
@@ -13,7 +13,7 @@
 
 - id: disk-sdb
   match:
-    size: smallest
+    size: largest
   ptable: gpt
   name: ''
   grub_device: true

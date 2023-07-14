@@ -40,6 +40,7 @@ MIN_SYSTEM_UID = 4_000_000_000
 class PuppetAutofs(BaseModel):
     nas: str
     path: str # TODO: path-like
+    options: Optional[str] = None
 
 
 @require_kwargs

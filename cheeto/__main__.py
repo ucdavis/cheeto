@@ -11,6 +11,7 @@ import argparse
 import os
 from pathlib import Path
 
+from . import __version__
 from . import hippo
 from . import log
 from . import nocloud
@@ -27,6 +28,7 @@ def add_common_args(parser):
 def main():
     parser = argparse.ArgumentParser()
     parser.set_defaults(func = lambda _: parser.print_help())
+    parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
     commands = parser.add_subparsers()
 
 

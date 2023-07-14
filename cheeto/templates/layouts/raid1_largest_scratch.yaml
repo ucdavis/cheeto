@@ -1,0 +1,65 @@
+# Physical disk, these systems have 2 dedicated to /scratch/
+- id: disk-sda-LARGEST
+  match:
+    size: largest
+  ptable: gpt
+  name: ''
+  grub_device: false
+  type: disk
+  preserve: false
+  wipe: superblock-recursive
+
+- id: disk-sdb-LARGEST
+  match:
+    size: largest
+  ptable: gpt
+  name: ''
+  grub_device: false
+  type: disk
+  preserve: false
+  wipe: superblock-recursive
+
+# Partitions
+# First disk          
+- id: partition-a-LARGEST-scratch
+  device: disk-sda-LARGEST
+  size: -1
+  number: 1
+  preserve: false
+  grub_device: false
+  type: partition
+
+# Second disk
+- id: partition-b-LARGEST-scratch
+  device: disk-sdb-LARGEST
+  size: -1
+  number: 1
+  preserve: false
+  grub_device: false
+  type: partition
+
+# RAID
+- id: raid-scratch
+  name: md1
+  raidlevel: raid1
+  devices:
+    - partition-a-LARGEST-scratch
+    - partition-b-LARGEST-scratch
+  spare_devices: []
+  preserve: false
+  wipe: superblock
+  metadata: '1.2'
+  type: raid
+
+# File-systems
+- id: format-scratch
+  volume: raid-scratch
+  fstype: ext4
+  preserve: false
+  type: format
+
+# Mounts  
+- id: mount-scratch
+  device: format-scratch
+  path: /scratch
+  type: mount
