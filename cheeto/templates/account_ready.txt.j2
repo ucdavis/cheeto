@@ -1,0 +1,20 @@
+Your account on {{ cluster }} has been approved and queued for creation and will be ready for use shortly.
+You can access the cluster with:
+
+	ssh {{username}}@{{domain}}
+
+Your sponsorship by {{sponsor_fullname}} ({{sponsor_group}}) has given you access to the following Slurm partitions:
+{%- for partition in partitions %}
+- {{partition}}
+{%- endfor }}
+
+{%- if storages %}
+And the following group storages:
+{%- for path, quota in storages %}
+- {{path}} ({{quota}})
+{%- endfor %}
+{%- endif %}
+
+Please contact hpc-help@ucdavis.edu for support requests.
+
+

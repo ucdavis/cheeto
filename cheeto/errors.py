@@ -7,7 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 15.05.2023
 
-from enum import Enum, IntEnum
+from enum import IntEnum
 
 
 class ExitCode(IntEnum):

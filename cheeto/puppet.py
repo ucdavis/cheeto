@@ -10,13 +10,13 @@
 import argparse
 from dataclasses import asdict
 from enum import Enum
+import logging
 import os
 from typing import Optional, List, Mapping, Union, Set
 import sys
 
 import marshmallow
 from marshmallow import post_dump
-import marshmallow_dataclass
 from marshmallow_dataclass import dataclass
 from rich import print as rprint
 from rich.console import Console
@@ -29,7 +29,10 @@ from .utils import (require_kwargs,
                     puppet_merge,
                     EnumAction,
                     size_to_megs)
-from . import _yaml
+
+
+MIN_PIGROUP_GID = 100_000_000
+MIN_SYSTEM_UID = 4_000_000_000
 
 
 @require_kwargs
@@ -43,7 +46,7 @@ class PuppetAutofs(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetZFS(BaseModel):
-    quota: DataQuota
+    quota: DataQuota #type: ignore
 
 
 @require_kwargs
@@ -56,9 +59,9 @@ class PuppetUserStorage(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOSTRES(BaseModel):
-    cpus: Optional[UInt32] = None
-    gpus: Optional[UInt32] = None
-    mem: Optional[DataQuota] = None
+    cpus: Optional[UInt32] = None #type: ignore
+    gpus: Optional[UInt32] = None #type: ignore
+    mem: Optional[DataQuota] = None #type: ignore
 
     @marshmallow.post_load
     def convert_mem(self, in_data, **kwargs):
@@ -70,8 +73,8 @@ class SlurmQOSTRES(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOS(BaseModel):
-    group: SlurmQOSTRES = None
-    job: Optional[SlurmQOSTRES] = None
+    group: SlurmQOSTRES = None #type: ignore
+    job: Optional[SlurmQOSTRES] = None #type: ignore
     priority: Optional[int] = 0
 
     def to_slurm(self):
@@ -82,6 +85,7 @@ class SlurmQOS(BaseModel):
                 if v is None:
                     v = -1
                 tres[k] = v
+
             tokens.append(f'GrpCPUs={tres["cpus"]}')
             if tres['mem'] != -1:
                 tres['mem'] = size_to_megs(tres["mem"])
@@ -104,9 +108,9 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, List[KerberosID]]] = None
+    account: Optional[Union[KerberosID, List[KerberosID]]] = None #type: ignore
     partitions: Optional[Mapping[str, SlurmPartition]] = None
-    max_jobs: Optional[UInt32] = None
+    max_jobs: Optional[UInt32] = None #type: ignore
 
 
 @require_kwargs
@@ -119,18 +123,18 @@ class SlurmRecordMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetUserRecord(BaseModel):
     fullname: str
-    email: Email
-    uid: LinuxUID
-    gid: LinuxGID
+    email: Email #type: ignore
+    uid: LinuxUID #type: ignore
+    gid: LinuxGID #type: ignore
     groups: Optional[Set[str]] = None
-    group_sudo: Optional[List[KerberosID]] = None
-    password: Optional[LinuxPassword] = None
-    shell: Optional[Shell] = None
+    group_sudo: Optional[List[KerberosID]] = None #type: ignore
+    password: Optional[LinuxPassword] = None #type: ignore
+    shell: Optional[Shell] = None #type: ignore
     tag: Optional[Set[str]] = None
     home: Optional[str] = None
 
-    ensure: Optional[PuppetEnsure] = None
-    membership: Optional[PuppetMembership] = None
+    ensure: Optional[PuppetEnsure] = None #type: ignore
+    membership: Optional[PuppetMembership] = None #type: ignore
 
     storage: Optional[PuppetUserStorage] = None
     slurm: Optional[SlurmRecord] = None
@@ -147,11 +151,11 @@ class PuppetUserRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetUserMap(BaseModel):
-    user: Mapping[KerberosID, PuppetUserRecord]
+    user: Mapping[KerberosID, PuppetUserRecord] #type: ignore
 
     @staticmethod
     def global_dumper():
-        return PuppetUserMap.Schema(only=['user.fullname',
+        return PuppetUserMap.Schema(only=['user.fullname', #type: ignore
                                           'user.email',
                                           'user.uid',
                                           'user.gid',
@@ -160,7 +164,7 @@ class PuppetUserMap(BaseModel):
 
     @staticmethod
     def site_dumper():
-        return PuppetUserMap.Schema(only=['user.groups',
+        return PuppetUserMap.Schema(only=['user.groups', #type: ignore
                                           'user.group_sudo',
                                           'user.tag',
                                           'user.home',
@@ -174,8 +178,8 @@ class PuppetUserMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupStorage(BaseModel):
     name: str
-    owner: KerberosID
-    group: Optional[KerberosID] = None
+    owner: KerberosID #type: ignore
+    group: Optional[KerberosID] = None #type: ignore
     autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
 
@@ -183,8 +187,8 @@ class PuppetGroupStorage(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetGroupRecord(BaseModel):
-    gid: LinuxGID
-    ensure: Optional[PuppetEnsure] = None
+    gid: LinuxGID #type: ignore
+    ensure: Optional[PuppetEnsure] = None #type: ignore
     tag: Optional[Set[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
@@ -200,14 +204,14 @@ class PuppetGroupRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetGroupMap(BaseModel):
-    group: Mapping[KerberosID, PuppetGroupRecord]
+    group: Mapping[KerberosID, PuppetGroupRecord] #type: ignore
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetShareStorage(BaseModel):
-    owner: KerberosID
-    group: Optional[KerberosID]
+    owner: KerberosID #type: ignore
+    group: Optional[KerberosID] #type: ignore
     zfs: Union[PuppetZFS, bool]
     autofs: Optional[PuppetAutofs]
 
@@ -227,8 +231,8 @@ class PuppetShareMap(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetAccountMap(BaseModel):
-    group: Optional[Mapping[KerberosID, PuppetGroupRecord]] = None
-    user: Optional[Mapping[KerberosID, PuppetUserRecord]] = None
+    group: Optional[Mapping[KerberosID, PuppetGroupRecord]] = None #type: ignore
+    user: Optional[Mapping[KerberosID, PuppetUserRecord]] = None #type: ignore
     share: Optional[Mapping[str, PuppetShareRecord]] = None
 
 
@@ -262,21 +266,22 @@ def parse_yaml_forest(yaml_files: list,
 
 
 def validate_yaml_forest(yaml_forest: dict,
-                         MapSchema: Union[PuppetAccountMap,
-                                          PuppetGroupMap,
-                                          PuppetUserMap,
-                                          PuppetShareMap],
+                         MapSchema: Union[type[PuppetAccountMap],
+                                          type[PuppetGroupMap],
+                                          type[PuppetUserMap],
+                                          type[PuppetShareMap]],
                          strict: Optional[bool] = False,
                          partial: Optional[bool] = False): 
+    logger = logging.getLogger(__name__)
 
     for source_root, yaml_obj in yaml_forest.items():
 
         try:
-            puppet_data = MapSchema.Schema().load(yaml_obj,
+            puppet_data = MapSchema.Schema().load(yaml_obj, #type: ignore
                                                   partial=partial)
-        except marshmallow.exceptions.ValidationError as e:
-            rprint(f'[red]ValidationError: {source_root}[/]', file=sys.stderr)
-            rprint(e.messages, file=sys.stderr)
+        except marshmallow.exceptions.ValidationError as e: #type: ignore
+            logger.error(f'[red]ValidationError: {source_root}[/]')
+            logger.error(e.messages)
             if strict:
                 sys.exit(ExitCode.VALIDATION_ERROR)
             continue
@@ -304,7 +309,6 @@ def add_validate_args(parser: argparse.ArgumentParser):
                         help='Dump the validated YAML to the given file')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
-    parser.add_argument('--quiet', default=False, action='store_true')
 
 
 def validate_yamls(args: argparse.Namespace):
@@ -320,7 +324,7 @@ def validate_yamls(args: argparse.Namespace):
         if not args.quiet:
             console.rule(source_file, style='blue')
 
-        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data)
+        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',
