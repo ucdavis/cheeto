@@ -13,7 +13,7 @@ from io import StringIO
 import json
 import os
 import sys
-from typing import Tuple, Optional, TextIO
+from typing import Any, Generator, Tuple, Optional, TextIO
 
 from rich.console import Console
 from rich.progress import track
@@ -28,6 +28,34 @@ from .puppet import (parse_yaml_forest,
 from .utils import (check_filter,
                     filter_nulls)
 
+class SControl:
+
+    def __init__(self, scontrol_path: Optional[str] = None,
+                       sudo: bool = False):
+        if scontrol_path is None:
+            self.scontrol_path = sh.which('scontrol').strip() #type: ignore
+        else:
+            self.scontrol_path = scontrol_path
+
+        if not os.path.exists(self.scontrol_path):
+            raise RuntimeError(f'{self.scontrol_path} does not exist!')
+
+        if sudo:
+            self.cmd = sh.sudo.bake(self.scontrol_path, '-oQ')
+        else:
+            self.cmd = sh.Command(self.scontrol_path).bake('-oQ')
+
+        self.show = self.cmd.bake('show')
+
+    def show_partitions(self) -> sh.Command:
+        return self.show.bake('partitions')
+
+    @staticmethod
+    def get_scontrol_parser(fp: TextIO) -> Generator[dict[str, str], Any, None]:
+        for line in fp:
+            tokens = line.strip().split()
+            tuples = (t.partition('=') for t in tokens)
+            yield {k: v for k, _, v in tuples}
 
 
 class SAcctMgr:

@@ -85,6 +85,7 @@ class SlurmQOS(BaseModel):
                 if v is None:
                     v = -1
                 tres[k] = v
+
             tokens.append(f'GrpCPUs={tres["cpus"]}')
             tokens.append(f'GrpMem={size_to_megs(tres["mem"])}')
             tokens.append(f'GrpTres=gres/gpu={tres["gpus"]}')
