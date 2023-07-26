@@ -40,6 +40,7 @@ MIN_SYSTEM_UID = 4_000_000_000
 class PuppetAutofs(BaseModel):
     nas: str
     path: str # TODO: path-like
+    options: Optional[str] = None
 
 
 @require_kwargs
@@ -84,8 +85,11 @@ class SlurmQOS(BaseModel):
                 if v is None:
                     v = -1
                 tres[k] = v
+
             tokens.append(f'GrpCPUs={tres["cpus"]}')
-            tokens.append(f'GrpMem={size_to_megs(tres["mem"])}')
+            if tres['mem'] != -1:
+                tres['mem'] = size_to_megs(tres["mem"])
+            tokens.append(f'GrpMem={tres["mem"]}')
             tokens.append(f'GrpTres=gres/gpu={tres["gpus"]}')
         if self.job is not None:
             cpus = -1 if self.job.cpus is None else self.job.cpus

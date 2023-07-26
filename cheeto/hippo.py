@@ -42,10 +42,17 @@ from .utils import parse_yaml, puppet_merge
 class HippoSponsor(BaseModel):
     accountname: str
     name: str
+<<<<<<< HEAD
     email: Email #type: ignore
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
+=======
+    email: Email
+    kerb: KerberosID
+    iam: IAMID
+    mothra: MothraID
+>>>>>>> main
     cluster: Optional[str]
 
 
