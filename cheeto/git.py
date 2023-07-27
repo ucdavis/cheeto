@@ -57,6 +57,8 @@ class CIStatus(Enum):
     SUCCESS = auto()
     FAILURE = auto()
     INCOMPLETE = auto()
+    CANCELLED = auto()
+    UNKNOWN = auto()
 
 
 class Gh:
@@ -112,7 +114,10 @@ class Gh:
             return CIStatus.SUCCESS
         elif status == 'failure':
             return CIStatus.FAILURE
+        elif status == 'cancelled':
+            return CIStatus.CANCELLED
         elif status == '':
             return CIStatus.INCOMPLETE
         else:
-            raise ValueError(f'Unknown CI Status: "{status}"')
+            return CIStatus.UNKNOWN
+            #raise ValueError(f'Unknown CI Status: "{status}"')
