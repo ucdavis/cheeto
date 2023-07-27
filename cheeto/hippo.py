@@ -33,7 +33,7 @@ from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGr
                      validate_yaml_forest,
                      MergeStrategy)
 from .utils import link_relative, require_kwargs, get_relative_path
-from .templates import PKG_TEMPLATES
+from .templating import PKG_TEMPLATES
 from .types import *
 from .utils import parse_yaml, puppet_merge
 
