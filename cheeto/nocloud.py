@@ -15,6 +15,7 @@ from jinja2 import Environment, FileSystemLoader
 
 from .templating import PKG_TEMPLATES
 
+
 def add_render_args(parser):
     parser.add_argument('--templates-dir', '-t',
                         default='./templates',

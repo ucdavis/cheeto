@@ -16,9 +16,11 @@ import shutil
 import socket
 import sys
 import time
+import traceback
 from typing import Mapping, Optional, Tuple, Union, List
 
 from filelock import FileLock
+from jinja2 import Environment, FileSystemLoader
 import marshmallow
 from marshmallow_dataclass import add_schema
 from marshmallow_dataclass import dataclass
@@ -26,16 +28,18 @@ import sh
 
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
+from .mail import Mail
 from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGroupRecord,
                      PuppetUserRecord,
                      PuppetUserMap,
                      parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy)
-from .utils import link_relative, require_kwargs, get_relative_path
 from .templating import PKG_TEMPLATES
 from .types import *
+from .utils import link_relative, require_kwargs, get_relative_path
 from .utils import parse_yaml, puppet_merge
+from .slurm import get_group_slurm_partitions
 
 
 @require_kwargs
@@ -229,7 +233,7 @@ def hippo_to_puppet(hippo_file: Path,
         with key_dest.open('w') as fp:
             print(hippo_record.account.key, file=fp)
     
-    return user_name, sponsor_group, user_record
+    return user_name, sponsor_group, user_record, hippo_record
 
 
 def create_sponsor_group(sponsor_username: str,
@@ -253,6 +257,27 @@ def create_sponsor_group(sponsor_username: str,
         link_relative(site_dir, group_filename)
 
     return group_name
+
+
+def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
+    try:
+        storage = puppet_data.group[group].storage
+    except (KeyError, AttributeError):
+        return None
+    else:
+        if storage is None:
+            return None
+        storages = []
+        for storage in storage:
+            if storage.owner == 'root' or 'root' in storage.name: # or storage.zfs is None or type(storage.zfs) is bool:
+                continue
+            path = Path('/group') / storage.name
+            if storage.zfs not in (None, True, False):
+                quota = storage.zfs.quota
+            else:
+                quota = None
+            storages.append(path)
+        return storages
 
 
 def add_convert_args(parser):
@@ -322,6 +347,24 @@ def create_branch_name(prefix: Optional[str] = 'cheeto-hippo-sync') -> str:
 
 
 def sync(args):
+    templates_dir = PKG_TEMPLATES / 'emails'
+    jinja_env = Environment(loader=FileSystemLoader(searchpath=templates_dir))
+
+    try:
+        _sync(args, jinja_env)
+    except:
+        logger = logging.getLogger(__name__)
+        logger.critical(f'Exception in sync, sending ticket to hpc-help.')
+        logger.critical(traceback.format_exc())
+        template = jinja_env.get_template('sync-error.txt.j2')
+        subject = f'cheeto sync exception on {socket.getfqdn()}'
+        contents = template.render(hostname=socket.getfqdn(),
+                                   stacktrace=traceback.format_exc(),
+                                   logfile=args.log)
+        Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
+        
+
+def _sync(args, jinja_env: Environment):
     logger = logging.getLogger(__name__)
     lock_path = args.global_dir / '.cheeto.lock'
     lock = FileLock(lock_path, timeout=args.timeout)
@@ -337,6 +380,7 @@ def sync(args):
 
         admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
 
+
         gh = Gh(working_dir=args.global_dir)
         git = Git(working_dir=args.global_dir)
         git.checkout(branch=args.base_branch)()
@@ -350,14 +394,14 @@ def sync(args):
         created_users = []
         for hippo_file in args.hippo_file:
             logger.info(f'Processing {hippo_file}...')
-            user, sponsor, user_record = hippo_to_puppet(hippo_file,
-                                                         args.global_dir,
-                                                         args.site_dir,
-                                                         args.key_dir,
-                                                         current_state,
-                                                         group_map,
-                                                         admin_sponsors_map)
-            created_users.append((user, sponsor, user_record))
+            user, sponsor, user_record, hippo_record = hippo_to_puppet(hippo_file,
+                                                                       args.global_dir,
+                                                                       args.site_dir,
+                                                                       args.key_dir,
+                                                                       current_state,
+                                                                       group_map,
+                                                                       admin_sponsors_map)
+            created_users.append((user, sponsor, user_record, hippo_record))
             if user is None:
                 continue
             message = f'[{fqdn}] user: {user}, sponsor: {sponsor}'
@@ -373,41 +417,67 @@ def sync(args):
         logger.info('Creating pull request.')
         gh.pr_create(args.base_branch)()
 
-        wait_on_pull_request(gh, working_branch, args.timeout)
-        
+        wait_on_pull_request(gh, working_branch, args.timeout, jinja_env)
+       
+        # TODO: check if merge has already occurred in case admin does so manually.
         logger.info('Merging pull request.')
         gh.pr_merge(working_branch)()
         
         git.checkout(branch=args.base_branch)()
         git.pull()()
 
+        notify_template = jinja_env.get_template('account-ready.txt.j2')
+        mail = Mail()
         logger.info(f'Moving processed files to {args.processed_dir}')
-        for hippo_file, (user, sponsor, record) in zip(args.hippo_file, created_users): #type: ignore
+        for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
             if user is not None:
                 shutil.move(hippo_file, args.processed_dir)
+                slurm_account, slurm_partitions = get_group_slurm_partitions(sponsor, current_state)
+                storages = get_group_storage_paths(sponsor, current_state)
+
+                email_contents = notify_template.render(
+                                    cluster=hippo_record.sponsor.cluster,
+                                    username=user,
+                                    domain=args.site_dir.name,
+                                    slurm_account=slurm_account,
+                                    slurm_partitions=slurm_partitions,
+                                    storages=storages
+                                 )
+                logger.info(f'Sending email: {email_contents}')
+                email_subject = f'Account Information: {hippo_record.sponsor.cluster}'
+                mail.send(puppet_record.email,
+                          email_contents,
+                          reply_to='hpc-help@ucdavis.edu',
+                          subject=email_subject)()
 
 
 def wait_on_pull_request(gh: Gh,
                          branch: str,
-                         poll_interval: int):
+                         poll_interval: int,
+                         jinja_env: Environment):
 
     logger = logging.getLogger(__name__)
     logger.info(f'Waiting on CI for pull request.')
     #logger.info(gh.pr_view(branch)())
     pr_url = gh.pr_view_url(branch)().strip() #type: ignore
+    mail = Mail()
 
     ticket_created = False
     while True:
         status = gh.get_last_run_status(branch)
         if status is CIStatus.INCOMPLETE:
             logger.info(f'CI incomplete; waiting {poll_interval}s: {pr_url}')
-            time.sleep(poll_interval)
         elif status is CIStatus.SUCCESS:
             logger.info(f'CI success: {pr_url}')
             break
         else:
             if not ticket_created:
-                # TODO: email hpc-help
+                subject = f'cheeto account sync CI failed for branch {{branch}}'
                 logger.warning(f'CI failed, creating ticket: {pr_url}')
+                template = jinja_env.get_template('ci-error.txt.j2')
+                contents = template.render(pr_url=pr_url)
+                mail.send('cswel@ucdavis.edu', contents, subject=subject)()
+                ticket_created = True
             else:
                 logger.info(f'CI failed, waiting resolution: {pr_url}')
+        time.sleep(poll_interval)
