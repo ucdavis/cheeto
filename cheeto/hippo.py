@@ -33,6 +33,7 @@ from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGr
                      validate_yaml_forest,
                      MergeStrategy)
 from .utils import link_relative, require_kwargs, get_relative_path
+from .templates import PKG_TEMPLATES
 from .types import *
 from .utils import parse_yaml, puppet_merge
 
@@ -42,17 +43,10 @@ from .utils import parse_yaml, puppet_merge
 class HippoSponsor(BaseModel):
     accountname: str
     name: str
-<<<<<<< HEAD
     email: Email #type: ignore
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
-=======
-    email: Email
-    kerb: KerberosID
-    iam: IAMID
-    mothra: MothraID
->>>>>>> main
     cluster: Optional[str]
 
 

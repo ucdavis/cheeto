@@ -13,11 +13,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .utils import __pkg_dir__
-
-
-PKG_TEMPLATES = __pkg_dir__ / 'templates'
-
+from .templating import PKG_TEMPLATES
 
 def add_render_args(parser):
     parser.add_argument('--templates-dir', '-t',
