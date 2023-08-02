@@ -2,13 +2,14 @@ sponsor:
     accountname: Steven Sponsor
     name: Steven Sponsor
     email: sponsor@ucdavis.edu
-    kerb: sjknapp
+    kerb: jawdat
     iam: 3333333333
     mothra: 03333333
+    cluster: Franklin
 
 account:
     name: Test User
-    email: user@ucdavis.edu
+    email: cswel@ucdavis.edu
     kerb: testuser
     iam: 2222222222
     mothra: 02222222
