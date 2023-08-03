@@ -169,7 +169,7 @@ def hippo_to_puppet(hippo_file: Path,
     hippo_record = load_hippo(hippo_file)
     if hippo_record is None:
         logger.error(f'{hippo_file}: validation error!')
-        return None, None, None
+        return None, None, None, None
 
     user_name = hippo_record.account.kerb
     site_dumper = PuppetUserMap.site_dumper()
@@ -193,7 +193,7 @@ def hippo_to_puppet(hippo_file: Path,
             
         if sponsor_group not in current_state.group: #type: ignore
             logger.error(f'{hippo_file}: {sponsor_group} is not a valid group.')
-            return None, None, None
+            return None, None, None, None
 
     user_record = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
