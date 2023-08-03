@@ -149,8 +149,12 @@ class SAcctMgr:
                                 f'account={account_name}',
                                 f'partition={partition_name}')
     
-    def show_associations(self) -> sh.Command:
-        return self.show.bake('associations')
+    def show_associations(self, query: Optional[dict] = None) -> sh.Command:
+        cmd = self.show.bake('associations')
+        if query is not None:
+            query = [f'{k}={v}' for k, v in query.items()]
+            cmd = cmd.bake('where', *query)
+        return cmd
 
     def show_qos(self) -> sh.Command:
         return self.show.bake('qos')
@@ -166,9 +170,9 @@ class SAcctMgr:
         buf.seek(0)
         return build_slurm_qos_state(buf)
 
-    def get_slurm_association_state(self) -> dict:
+    def get_slurm_association_state(self, query: Optional[dict] = None) -> dict:
         buf = StringIO()
-        cmd = self.show_associations()
+        cmd = self.show_associations(query=query)
         cmd(_out=buf)
         buf.seek(0)
         return build_slurm_association_state(buf)
@@ -533,3 +537,5 @@ def audit_partitions(args):
                                                strict=True))
 
 
+def clone(args):
+    pass
