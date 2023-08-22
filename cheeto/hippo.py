@@ -342,7 +342,7 @@ def convert(args):
 def add_sync_args(parser):
     add_convert_args(parser)
     parser.add_argument('--timeout', type=int, default=30)
-    parser.add_argument('--processed-dir', required=True,
+    parser.add_argument('--processed-dir', required=True, type=Path,
                         help='Directory to move completed user.txt files to.')
     parser.add_argument('--base-branch', default='main')
 
