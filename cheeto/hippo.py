@@ -431,10 +431,7 @@ def _sync(args, jinja_env: Environment):
         logger.info(f'Moving processed files to {args.processed_dir}')
         for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
             if user is not None:
-                try:
-                    shutil.move(hippo_file, args.processed_dir)
-                except Exception as e:
-                    logger.warning(f'Move error (file probably exists?): {e}')
+                shutil.move(hippo_file, args.processed_dir / hippo_file.name)
                 slurm_account, slurm_partitions = get_group_slurm_partitions(sponsor, current_state)
                 storages = get_group_storage_paths(sponsor, current_state)
 
