@@ -434,7 +434,7 @@ def _sync(args, jinja_env: Environment):
                 try:
                     shutil.move(hippo_file, args.processed_dir)
                 except Exception as e:
-                    log.warning(f'Move error (file probably exists?): {e}')
+                    logger.warning(f'Move error (file probably exists?): {e}')
                 slurm_account, slurm_partitions = get_group_slurm_partitions(sponsor, current_state)
                 storages = get_group_storage_paths(sponsor, current_state)
 
