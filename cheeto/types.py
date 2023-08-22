@@ -21,7 +21,6 @@ from . import _yaml
 from .utils import parse_yaml
 
 
-
 UINT_MAX = 4_294_967_296
 
 

@@ -51,7 +51,6 @@ class HippoSponsor(BaseModel):
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
-    cluster: Optional[str]
 
 
 @require_kwargs
@@ -67,9 +66,16 @@ class HippoAccount(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class HippoMeta(BaseModel):
+    cluster: str
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class HippoRecord(BaseModel):
     sponsor: HippoSponsor
     account: HippoAccount
+    meta: HippoMeta
 
 
 @require_kwargs
@@ -436,7 +442,7 @@ def _sync(args, jinja_env: Environment):
                 storages = get_group_storage_paths(sponsor, current_state)
 
                 email_contents = notify_template.render(
-                                    cluster=hippo_record.sponsor.cluster,
+                                    cluster=hippo_record.meta.cluster,
                                     username=user,
                                     domain=args.site_dir.name,
                                     slurm_account=slurm_account,
@@ -444,7 +450,7 @@ def _sync(args, jinja_env: Environment):
                                     storages=storages
                                  )
                 logger.info(f'Sending email: {email_contents}')
-                email_subject = f'Account Information: {hippo_record.sponsor.cluster}'
+                email_subject = f'Account Information: {hippo_record.meta.cluster}'
                 mail.send(puppet_record.email,
                           email_contents,
                           reply_to='hpc-help@ucdavis.edu',
