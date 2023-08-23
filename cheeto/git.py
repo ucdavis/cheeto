@@ -52,6 +52,9 @@ class Git:
             clean = clean.bake('-f')
         return clean
 
+    def rev_parse(self, commit: Optional[str] = 'HEAD') -> sh.Command:
+        return self.cmd.bake('rev-parse', commit)
+
 
 class CIStatus(Enum):
     SUCCESS = auto()
