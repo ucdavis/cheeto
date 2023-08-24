@@ -419,7 +419,7 @@ def _sync(args, jinja_env: Environment):
                 git.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 logger.info(f'Nothing to commit.')
-        end_commit = get_commit()
+        end_commit = get_commit().strip()
 
         if start_commit == end_commit:
             logger.info('No commits made, skipping PR flow.')
