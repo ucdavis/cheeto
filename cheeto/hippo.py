@@ -22,7 +22,6 @@ from typing import Mapping, Optional, Tuple, Union, List
 from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader
 import marshmallow
-from marshmallow_dataclass import add_schema
 from marshmallow_dataclass import dataclass
 import sh
 
@@ -35,9 +34,10 @@ from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGr
                      parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy)
+from .utils import link_relative, require_kwargs
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import link_relative, require_kwargs, get_relative_path
+from .utils import link_relative, require_kwargs
 from .utils import parse_yaml, puppet_merge
 from .slurm import get_group_slurm_partitions
 
@@ -169,7 +169,8 @@ def hippo_to_puppet(hippo_file: Path,
                     group_map: HippoSponsorGroupMapping,
                     admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
                                                                     Optional[str],
-                                                                    Optional[PuppetUserRecord]]:
+                                                                    Optional[PuppetUserRecord],
+                                                                    Optional[HippoRecord]]:
     logger = logging.getLogger(__name__)
 
     hippo_record = load_hippo(hippo_file)
@@ -397,6 +398,8 @@ def _sync(args, jinja_env: Environment):
 
         fqdn = socket.getfqdn()
         
+        get_commit = git.rev_parse()
+        start_commit = get_commit().strip()
         created_users = []
         for hippo_file in args.hippo_file:
             logger.info(f'Processing {hippo_file}...')
@@ -416,6 +419,14 @@ def _sync(args, jinja_env: Environment):
                 git.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 logger.info(f'Nothing to commit.')
+        end_commit = get_commit().strip()
+
+        if start_commit == end_commit:
+            logger.info('No commits made, skipping PR flow.')
+            for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
+                if user is not None:
+                    os.remove(hippo_file)
+            return
         
         logger.info(f'Pushing and creating branch: {working_branch}.')
         git.push(remote_create=working_branch)()
