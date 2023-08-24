@@ -1,18 +1,28 @@
-Your account on {{ cluster }} has been approved and queued for creation and will be ready for use shortly.
-You can access the cluster with:
+Your account on {{ cluster }} has been approved and queued for creation and will be ready for use in the next 90-120 minutes.
+
+You can access the cluster from the machine you generated your SSH key on with the following command:
 
 	ssh {{username}}@{{domain}}
 
-Your sponsorship by {{sponsor_fullname}} ({{sponsor_group}}) has given you access to the following Slurm partitions:
-{%- for partition in partitions %}
+{%- if slurm_partitions %}
+
+You can use the following Slurm partitions by specifying "-A {{slurm_account}}" on job submission:
+{%- for partition in slurm_partitions %}
 - {{partition}}
-{%- endfor }}
+{%- endfor %}
+{%- endif %}
+
+Your home directory has a quota of 20GB to allow for your configuration files and code.
+Talk to your sponsor about where to store larger data and results.
 
 {%- if storages %}
-And the following group storages:
-{%- for path, quota in storages %}
-- {{path}} ({{quota}})
+
+You have access to the following group storages:
+{%- for path in storages %}
+- {{path}}
 {%- endfor %}
+
+Talk to your sponsor about how data is organized on these volumes.
 {%- endif %}
 
 Please contact hpc-help@ucdavis.edu for support requests.
