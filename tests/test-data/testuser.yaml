@@ -1,0 +1,18 @@
+sponsor:
+    accountname: Steven Sponsor
+    name: Steven Sponsor
+    email: sponsor@ucdavis.edu
+    kerb: ctbrown
+    iam: 3333333333
+    mothra: 03333333
+
+account:
+    name: Test User
+    email: cswel@ucdavis.edu
+    kerb: testuser
+    iam: 2222222222
+    mothra: 02222222
+    key: "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDI9wjnMlad+iCQAP9om5zonBzSXIuLHG1xs+GMfP7I2N+qE+kl2qQ5/VT8Fsnu9k4JhIevlc3RctNoQhlaEpSvZ62xLLkrjR/r2WGWjygB/KlOqvriZHPY7BRHV2WO1JcKdCCCVqruwlypV4m3KK6y61aReff6UlRsOGbOF26zfbZuLKbLMEQmQXiGu0ELh2TL+hU+oA/iZP+3B8AGiT1bV4Yr7Mhd51UB2V8fqjWREtGBfgirInPjXaOxMecb864rMstqWJ2GhUBOxviEjnTbn70LXHOQ/mM6gUaoeIW2Ophh3+JtafCtmB4lh1RrdPZ4cDvC58hmTKJo4rtWvEP64zKEwAwf75QKk9RHWLp29d1NjOcAVj2vT7EUhDh9pSIFLiMEJI6+qAmnseICHxuXfeV7SnRYNttVFlVflEnrby8RlJNQsqZTzRaiYEZ1CsCgx5gQUrVyWUAG3eobUTmz112PIxzhCvnFhkO9m3VXNP/a6WZdZpJCNK3/2wVp5yr+5YHJq1t/fjz4xzAVC6VJ9HLqm4Vq4R2SDSYaL+E8+PhEJd/S8hWCcHJU61fHwK/tdXLlFoG1pJuJ4dCaOqNjruoijJMe7SEbYUUGBuRv+bHS1Fp5ySKJfvqX64VZKdk/JPtf2VNi27iKVxT+MAXY+RKITTXe55EHf8hGdD9iaw== user@ucdavis"
+
+meta:
+    cluster: Franklin

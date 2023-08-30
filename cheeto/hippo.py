@@ -22,7 +22,6 @@ from typing import Mapping, Optional, Tuple, Union, List
 from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader
 import marshmallow
-from marshmallow_dataclass import add_schema
 from marshmallow_dataclass import dataclass
 import sh
 
@@ -35,9 +34,10 @@ from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGr
                      parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy)
+from .utils import link_relative, require_kwargs
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import link_relative, require_kwargs, get_relative_path
+from .utils import link_relative, require_kwargs
 from .utils import parse_yaml, puppet_merge
 from .slurm import get_group_slurm_partitions
 
@@ -51,7 +51,6 @@ class HippoSponsor(BaseModel):
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
-    cluster: Optional[str]
 
 
 @require_kwargs
@@ -67,9 +66,16 @@ class HippoAccount(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class HippoMeta(BaseModel):
+    cluster: str
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class HippoRecord(BaseModel):
     sponsor: HippoSponsor
     account: HippoAccount
+    meta: HippoMeta
 
 
 @require_kwargs
@@ -163,13 +169,14 @@ def hippo_to_puppet(hippo_file: Path,
                     group_map: HippoSponsorGroupMapping,
                     admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
                                                                     Optional[str],
-                                                                    Optional[PuppetUserRecord]]:
+                                                                    Optional[PuppetUserRecord],
+                                                                    Optional[HippoRecord]]:
     logger = logging.getLogger(__name__)
 
     hippo_record = load_hippo(hippo_file)
     if hippo_record is None:
         logger.error(f'{hippo_file}: validation error!')
-        return None, None, None
+        return None, None, None, None
 
     user_name = hippo_record.account.kerb
     site_dumper = PuppetUserMap.site_dumper()
@@ -193,7 +200,7 @@ def hippo_to_puppet(hippo_file: Path,
             
         if sponsor_group not in current_state.group: #type: ignore
             logger.error(f'{hippo_file}: {sponsor_group} is not a valid group.')
-            return None, None, None
+            return None, None, None, None
 
     user_record = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
@@ -336,7 +343,7 @@ def convert(args):
 def add_sync_args(parser):
     add_convert_args(parser)
     parser.add_argument('--timeout', type=int, default=30)
-    parser.add_argument('--processed-dir', required=True,
+    parser.add_argument('--processed-dir', required=True, type=Path,
                         help='Directory to move completed user.txt files to.')
     parser.add_argument('--base-branch', default='main')
 
@@ -391,6 +398,8 @@ def _sync(args, jinja_env: Environment):
 
         fqdn = socket.getfqdn()
         
+        get_commit = git.rev_parse()
+        start_commit = get_commit().strip()
         created_users = []
         for hippo_file in args.hippo_file:
             logger.info(f'Processing {hippo_file}...')
@@ -410,6 +419,14 @@ def _sync(args, jinja_env: Environment):
                 git.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 logger.info(f'Nothing to commit.')
+        end_commit = get_commit().strip()
+
+        if start_commit == end_commit:
+            logger.info('No commits made, skipping PR flow.')
+            for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
+                if user is not None:
+                    os.remove(hippo_file)
+            return
         
         logger.info(f'Pushing and creating branch: {working_branch}.')
         git.push(remote_create=working_branch)()
@@ -431,12 +448,12 @@ def _sync(args, jinja_env: Environment):
         logger.info(f'Moving processed files to {args.processed_dir}')
         for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
             if user is not None:
-                shutil.move(hippo_file, args.processed_dir)
+                shutil.move(hippo_file, args.processed_dir / hippo_file.name)
                 slurm_account, slurm_partitions = get_group_slurm_partitions(sponsor, current_state)
                 storages = get_group_storage_paths(sponsor, current_state)
 
                 email_contents = notify_template.render(
-                                    cluster=hippo_record.sponsor.cluster,
+                                    cluster=hippo_record.meta.cluster,
                                     username=user,
                                     domain=args.site_dir.name,
                                     slurm_account=slurm_account,
@@ -444,7 +461,7 @@ def _sync(args, jinja_env: Environment):
                                     storages=storages
                                  )
                 logger.info(f'Sending email: {email_contents}')
-                email_subject = f'Account Information: {hippo_record.sponsor.cluster}'
+                email_subject = f'Account Information: {hippo_record.meta.cluster}'
                 mail.send(puppet_record.email,
                           email_contents,
                           reply_to='hpc-help@ucdavis.edu',
