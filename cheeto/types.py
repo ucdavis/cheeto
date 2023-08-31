@@ -108,3 +108,19 @@ Shell = NewType(
 DataQuota = NewType(
     "DataQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]')
 )
+
+SlurmQOSFlag = NewType(
+    "SlurmQOSFlag", str, validate=mv.OneOf(
+        ("DenyOnLimit",
+         "EnforceUsageThreshold",
+         "NoDecay",
+         "NoReserve",
+         "OverPartQOS",
+         "PartitionMaxNodes",
+         "PartitionMinNodes",
+         "PartitionTimeLimit",
+         "RequiresReservation",
+         "UsageFactorSafe")
+    )
+)
+
