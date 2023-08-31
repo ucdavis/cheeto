@@ -220,10 +220,12 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         filter_row = check_filter(row, filter_on)
     
         puppet_grp_tres = build_puppet_tres(row['GrpTRES'])
-        puppet_max_tres = build_puppet_tres(row['MaxTRES'])
+        puppet_job_tres = build_puppet_tres(row['MaxTRES'])
+        puppet_user_tres = build_puppet_tres(row['MaxTRESPU'])
 
         puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres, #type: ignore
-                                                 job=puppet_max_tres,
+                                                 job=puppet_job_tres,
+                                                 user=puppet_user_tres,
                                                  priority=row['Priority'])) 
         
         if filter_row:
