@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.04.2023
 
+import argparse
 import csv
 from enum import Enum, auto
 from io import StringIO
@@ -460,6 +461,12 @@ def add_sync_args(parser):
                         help='Run sacctmgr commands with sudo.')
     parser.add_argument('--apply', action='store_true', default=False,
                         help='Execute and apply the Slurm changes.')
+    parser.add_argument('--slurm-associations', type=argparse.FileType('r'),
+                        help='Read slurm associations from the specified file '
+                             'instead of parsing from a `sacctmgr show -P assoc` call.')
+    parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
+                        help='Read slurm QoSes from the specified file '
+                             'instead of parsing from a `sacctmgr show -P qos` call.')
     
     parser.add_argument('yaml_files', nargs='+',
                         help='Source YAML files.')
@@ -488,9 +495,15 @@ def sync(args):
 
     sacctmgr = SAcctMgr(sudo=args.sudo)
     console.print('Getting current associations...')
-    slurm_associations = sacctmgr.get_slurm_association_state()
+    if args.slurm_associations:
+        slurm_associations = build_slurm_association_state(args.slurm_associations)
+    else:
+        slurm_associations = sacctmgr.get_slurm_association_state()
     console.print('Getting current QoSes...')
-    slurm_qos_map, _ = sacctmgr.get_slurm_qos_state()
+    if args.slurm_qoses:
+        slurm_qos_map, _ = build_slurm_qos_state(args.slurm_qoses)
+    else:
+        slurm_qos_map, _ = sacctmgr.get_slurm_qos_state()
 
     console.rule('Reconcile Puppet and Slurm.')
     console.print('Generating reconciliation commands...')
