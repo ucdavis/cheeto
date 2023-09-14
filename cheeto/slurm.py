@@ -13,9 +13,8 @@ from io import StringIO
 import json
 import os
 import sys
-from typing import Tuple, Optional
+from typing import Any, Generator, Tuple, Optional, TextIO
 
-from rich import print as rprint
 from rich.console import Console
 from rich.progress import track
 import sh
@@ -25,16 +24,43 @@ from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
                      PuppetAccountMap,
-                     SlurmQOSTRES,
                      SlurmQOS)
 from .utils import (check_filter,
                     filter_nulls)
 
+class SControl:
+
+    def __init__(self, scontrol_path: Optional[str] = None,
+                       sudo: bool = False):
+        if scontrol_path is None:
+            self.scontrol_path = sh.which('scontrol').strip() #type: ignore
+        else:
+            self.scontrol_path = scontrol_path
+
+        if not os.path.exists(self.scontrol_path):
+            raise RuntimeError(f'{self.scontrol_path} does not exist!')
+
+        if sudo:
+            self.cmd = sh.sudo.bake(self.scontrol_path, '-oQ')
+        else:
+            self.cmd = sh.Command(self.scontrol_path).bake('-oQ')
+
+        self.show = self.cmd.bake('show')
+
+    def show_partitions(self) -> sh.Command:
+        return self.show.bake('partitions')
+
+    @staticmethod
+    def get_scontrol_parser(fp: TextIO) -> Generator[dict[str, str], Any, None]:
+        for line in fp:
+            tokens = line.strip().split()
+            tuples = (t.partition('=') for t in tokens)
+            yield {k: v for k, _, v in tuples}
 
 
 class SAcctMgr:
 
-    def __init__(self, sacctmgr_path: str = None,
+    def __init__(self, sacctmgr_path: Optional[str] = None,
                        sudo: bool = False):
         if sacctmgr_path is None:
             self.sacctmgr_path = sh.which('sacctmgr').strip() #type: ignore
@@ -54,7 +80,7 @@ class SAcctMgr:
         self.show = self.cmd.bake('show', '-P')
 
     def add_account(self, account_name: str,
-                          max_jobs: int = None) -> sh.Command:
+                          max_jobs: Optional[int] = None) -> sh.Command:
         args = ['account', account_name]
         if max_jobs is not None:
             args.append(f'MaxJobs={max_jobs}')
@@ -99,8 +125,8 @@ class SAcctMgr:
                              f'qos={qos_name}')
 
     def remove_user(self, user_name: str,
-                          account_name: str = None,
-                          partition_name: str = None) -> sh.Command:
+                          account_name: Optional[str] = None,
+                          partition_name: Optional[str] = None) -> sh.Command:
 
         args = ['user', f'user={user_name}']
         if account_name is not None:
@@ -218,7 +244,6 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
             filter_row = check_filter(row, filter_accounts_on)
             if not filter_row:
                 extras = int(row['MaxJobs']) if 'MaxJobs' in row else None
-
                 associations['accounts'][row['Account']] = extras
         elif 'User' in row:
             filter_row = check_filter(row, filter_users_on)
@@ -299,6 +324,16 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
                 puppet_associations['users'][(user_name, account_name, partition_name)] = qos_name
 
     return puppet_associations
+
+
+def get_group_slurm_partitions(group: str, puppet_data: PuppetAccountMap):
+    try:
+        slurm = puppet_data.group[group].slurm
+        partitions = slurm.partitions
+    except (KeyError, AttributeError):
+        return None, None
+    else:
+        return slurm.account, list(partitions.keys())
 
 
 def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]:
@@ -483,3 +518,18 @@ def sync(args):
                 console.out(str(command), highlight=False)
 
     print(json.dumps(report, indent=2)) 
+
+
+
+
+
+def audit_partitions(args):
+    console = Console(stderr=True)
+
+    yaml_forest = parse_yaml_forest(args.yaml_files,
+                                    merge_on=MergeStrategy.ALL)
+    _, puppet_data = next(validate_yaml_forest(yaml_forest,
+                                               PuppetAccountMap,
+                                               strict=True))
+
+

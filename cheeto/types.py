@@ -9,7 +9,8 @@
 
 from collections import OrderedDict
 import dataclasses
-from typing import TextIO
+from pathlib import Path
+from typing import Union
 
 from marshmallow import validate as mv
 from marshmallow import fields as mf
@@ -17,6 +18,8 @@ from marshmallow import post_dump
 from marshmallow_dataclass import NewType
 
 from . import _yaml
+from .utils import parse_yaml
+
 
 UINT_MAX = 4_294_967_296
 
@@ -26,7 +29,7 @@ class BaseModel:
     SKIP_VALUES = [None]
 
     def items(self):
-        return dataclasses.asdict(self).items()
+        return dataclasses.asdict(self).items() #type: ignore
 
     @post_dump
     def remove_skip_values(self, data, **kwargs):
@@ -38,6 +41,14 @@ class BaseModel:
     class Meta:
         ordered = True
         render_module = _yaml
+
+    @classmethod
+    def load_yaml(cls, filename: Union[Path, str]):
+        return cls.Schema().load(parse_yaml(str(filename))) #type: ignore
+
+    def save_yaml(self, filename: Path):
+        with filename.open('w') as fp:
+            print(type(self).Schema().dumps(self), file=fp) #type: ignore
 
 
 KerberosID = NewType(

@@ -2,16 +2,14 @@
 # -*- coding: utf-8 -*-
 # (c) Camille Scott, 2023
 # (c) The Regents of the University of California, Davis, 2023
-# File   : errors.py
+# File   : templating.py
 # License: Modified BSD
 # Author : Camille Scott <cswel@ucdavis.edu>
-# Date   : 15.05.2023
+# Date   : 27.07.2023
 
-from enum import IntEnum
+from jinja2 import Environment, FileSystemLoader
+
+from .utils import __pkg_dir__
 
 
-class ExitCode(IntEnum):
-    VALIDATION_ERROR = 1
-    BAD_MERGE = 2
-    INVALID_SPONSOR = 3
-
+PKG_TEMPLATES = __pkg_dir__ / 'templates'
