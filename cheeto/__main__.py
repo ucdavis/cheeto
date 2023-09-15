@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import __version__
 from . import hippo
+from . import monitor
 from . import log
 from . import nocloud
 from . import puppet
@@ -76,7 +77,14 @@ def main():
     add_common_args(slurm_sync_parser)
     slurm.add_sync_args(slurm_sync_parser)
     slurm_sync_parser.set_defaults(func = slurm.sync)
-    
+
+
+    monitor_parser = commands.add_parser('monitor')
+    monitor_commands = monitor_parser.add_subparsers()
+    monitor_power_parser = monitor_commands.add_parser('power')
+    add_common_args(monitor_power_parser)
+    monitor.add_power_args(monitor_power_parser)
+    monitor_power_parser.set_defaults(func=monitor.power)
 
     args = parser.parse_args()
     with args.log.open('a') as log_fp:
