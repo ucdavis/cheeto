@@ -182,6 +182,7 @@ class PuppetGroupStorage(BaseModel):
     group: Optional[KerberosID] = None #type: ignore
     autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
+    globus: Optional[bool] = False
 
 
 @require_kwargs
