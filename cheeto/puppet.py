@@ -69,33 +69,39 @@ class SlurmQOSTRES(BaseModel):
             in_data['mem'] = f'{size_to_megs(in_data["mem"])}M'
         return in_data
 
+    def to_slurm(self) -> str:
+        tokens = [f'cpu={self.cpus if self.cpus is not None else -1}',
+                  f'mem={size_to_megs(self.mem) if self.mem is not None else -1}',
+                  f'gres/gpu={self.gpus if self.gpus is not None else -1}']
+        return ','.join(tokens)
+
+    @staticmethod
+    def negate() -> str:
+        return 'cpu=-1,mem=-1,gres/gpu=-1'
+
 
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOS(BaseModel):
-    group: SlurmQOSTRES = None #type: ignore
+    group: Optional[SlurmQOSTRES] = None #type: ignore
+    user: Optional[SlurmQOSTRES] = None #type: ignore
     job: Optional[SlurmQOSTRES] = None #type: ignore
     priority: Optional[int] = 0
+    flags: Optional[Set[SlurmQOSFlag]] = None #type: ignore
 
-    def to_slurm(self):
+    def to_slurm(self) -> List[str]:
         tokens = []
-        if self.group is not None:
-            tres = {}
-            for k, v in asdict(self.group).items():
-                if v is None:
-                    v = -1
-                tres[k] = v
-
-            tokens.append(f'GrpCPUs={tres["cpus"]}')
-            if tres['mem'] != -1:
-                tres['mem'] = size_to_megs(tres["mem"])
-            tokens.append(f'GrpMem={tres["mem"]}')
-            tokens.append(f'GrpTres=gres/gpu={tres["gpus"]}')
-        if self.job is not None:
-            cpus = -1 if self.job.cpus is None else self.job.cpus
-            if self.job.cpus is not None:
-                tokens.append(f'MaxCpus={cpus}')
+        grptres = self.group.to_slurm() if self.group is not None else SlurmQOSTRES.negate()
+        usertres = self.user.to_slurm() if self.user is not None else SlurmQOSTRES.negate()
+        jobtres = self.job.to_slurm() if self.job is not None else SlurmQOSTRES.negate()
+        flags = ','.join(self.flags) if self.flags is not None else '-1'
+        
+        tokens.append(f'GrpTres={grptres}')
+        tokens.append(f'MaxTRESPerUser={usertres}')
+        tokens.append(f'MaxTresPerJob={jobtres}')
+        tokens.append(f'Flags={flags}')
         tokens.append(f'Priority={self.priority}')
+
         return tokens
 
 

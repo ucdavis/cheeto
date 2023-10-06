@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.04.2023
 
+import argparse
 import csv
 from enum import Enum, auto
 from io import StringIO
@@ -149,8 +150,12 @@ class SAcctMgr:
                                 f'account={account_name}',
                                 f'partition={partition_name}')
     
-    def show_associations(self) -> sh.Command:
-        return self.show.bake('associations')
+    def show_associations(self, query: Optional[dict] = None) -> sh.Command:
+        cmd = self.show.bake('associations')
+        if query is not None:
+            query = [f'{k}={v}' for k, v in query.items()]
+            cmd = cmd.bake('where', *query)
+        return cmd
 
     def show_qos(self) -> sh.Command:
         return self.show.bake('qos')
@@ -166,9 +171,9 @@ class SAcctMgr:
         buf.seek(0)
         return build_slurm_qos_state(buf)
 
-    def get_slurm_association_state(self) -> dict:
+    def get_slurm_association_state(self, query: Optional[dict] = None) -> dict:
         buf = StringIO()
-        cmd = self.show_associations()
+        cmd = self.show_associations(query=query)
         cmd(_out=buf)
         buf.seek(0)
         return build_slurm_association_state(buf)
@@ -216,10 +221,12 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         filter_row = check_filter(row, filter_on)
     
         puppet_grp_tres = build_puppet_tres(row['GrpTRES'])
-        puppet_max_tres = build_puppet_tres(row['MaxTRES'])
+        puppet_job_tres = build_puppet_tres(row['MaxTRES'])
+        puppet_user_tres = build_puppet_tres(row['MaxTRESPU'])
 
         puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres, #type: ignore
-                                                 job=puppet_max_tres,
+                                                 job=puppet_job_tres,
+                                                 user=puppet_user_tres,
                                                  priority=row['Priority'])) 
         
         if filter_row:
@@ -454,6 +461,12 @@ def add_sync_args(parser):
                         help='Run sacctmgr commands with sudo.')
     parser.add_argument('--apply', action='store_true', default=False,
                         help='Execute and apply the Slurm changes.')
+    parser.add_argument('--slurm-associations', type=argparse.FileType('r'),
+                        help='Read slurm associations from the specified file '
+                             'instead of parsing from a `sacctmgr show -P assoc` call.')
+    parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
+                        help='Read slurm QoSes from the specified file '
+                             'instead of parsing from a `sacctmgr show -P qos` call.')
     
     parser.add_argument('yaml_files', nargs='+',
                         help='Source YAML files.')
@@ -482,9 +495,15 @@ def sync(args):
 
     sacctmgr = SAcctMgr(sudo=args.sudo)
     console.print('Getting current associations...')
-    slurm_associations = sacctmgr.get_slurm_association_state()
+    if args.slurm_associations:
+        slurm_associations = build_slurm_association_state(args.slurm_associations)
+    else:
+        slurm_associations = sacctmgr.get_slurm_association_state()
     console.print('Getting current QoSes...')
-    slurm_qos_map, _ = sacctmgr.get_slurm_qos_state()
+    if args.slurm_qoses:
+        slurm_qos_map, _ = build_slurm_qos_state(args.slurm_qoses)
+    else:
+        slurm_qos_map, _ = sacctmgr.get_slurm_qos_state()
 
     console.rule('Reconcile Puppet and Slurm.')
     console.print('Generating reconciliation commands...')
@@ -533,3 +552,5 @@ def audit_partitions(args):
                                                strict=True))
 
 
+def clone(args):
+    pass
