@@ -109,18 +109,20 @@ DataQuota = NewType(
     "DataQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]')
 )
 
+SlurmQOSValidFlags = ("DenyOnLimit",
+                      "EnforceUsageThreshold",
+                      "NoDecay",
+                      "NoReserve",
+                      "OverPartQOS",
+                      "PartitionMaxNodes",
+                      "PartitionMinNodes",
+                      "PartitionTimeLimit",
+                      "RequiresReservation",
+                      "UsageFactorSafe")
+
 SlurmQOSFlag = NewType(
     "SlurmQOSFlag", str, validate=mv.OneOf(
-        ("DenyOnLimit",
-         "EnforceUsageThreshold",
-         "NoDecay",
-         "NoReserve",
-         "OverPartQOS",
-         "PartitionMaxNodes",
-         "PartitionMinNodes",
-         "PartitionTimeLimit",
-         "RequiresReservation",
-         "UsageFactorSafe")
+        SlurmQOSValidFlags
     )
 )
 
