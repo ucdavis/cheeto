@@ -14,4 +14,5 @@ class ExitCode(IntEnum):
     VALIDATION_ERROR = 1
     BAD_MERGE = 2
     INVALID_SPONSOR = 3
-
+    FILE_EXISTS = 4
+    BAD_LDAP_QUERY = 5

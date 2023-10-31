@@ -15,6 +15,7 @@ import os
 from typing import Optional, List, Mapping, Union, Set
 import sys
 
+import ldap
 import marshmallow
 from marshmallow import post_dump
 from marshmallow_dataclass import dataclass
@@ -28,7 +29,8 @@ from .utils import (require_kwargs,
                     parse_yaml,
                     puppet_merge,
                     EnumAction,
-                    size_to_megs)
+                    size_to_megs,
+                    link_relative)
 
 
 MIN_PIGROUP_GID = 100_000_000
@@ -132,7 +134,7 @@ class PuppetUserRecord(BaseModel):
     email: Email #type: ignore
     uid: LinuxUID #type: ignore
     gid: LinuxGID #type: ignore
-    groups: Optional[Set[str]] = None
+    groups: Optional[Set[KerberosID]] = None #type: ignore
     group_sudo: Optional[List[KerberosID]] = None #type: ignore
     password: Optional[LinuxPassword] = None #type: ignore
     shell: Optional[Shell] = None #type: ignore
@@ -195,6 +197,7 @@ class PuppetGroupStorage(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupRecord(BaseModel):
     gid: LinuxGID #type: ignore
+    sponsors: Optional[List[KerberosID]] = None #type: ignore
     ensure: Optional[PuppetEnsure] = None #type: ignore
     tag: Optional[Set[str]] = None
 
@@ -247,6 +250,37 @@ class MergeStrategy(Enum):
     ALL = 'all'
     PREFIX = 'prefix'
     NONE = 'none'
+
+
+
+def validate_sponsors(source_root: str, 
+                      puppet_data: PuppetAccountMap,
+                      args: argparse.Namespace,
+                      **kwargs) -> None:
+    logger = logging.getLogger(__name__)
+    for group_name, group in puppet_data.group.items():
+        if group.sponsors is not None:
+            for sponsor_name in group.sponsors:
+                if sponsor_name not in puppet_data.user:
+                    logger.error(f'[red]ValidationError: {source_root}[/]')
+                    logger.error(f'group.{group_name}.sponsors: {sponsor_name} not a valid user.')
+                    if args.strict:
+                        sys.exit(ExitCode.VALIDATION_ERROR)
+
+
+def validate_user_groups(source_root: str, 
+                         puppet_data: PuppetAccountMap,
+                         args: argparse.Namespace,
+                         **kwargs) -> None:
+    logger = logging.getLogger(__name__)
+    for user_name, user in puppet_data.user.items():
+        if user.groups is not None:
+            for group_name in user.groups:
+                if not (group_name in puppet_data.group or group_name in puppet_data.user):
+                    logger.error(f'[red]ValidationError: {source_root}[/]')
+                    logger.error(f'user.{user_name}.groups: {group_name} not a valid group.')
+                    if args.strict:
+                        sys.exit(ExitCode.VALIDATION_ERROR)
 
 
 def parse_yaml_forest(yaml_files: list,
@@ -314,6 +348,9 @@ def add_validate_args(parser: argparse.ArgumentParser):
     add_yaml_load_args(parser)
     parser.add_argument('--dump', default='/dev/stdout',
                         help='Dump the validated YAML to the given file')
+    parser.add_argument('--echo', action='store_true', default=False)
+    parser.add_argument('--postload-validate', default=False,
+                        action='store_true')
     parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
 
@@ -328,8 +365,12 @@ def validate_yamls(args: argparse.Namespace):
     for source_file, puppet_data in validate_yaml_forest(yaml_forest,
                                                          PuppetAccountMap,
                                                          args.strict):
-        if not args.quiet:
+        if not args.quiet: 
             console.rule(source_file, style='blue')
+
+        if args.postload_validate:
+            validate_sponsors(source_file, puppet_data, args)
+            validate_user_groups(source_file, puppet_data, args)
 
         output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
         hl_yaml = Syntax(output_yaml,
@@ -344,6 +385,104 @@ def validate_yamls(args: argparse.Namespace):
                 else:
                     print(output_yaml, file=fp)
 
-        if args.dump != '/dev/stdout' and not args.quiet:
+        if args.dump != '/dev/stdout' and args.echo and not args.quiet:
             console.print(hl_yaml)
+
+
+class LDAPQueryParams(Enum):
+    username = 'uid'
+    uuid = 'ucdPersonUUID'
+    email = 'mail'
+    displayname = 'displayName'
+
+
+def add_create_nologin_user_args(parser: argparse.ArgumentParser):
+    qgroup = parser.add_argument_group('LDAP Query Parameters')
+    xgroup = qgroup.add_mutually_exclusive_group(required=True)
+    for param in LDAPQueryParams:
+        xgroup.add_argument(f'--{param.name}', metavar=param.value)
+    
+    lgroup = parser.add_argument_group('LDAP Server Arguments')
+    lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
+
+    parser.add_argument('--site-dir', 
+                        type=Path,
+                        required=True,
+                        help='Site-specific puppet accounts directory.')
+    parser.add_argument('--global-dir',
+                        type=Path,
+                        required=True,
+                        help='Global puppet accounts directory.')
+    parser.add_argument('--force',
+                        default=False,
+                        action='store_true',
+                        help='Overwrite existing global YAML file.')
+
+
+def flatten_and_decode(data: dict) -> dict:
+    return {key: value[0].decode() for key, value in data.items()} #type: ignore
+
+
+def create_nologin_user(args: argparse.Namespace):
+    console = Console(stderr=True)
+    logger = logging.getLogger(__name__)
+    conn = ldap.initialize(args.ldap_uri)
+    
+    query = ','.join((f'{param.value}={getattr(args, param.name)}' for param in LDAPQueryParams \
+                      if getattr(args, param.name) is not None))
+
+    console.print(f'Server: {args.ldap_uri}')
+    console.print(f'Query: {query}')
+
+    try:
+        result = conn.search_s('ou=People,dc=ucdavis,dc=edu',
+                               ldap.SCOPE_SUBTREE, #type: ignore
+                               query,
+                               [param.value for param in LDAPQueryParams])
+    except Exception as e:
+        console.print(e)
+    else:
+        if not (0 < len(result) < 2): #type: ignore
+            logger.error(f'Should get exactly one result (got {len(result)})') #type: ignore
+            logger.error(result)
+            sys.exit(ExitCode.BAD_LDAP_QUERY)
+        
+        data = flatten_and_decode(result[0][1]) #type: ignore
+        console.print(f'Result: {data}')
+
+        user_name = data['uid']
+        yaml_dumper = PuppetUserMap.global_dumper()
+        yaml_filename = args.global_dir / f'{user_name}.yaml'
+
+        if not args.force and os.path.exists(yaml_filename):
+            logger.error(f'{yaml_filename} already exists! Exiting.')
+            sys.exit(ExitCode.FILE_EXISTS)
+
+        user_record = PuppetUserMap(
+            user = {
+                user_name: PuppetUserRecord(
+                    fullname = data['displayName'],
+                    email = data.get('mail', ['donotreply@ucdavis.edu']),
+                    uid = data['ucdPersonUUID'],
+                    gid = data['ucdPersonUUID'],
+                )
+            }
+        )
+
+        output_yaml = yaml_dumper.dumps(user_record) #type: ignore
+        hl_yaml = Syntax(output_yaml,
+                         'yaml',
+                         theme='github-dark',
+                         background_color='default')
+
+        if not args.quiet:
+            console.print(hl_yaml)
+
+        with yaml_filename.open('w') as fp:
+            print(output_yaml, file=fp)
+
+        try:
+            link_relative(args.site_dir, yaml_filename)
+        except FileExistsError:
+            logger.info(f'{yaml_filename} already linked to {args.site_dir}.')
 
