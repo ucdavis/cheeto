@@ -32,7 +32,6 @@ def main():
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
     commands = parser.add_subparsers()
 
-
     hippo_parser = commands.add_parser('hippo')
     hippo_commands = hippo_parser.add_subparsers()
     hippo_convert_parser = hippo_commands.add_parser('convert')
@@ -60,6 +59,12 @@ def main():
     validate_puppet_parser.set_defaults(func=puppet.validate_yamls)
     add_common_args(validate_puppet_parser)
     puppet.add_validate_args(validate_puppet_parser)
+
+
+    create_nologin_user_parser = commands.add_parser('create-nologin-user')
+    create_nologin_user_parser.set_defaults(func=puppet.create_nologin_user)
+    add_common_args(create_nologin_user_parser)
+    puppet.add_create_nologin_user_args(create_nologin_user_parser)
 
     nocloud_parser = commands.add_parser('nocloud-render')
     nocloud_parser.set_defaults(func=nocloud.render)
