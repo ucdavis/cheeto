@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 17.02.2023
 
+import argparse
 from dataclasses import asdict
 from datetime import datetime
 import logging
@@ -25,6 +26,7 @@ import marshmallow
 from marshmallow_dataclass import dataclass
 import sh
 
+from .args import subcommand
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
 from .mail import Mail
@@ -101,7 +103,8 @@ def add_sanitize_args(parser):
                         help='Global puppet YAML.')
 
 
-def sanitize(args):
+@subcommand('sanitize', add_sanitize_args)
+def sanitize(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
     yaml_files = [args.global_file, args.site_file] if args.site_file.exists() \
@@ -136,7 +139,8 @@ def add_validate_args(parser):
                         required=True)
 
 
-def validate(args) -> None:
+@subcommand('validate', add_validate_args)
+def validate(args: argparse.Namespace) -> None:
     for hippo_file in args.hippo_file:
         record = load_hippo(hippo_file, quiet=args.quiet)
         if record is None:
@@ -268,7 +272,7 @@ def create_sponsor_group(sponsor_username: str,
 
 def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
     try:
-        storage = puppet_data.group[group].storage
+        storage = puppet_data.group[group].storage #type: ignore
     except (KeyError, AttributeError):
         return None
     else:
@@ -317,7 +321,8 @@ def add_convert_args(parser):
                         help='Accounts that sponsor the sponsors.')
 
 
-def convert(args):
+@subcommand('convert', add_convert_args)
+def convert(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
     current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
@@ -353,7 +358,8 @@ def create_branch_name(prefix: Optional[str] = 'cheeto-hippo-sync') -> str:
     return f'{prefix}.{timestamp}'
 
 
-def sync(args):
+@subcommand('sync', add_sync_args)
+def sync(args: argparse.Namespace):
     templates_dir = PKG_TEMPLATES / 'emails'
     jinja_env = Environment(loader=FileSystemLoader(searchpath=templates_dir))
 

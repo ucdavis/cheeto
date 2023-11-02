@@ -7,11 +7,13 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 01.05.2023
 
+import argparse
 from datetime import datetime
-from io import StringIO
 import time
 
 import sh
+
+from .args import subcommand
 
 
 def add_power_args(parser):
@@ -25,7 +27,8 @@ def parse_dcmi_power(dcmi_str: str):
     return int(reading.removesuffix('Watts').strip())
 
 
-def power(args):
+@subcommand('power', add_power_args)
+def power(args: argparse.Namespace):
     cmd = sh.sudo.bake('ipmitool', 'dcmi', 'power', 'reading')
     
     with open(args.output, 'w') as fp:

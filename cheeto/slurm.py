@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.progress import track
 import sh
 
+from .args import subcommand
 from .types import *
 from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
@@ -153,8 +154,8 @@ class SAcctMgr:
     def show_associations(self, query: Optional[dict] = None) -> sh.Command:
         cmd = self.show.bake('associations')
         if query is not None:
-            query = [f'{k}={v}' for k, v in query.items()]
-            cmd = cmd.bake('where', *query)
+            query = [f'{k}={v}' for k, v in query.items()] #type: ignore
+            cmd = cmd.bake('where', *query) #type: ignore
         return cmd
 
     def show_qos(self) -> sh.Command:
@@ -472,11 +473,13 @@ def add_sync_args(parser):
                         help='Source YAML files.')
 
 
-def show_qos(args):
+@subcommand('show-qos')
+def show_qos(args: argparse.Namespace):
     pass
 
 
-def sync(args):
+@subcommand('sync', add_sync_args)
+def sync(args: argparse.Namespace):
     console = Console(stderr=True)
 
     console.rule('Load association data.')

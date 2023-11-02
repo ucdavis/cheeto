@@ -23,6 +23,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
 
+from .args import subcommand, add_common_args
 from .errors import ExitCode
 from .types import *
 from .utils import (require_kwargs,
@@ -252,6 +253,11 @@ class MergeStrategy(Enum):
     NONE = 'none'
 
 
+class SiteData:
+
+    def __init__(self):
+        pass
+
 
 def validate_sponsors(source_root: str, 
                       puppet_data: PuppetAccountMap,
@@ -330,31 +336,29 @@ def validate_yaml_forest(yaml_forest: dict,
             yield source_root, puppet_data
 
 
-def add_yaml_load_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--merge',
+def add_validate_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group('YAML Validation')
+    group.add_argument('--dump', default='/dev/stdout',
+                  help='Dump the validated YAML to the given file')
+    group.add_argument('--echo', action='store_true', default=False)
+    group.add_argument('--postload-validate', default=False,
+                  action='store_true')
+    group.add_argument('files', nargs='+',
+                        help='YAML files to validate.')
+    group.add_argument('--merge',
                         default=MergeStrategy.NONE,
                         type=MergeStrategy,
                         action=EnumAction,
                         help='Merge the given YAML files before validation.')
-    parser.add_argument('--strict', action='store_true', default=False,
+    group.add_argument('--strict', action='store_true', default=False,
                         help='Terminate on validation errors.')
-    parser.add_argument('--partial',
+    group.add_argument('--partial',
                         default=False,
                         action='store_true',
                         help='Allow partial loading (ie missing keys).')
 
 
-def add_validate_args(parser: argparse.ArgumentParser):
-    add_yaml_load_args(parser)
-    parser.add_argument('--dump', default='/dev/stdout',
-                        help='Dump the validated YAML to the given file')
-    parser.add_argument('--echo', action='store_true', default=False)
-    parser.add_argument('--postload-validate', default=False,
-                        action='store_true')
-    parser.add_argument('files', nargs='+',
-                        help='YAML files to validate.')
-
-
+@subcommand('validate', add_validate_args)
 def validate_yamls(args: argparse.Namespace):
 
     console = Console(stderr=True)
@@ -402,7 +406,7 @@ def add_create_nologin_user_args(parser: argparse.ArgumentParser):
     for param in LDAPQueryParams:
         xgroup.add_argument(f'--{param.name}', metavar=param.value)
     
-    lgroup = parser.add_argument_group('LDAP Server Arguments')
+    lgroup = parser.add_argument_group('LDAP Server')
     lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
 
     parser.add_argument('--site-dir', 
@@ -423,6 +427,8 @@ def flatten_and_decode(data: dict) -> dict:
     return {key: value[0].decode() for key, value in data.items()} #type: ignore
 
 
+@subcommand('create-nologin-user', 
+            add_create_nologin_user_args)
 def create_nologin_user(args: argparse.Namespace):
     console = Console(stderr=True)
     logger = logging.getLogger(__name__)
