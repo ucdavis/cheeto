@@ -8,8 +8,9 @@
 # Date   : 17.02.2023
 
 import argparse
-from dataclasses import asdict
 from datetime import datetime
+from enum import auto, Enum
+import glob
 import logging
 import os
 from pathlib import Path
@@ -18,7 +19,7 @@ import socket
 import sys
 import time
 import traceback
-from typing import Mapping, Optional, Tuple, Union, List
+from typing import Optional, Tuple, Union, List, Set
 
 from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader
@@ -30,29 +31,18 @@ from .args import subcommand
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
 from .mail import Mail
-from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGroupRecord,
+from .parsing import (parse_yaml,
+                      puppet_merge,
+                      parse_yaml_forest,
+                      validate_yaml_forest)
+from .puppet import (PuppetAccountMap, 
+                     SiteData,
                      PuppetUserRecord,
                      PuppetUserMap,
-                     parse_yaml_forest,
-                     validate_yaml_forest,
                      MergeStrategy)
-from .utils import link_relative, require_kwargs
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import link_relative, require_kwargs
-from .utils import parse_yaml, puppet_merge
-from .slurm import get_group_slurm_partitions
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoSponsor(BaseModel):
-    accountname: str
-    name: str
-    email: Email #type: ignore
-    kerb: KerberosID #type: ignore
-    iam: IAMID #type: ignore
-    mothra: MothraID #type: ignore
+from .utils import require_kwargs
 
 
 @require_kwargs
@@ -75,21 +65,9 @@ class HippoMeta(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class HippoRecord(BaseModel):
-    sponsor: HippoSponsor
+    groups: List[KerberosID] #type: ignore
     account: HippoAccount
     meta: HippoMeta
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoSponsorGroupMapping(BaseModel):
-    mapping: Mapping[KerberosID, KerberosID] #type: ignore
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoAdminSponsorList(BaseModel):
-    sponsors: List[KerberosID] #type: ignore
 
 
 def add_sanitize_args(parser):
@@ -122,8 +100,8 @@ def sanitize(args: argparse.Namespace):
         logger.error(f'Merge resulted in multiple users.')
         sys.exit(ExitCode.BAD_MERGE)
 
-    site_dumper = PuppetUserMap.site_dumper()
-    global_dumper = PuppetUserMap.global_dumper()
+    site_dumper = PuppetUserMap.site_schema()
+    global_dumper = PuppetUserMap.common_schema()
 
     with args.global_file.open('w') as fp:
         print(global_dumper.dumps(user_record), file=fp)
@@ -165,130 +143,106 @@ def load_hippo(hippo_file: Path,
         return hippo_record
 
 
-def hippo_to_puppet(hippo_file: Path,
-                    global_dir: Path,
-                    site_dir: Path,
-                    key_dir: Path,
-                    current_state: PuppetAccountMap,
-                    group_map: HippoSponsorGroupMapping,
-                    admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
-                                                                    Optional[str],
-                                                                    Optional[PuppetUserRecord],
-                                                                    Optional[HippoRecord]]:
+class PostConvert:
+
+    def __init__(self,
+                 hippo_path: Path,
+                 hippo_record: Optional[HippoRecord] = None,
+                 user_name: Optional[str] = None,
+                 user_record: Optional[PuppetUserRecord] = None):
+
+        self.hippo_path = hippo_path
+        self.hippo_record = hippo_record
+        self.user_name = user_name
+        self.user_record = user_record
+
+    @property
+    def commit_message(self):
+        groups = ', '.join(self.user_record.groups) #type: ignore
+        fqdn = socket.getfqdn()
+        return f'[{fqdn}] user: {self.user_name}, groups: {groups}'
+
+    
+
+
+
+def hippo_to_puppet(hippo_record: HippoRecord,
+                    site: SiteData,
+                    sponsors_group: str = 'sponsors') -> Tuple[str, PuppetUserRecord]:
+
     logger = logging.getLogger(__name__)
 
-    hippo_record = load_hippo(hippo_file)
-    if hippo_record is None:
-        logger.error(f'{hippo_file}: validation error!')
-        return None, None, None, None
-
     user_name = hippo_record.account.kerb
-    site_dumper = PuppetUserMap.site_dumper()
-    site_filename = site_dir / f'{user_name}.site.yaml'
+    uid = hippo_record.account.mothra
+    groups = set(hippo_record.groups)
 
-    global_dumper = PuppetUserMap.global_dumper()
-    global_filename = global_dir / f'{user_name}.yaml'
-
-    sponsor_group = f'{hippo_record.sponsor.kerb}grp'
-    if hippo_record.sponsor.kerb in admin_sponsors.sponsors:
-        logger.info(f'{user_name} appears to be a sponsor account.')
-        sponsor_group = create_sponsor_group(user_name,
-                                             hippo_record.account.mothra,
-                                             global_dir,
-                                             site_dir)
+    # Check if the group for sponsors is in the group request:
+    # if so, this is a new PI group and their group YAML should be created
+    if sponsors_group in groups: # type: ignore
+        logger.info(f'{user_name} appears to be a sponsor account, creating group.')
+        group_name = site.create_group_from_sponsor(user_name, uid)
+        # The PI's themselves needs to be in their new group
+        groups.add(group_name)
     else:
         logger.info(f'{user_name} appears to be a user account.')
 
-        if hippo_record.sponsor.kerb in group_map.mapping:
-            sponsor_group = group_map.mapping[hippo_record.sponsor.kerb]
-            
-        if sponsor_group not in current_state.group: #type: ignore
-            logger.error(f'{hippo_file}: {sponsor_group} is not a valid group.')
-            return None, None, None, None
-
-    user_record = PuppetUserRecord( #type: ignore
+    user = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
         email = hippo_record.account.email,
-        uid = hippo_record.account.mothra,
-        gid = hippo_record.account.mothra,
-        groups = [sponsor_group] #type: ignore
+        uid = uid,
+        gid = uid,
+        groups = groups
     )
 
-    user_map = PuppetUserMap( #type: ignore
-        user = {user_name: user_record}
-    )
+    site.update_user(user_name, user)
 
-    if os.path.exists(site_filename):
-        current_site_yaml = parse_yaml(str(site_filename))
-        merged_yaml = puppet_merge(asdict(user_map), current_site_yaml)
-        user_map = PuppetUserMap.Schema().load( #type: ignore
-            merged_yaml
-        )
-
-    if os.path.exists(global_filename):
-        logger.info(f'{hippo_file}: Global YAML {global_filename} exists, skipping.')
-    else:
-        with global_filename.open('w') as fp:
-            print(global_dumper.dumps(user_map), file=fp)
-
-    with site_filename.open('w') as fp:
-        print(site_dumper.dumps(user_map), file=fp)
-
-    try:
-        link_relative(site_dir, global_filename)
-    except FileExistsError:
-        logger.info(f'{global_filename} already linked to {site_dir}.')
-
-    if key_dir:
-        key_dest = key_dir / f'{hippo_record.account.kerb}.pub'
-        with key_dest.open('w') as fp:
-            print(hippo_record.account.key, file=fp)
-    
-    return user_name, sponsor_group, user_record, hippo_record
+    return user_name, user
 
 
-def create_sponsor_group(sponsor_username: str,
-                         sponsor_uid: int,
-                         global_dir: Path,
-                         site_dir: Path):
-    logger = logging.getLogger(__name__)
-    group_name = f'{sponsor_username}grp'
-    group_record = PuppetGroupRecord(
-        gid = MIN_PIGROUP_GID + sponsor_uid
-    )
-    group_map = PuppetGroupMap(
-        group = {group_name: group_record}
-    )
-    group_filename = global_dir / f'{group_name}.yaml'
-    if os.path.exists(group_filename):
-        logger.warning(f'{group_filename} already exists!')
-    else:
-        logger.info(f'Writing out {group_filename}')
-        group_map.save_yaml(group_filename)
-        link_relative(site_dir, group_filename)
+class HippoConverter:
 
-    return group_name
+    def __init__(self,
+                 root: Path,
+                 processed_dir: Optional[Path] = None,
+                 invalid_dir: Optional[Path] = None):
+        self.root = root
+        if processed_dir is None:
+            self.processed_dir = root / '.processed'
+        else:
+            self.processed_dir = processed_dir
+        if invalid_dir is None:
+            self.processed_dir = root / '.invalid'
+        else:
+            self.invalid_dir = invalid_dir
 
+    def find_yamls(self):
+        return self.root.glob('*.yaml')
 
-def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
-    try:
-        storage = puppet_data.group[group].storage #type: ignore
-    except (KeyError, AttributeError):
-        return None
-    else:
-        if storage is None:
-            return None
-        storages = []
-        for storage in storage:
-            if storage.owner == 'root' or 'root' in storage.name: # or storage.zfs is None or type(storage.zfs) is bool:
+    def convert_yamls(self,
+                      site: SiteData,
+                      sponsors_group: str = 'sponsors'):
+
+        logger = logging.getLogger(__name__)
+
+        for hippo_file in self.find_yamls():
+            hippo_record = load_hippo(hippo_file)
+            if hippo_record is None:
+                logger.error(f'{hippo_file}: validation error!')
+                shutil.move(hippo_file, self.invalid_dir)
                 continue
-            path = Path('/group') / storage.name
-            if storage.zfs not in (None, True, False):
-                quota = storage.zfs.quota
-            else:
-                quota = None
-            storages.append(path)
-        return storages
+
+            for group in set(hippo_record.groups):
+                if group not in site.data.group: #type: ignore
+                    logger.error(f'{hippo_file}: {group} is not a valid group.')
+                    shutil.move(hippo_file, self.invalid_dir)
+                    continue
+
+            user_name, user_record = hippo_to_puppet(hippo_record,
+                                                     site,
+                                                     sponsors_group=sponsors_group)
+            
+
+
 
 
 def add_convert_args(parser):
@@ -384,16 +338,8 @@ def _sync(args, jinja_env: Environment):
 
     with lock:
 
-        current_state = PuppetAccountMap.load_yaml(args.cluster_yaml) #type: ignore
+        site = SiteData(args.site_dir)
         
-        if args.group_map:
-            group_map = HippoSponsorGroupMapping.load_yaml(args.group_map) #type: ignore
-        else:
-            group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
-
-        admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
-
-
         gh = Gh(working_dir=args.global_dir)
         git = Git(working_dir=args.global_dir)
         git.checkout(branch=args.base_branch)()
@@ -409,17 +355,11 @@ def _sync(args, jinja_env: Environment):
         created_users = []
         for hippo_file in args.hippo_file:
             logger.info(f'Processing {hippo_file}...')
-            user, sponsor, user_record, hippo_record = hippo_to_puppet(hippo_file,
-                                                                       args.global_dir,
-                                                                       args.site_dir,
-                                                                       args.key_dir,
-                                                                       current_state,
-                                                                       group_map,
-                                                                       admin_sponsors_map)
-            created_users.append((user, sponsor, user_record, hippo_record))
-            if user is None:
+            user_name, groups, user_record, hippo_record = hippo_to_puppet(hippo_file, site)
+            created_users.append((user_name, groups, user_record, hippo_record))
+            if user_name is None:
                 continue
-            message = f'[{fqdn}] user: {user}, sponsor: {sponsor}'
+            message = f'[{fqdn}] user: {user_name}, groups: {groups}'
             git.add(Path('.'))()
             try:
                 git.commit(message)()

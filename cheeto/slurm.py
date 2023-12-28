@@ -334,16 +334,6 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
     return puppet_associations
 
 
-def get_group_slurm_partitions(group: str, puppet_data: PuppetAccountMap):
-    try:
-        slurm = puppet_data.group[group].slurm
-        partitions = slurm.partitions
-    except (KeyError, AttributeError):
-        return None, None
-    else:
-        return slurm.account, list(partitions.keys())
-
-
 def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]:
     deletions = []
     updates = []
@@ -468,7 +458,6 @@ def add_sync_args(parser):
     parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
                         help='Read slurm QoSes from the specified file '
                              'instead of parsing from a `sacctmgr show -P qos` call.')
-    
     parser.add_argument('yaml_files', nargs='+',
                         help='Source YAML files.')
 

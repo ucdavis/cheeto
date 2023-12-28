@@ -16,3 +16,4 @@ class ExitCode(IntEnum):
     INVALID_SPONSOR = 3
     FILE_EXISTS = 4
     BAD_LDAP_QUERY = 5
+

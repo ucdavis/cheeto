@@ -14,7 +14,7 @@ from argparse import ArgumentParser, Namespace, _SubParsersAction
 import os
 from functools import wraps
 from pathlib import Path
-from typing import Callable, NewType
+from typing import Callable
 from typing_extensions import Concatenate, ParamSpec
 
 P = ParamSpec('P')
