@@ -16,6 +16,7 @@ from typing import Callable, Optional, List, Mapping, Union, Set, Tuple, Type
 from typing_extensions import Concatenate
 import sys
 
+from filelock import FileLock
 import ldap
 import marshmallow
 from marshmallow import post_dump
@@ -413,6 +414,10 @@ class CommonData(YamlRepo):
 
         super().__init__(root, **kwargs)
 
+    def lock(self, timeout: int):
+        lock_path = self.root / '.cheeto.lock'
+        return FileLock(lock_path, timeout=timeout)
+
     def write_key(self, user_name: str,
                         key: str):
         with (self.key_dir / f'{user_name}.pub').open('w') as fp:
@@ -480,6 +485,9 @@ class SiteData(YamlRepo):
 
         if load:
             self.load()
+
+    def lock(self, timeout: int):
+        return self.common.lock(timeout)
 
     def update_user(self,
                     user_name: str,
