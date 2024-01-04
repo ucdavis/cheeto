@@ -142,26 +142,6 @@ def load_hippo(hippo_file: Path,
         return hippo_record
 
 
-class PostConvert:
-
-    def __init__(self,
-                 hippo_path: Path,
-                 hippo_record: Optional[HippoRecord] = None,
-                 user_name: Optional[str] = None,
-                 user_record: Optional[PuppetUserRecord] = None):
-
-        self.hippo_path = hippo_path
-        self.hippo_record = hippo_record
-        self.user_name = user_name
-        self.user_record = user_record
-
-    @property
-    def commit_message(self):
-        groups = ', '.join(self.user_record.groups) #type: ignore
-        fqdn = socket.getfqdn()
-        return f'[{fqdn}] user: {self.user_name}, groups: {groups}'
-
-
 class ConversionState(IntEnum):
     UNINIT = auto()
     INVALID = auto()
@@ -180,7 +160,7 @@ class ConversionOp(Enum):
 
 def hippo_to_puppet(hippo_record: HippoRecord,
                     site: SiteData,
-                    sponsors_group: str = 'sponsors') -> Tuple[str, PuppetUserRecord, ConversionOp]:
+                    sponsors_group: str) -> Tuple[str, PuppetUserRecord, ConversionOp]:
 
     logger = logging.getLogger(__name__)
 
@@ -212,6 +192,11 @@ def hippo_to_puppet(hippo_record: HippoRecord,
     )
 
     site.update_user(user_name, user)
+    
+    if hippo_record.account.key:
+        site.write_key(user_name, hippo_record.account.key)
+
+    logger.info(f'hippo_to_puppet: did {dataop.name} for {user_name} with groups {groups}') 
 
     return user_name, user, dataop
 
@@ -369,7 +354,7 @@ class HippoData:
         else:
             self.processed_dir = processed_dir
         if invalid_dir is None:
-            self.processed_dir = root / '.invalid'
+            self.invalid_dir = root / '.invalid'
         else:
             self.invalid_dir = invalid_dir
 
@@ -389,7 +374,6 @@ class HippoData:
                                        self.invalid_dir,
                                        sponsors_group=sponsors_group)
             yield converter
-
 
 
 def add_convert_args(parser):
@@ -414,7 +398,6 @@ def add_convert_args(parser):
                         required=True,
                         help='Path to merged cluster YAML.')
     parser.add_argument('--sponsor-group',
-                        type=Path,
                         required=True,
                         help='Group that sponsors belong to.')
 
@@ -453,7 +436,6 @@ def add_sync_args(parser):
                         required=True,
                         help='Site-specific puppet accounts directory.')
     parser.add_argument('--sponsor-group',
-                        type=Path,
                         default='sponsors',
                         help='Group that sponsors belong to.')
     parser.add_argument('--global-dir',
@@ -505,18 +487,22 @@ def _sync(args, jinja_env: Environment):
 
     site_data = SiteData(args.site_dir,
                          common_root=args.global_dir,
-                         key_dir=args.key_dir)
+                         key_dir=args.key_dir,
+                         load=False)
     hippo_data = HippoData(args.hippo_dir,
                            processed_dir=args.processed_dir,
                            invalid_dir=args.invalid_dir)
 
     with site_data.lock(args.timeout):
         
-        gh = Gh(working_dir=args.global_dir)
-        git = Git(working_dir=args.global_dir)
+        gh = Gh(working_dir=site_data.common.root)
+        git = Git(working_dir=site_data.common.root)
         git.checkout(branch=args.base_branch)()
         git.clean(force=True)()
         git.pull()()
+
+        site_data.load()
+
         working_branch, pr_title = branch_name_title()
         git.checkout(branch=working_branch, create=True)()
 
@@ -524,7 +510,7 @@ def _sync(args, jinja_env: Environment):
         
         get_commit = git.rev_parse()
         start_commit = get_commit().strip()
-        converters = list(hippo_data.convert_yamls(site_data, jinja_env, args.sponsors_group))
+        converters = list(hippo_data.convert_yamls(site_data, jinja_env, args.sponsor_group))
         for converter in converters:
             converter.preprocess()
             if converter.state == ConversionState.PREPROC:
@@ -560,11 +546,10 @@ def _sync(args, jinja_env: Environment):
         git.checkout(branch=args.base_branch)()
         git.pull()()
 
-        logger.info(f'Moving processed files to {args.processed_dir}')
+        logger.info(f'Moving processed files to {hippo_data.processed_dir}')
         for converter in converters:
             converter.postprocess()
                 
-
 
 def wait_on_pull_request(gh: Gh,
                          branch: str,

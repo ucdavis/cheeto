@@ -229,8 +229,7 @@ class PuppetGroupMap(BaseModel):
 
     @staticmethod
     def site_schema():
-        return PuppetGroupMap.Schema(only=['group.gid', #type: ignore
-                                           'group.tag',
+        return PuppetGroupMap.Schema(only=['group.tag', 
                                            'group.ensure',
                                            'group.sponsors',
                                            'group.storage',
@@ -348,7 +347,7 @@ def validate_user_groups(source_root: str,
 class YamlRepo:
 
     def __init__(self, root: Path,
-                       max_depth: int = 2,
+                       max_depth: int = 1,
                        strict: bool = True,
                        load: bool = False,
                        model: Type[BaseModel] = PuppetAccountMap):
@@ -365,7 +364,7 @@ class YamlRepo:
     def find_yamls(self) -> List[Path]:
         yamls = []
         for root_dir, _, filenames in self.root.walk():
-            if len(root_dir.parents) >= self.max_depth:
+            if len(root_dir.relative_to(self.root).parents) >= self.max_depth:
                 continue
             for filename in filenames:
                 if filename.endswith('.yaml'):
@@ -382,6 +381,8 @@ class YamlRepo:
 
     def load(self):
         yaml_paths = self.find_yamls()
+        logger = logging.getLogger(__name__)
+        logger.info(f'Loading {len(yaml_paths)} YAML files from {self.root}')
         self.data = self.parse_yamls(yaml_paths)
         self.postload_validate()
 
@@ -469,6 +470,7 @@ class SiteData(YamlRepo):
     def __init__(self,
                  root: Path,
                  common_root: Optional[Path] = None,
+                 key_dir: Optional[Path] = None,
                  load: bool = True,
                  **kwargs):
         
@@ -476,6 +478,7 @@ class SiteData(YamlRepo):
             self.common = CommonData(root.parent.parent)
         else:
             self.common = CommonData(common_root,
+                                     key_dir=key_dir,
                                      **kwargs)
 
         self.user_schema = PuppetUserMap.site_schema()
@@ -489,9 +492,17 @@ class SiteData(YamlRepo):
     def lock(self, timeout: int):
         return self.common.lock(timeout)
 
+    def write_key(self,
+                  user_name: str,
+                  key: str):
+        self.common.write_key(user_name, key)
+
     def update_user(self,
                     user_name: str,
                     user: PuppetUserRecord):
+
+        logger = logging.getLogger(__name__)
+        logger.info(f'update_user: {user_name}')
 
         site_path, common_path = self.get_entity_paths(user_name)
         if not site_path.exists():
