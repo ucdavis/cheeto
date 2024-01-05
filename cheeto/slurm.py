@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.progress import track
 import sh
 
+from .args import subcommand
 from .types import *
 from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
@@ -153,8 +154,8 @@ class SAcctMgr:
     def show_associations(self, query: Optional[dict] = None) -> sh.Command:
         cmd = self.show.bake('associations')
         if query is not None:
-            query = [f'{k}={v}' for k, v in query.items()]
-            cmd = cmd.bake('where', *query)
+            query = [f'{k}={v}' for k, v in query.items()] #type: ignore
+            cmd = cmd.bake('where', *query) #type: ignore
         return cmd
 
     def show_qos(self) -> sh.Command:
@@ -333,16 +334,6 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
     return puppet_associations
 
 
-def get_group_slurm_partitions(group: str, puppet_data: PuppetAccountMap):
-    try:
-        slurm = puppet_data.group[group].slurm
-        partitions = slurm.partitions
-    except (KeyError, AttributeError):
-        return None, None
-    else:
-        return slurm.account, list(partitions.keys())
-
-
 def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]:
     deletions = []
     updates = []
@@ -467,16 +458,17 @@ def add_sync_args(parser):
     parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
                         help='Read slurm QoSes from the specified file '
                              'instead of parsing from a `sacctmgr show -P qos` call.')
-    
     parser.add_argument('yaml_files', nargs='+',
                         help='Source YAML files.')
 
 
-def show_qos(args):
+@subcommand('show-qos')
+def show_qos(args: argparse.Namespace):
     pass
 
 
-def sync(args):
+@subcommand('sync', add_sync_args)
+def sync(args: argparse.Namespace):
     console = Console(stderr=True)
 
     console.rule('Load association data.')

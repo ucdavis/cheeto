@@ -8,13 +8,15 @@
 # Date   : 21.02.2023
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, field
 from enum import Enum
 import logging
 import os
-from typing import Optional, List, Mapping, Union, Set
+from typing import Callable, Optional, List, Mapping, Union, Set, Tuple, Type
+from typing_extensions import Concatenate
 import sys
 
+from filelock import FileLock
 import ldap
 import marshmallow
 from marshmallow import post_dump
@@ -23,11 +25,14 @@ from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
 
+from .args import subcommand
 from .errors import ExitCode
+from .parsing import (MergeStrategy,
+                      parse_yaml_forest,
+                      puppet_merge,
+                      validate_yaml_forest)
 from .types import *
 from .utils import (require_kwargs,
-                    parse_yaml,
-                    puppet_merge,
                     EnumAction,
                     size_to_megs,
                     link_relative)
@@ -162,7 +167,7 @@ class PuppetUserMap(BaseModel):
     user: Mapping[KerberosID, PuppetUserRecord] #type: ignore
 
     @staticmethod
-    def global_dumper():
+    def common_schema():
         return PuppetUserMap.Schema(only=['user.fullname', #type: ignore
                                           'user.email',
                                           'user.uid',
@@ -171,7 +176,7 @@ class PuppetUserMap(BaseModel):
                                           'user.shell'])
 
     @staticmethod
-    def site_dumper():
+    def site_schema():
         return PuppetUserMap.Schema(only=['user.groups', #type: ignore
                                           'user.group_sudo',
                                           'user.tag',
@@ -216,6 +221,20 @@ class PuppetGroupRecord(BaseModel):
 class PuppetGroupMap(BaseModel):
     group: Mapping[KerberosID, PuppetGroupRecord] #type: ignore
 
+    @staticmethod
+    def common_schema():
+        return PuppetGroupMap.Schema(only=['group.gid', #type: ignore
+                                           'group.tag',
+                                           'group.ensure'])
+
+    @staticmethod
+    def site_schema():
+        return PuppetGroupMap.Schema(only=['group.tag', 
+                                           'group.ensure',
+                                           'group.sponsors',
+                                           'group.storage',
+                                           'group.slurm'])
+
 
 @require_kwargs
 @dataclass(frozen=True)
@@ -240,22 +259,63 @@ class PuppetShareMap(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class PuppetMeta(BaseModel):
+    admin_sponsors: List[KerberosID] #type: ignore
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class PuppetAccountMap(BaseModel):
-    group: Optional[Mapping[KerberosID, PuppetGroupRecord]] = None #type: ignore
-    user: Optional[Mapping[KerberosID, PuppetUserRecord]] = None #type: ignore
-    share: Optional[Mapping[str, PuppetShareRecord]] = None
+    group: Mapping[KerberosID, PuppetGroupRecord] = field(default_factory=dict) #type: ignore
+    user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) #type: ignore
+    share: Mapping[str, PuppetShareRecord] = field(default_factory=dict)
+    meta: Optional[PuppetMeta] = None
 
 
-class MergeStrategy(Enum):
-    ALL = 'all'
-    PREFIX = 'prefix'
-    NONE = 'none'
+def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
+    try:
+        storage = puppet_data.group[group].storage #type: ignore
+    except (KeyError, AttributeError):
+        return None
+    else:
+        if storage is None:
+            return None
+        storages = []
+        for storage in storage:
+            if storage.owner == 'root' or 'root' in storage.name: # or storage.zfs is None or type(storage.zfs) is bool:
+                continue
+            path = Path('/group') / storage.name
+            if storage.zfs not in (None, True, False):
+                quota = storage.zfs.quota
+            else:
+                quota = None
+            storages.append(path)
+        return storages
 
 
+def get_group_slurm_partitions(group: str, puppet_data: PuppetAccountMap):
+    try:
+        slurm = puppet_data.group[group].slurm
+        partitions = slurm.partitions
+    except (KeyError, AttributeError):
+        return None, None
+    else:
+        return slurm.account, list(partitions.keys())
 
+
+postload_validator_t = Callable[Concatenate[str, PuppetAccountMap, bool, ...], None]
+_postload_validators : Mapping[str, postload_validator_t] = {}
+
+
+def postload_validator(func: postload_validator_t) -> postload_validator_t:
+    _postload_validators[func.__name__] = func
+    return func
+
+
+@postload_validator
 def validate_sponsors(source_root: str, 
                       puppet_data: PuppetAccountMap,
-                      args: argparse.Namespace,
+                      strict: Optional[bool] = True,
                       **kwargs) -> None:
     logger = logging.getLogger(__name__)
     for group_name, group in puppet_data.group.items():
@@ -264,13 +324,14 @@ def validate_sponsors(source_root: str,
                 if sponsor_name not in puppet_data.user:
                     logger.error(f'[red]ValidationError: {source_root}[/]')
                     logger.error(f'group.{group_name}.sponsors: {sponsor_name} not a valid user.')
-                    if args.strict:
+                    if strict:
                         sys.exit(ExitCode.VALIDATION_ERROR)
 
 
+@postload_validator
 def validate_user_groups(source_root: str, 
                          puppet_data: PuppetAccountMap,
-                         args: argparse.Namespace,
+                         strict: Optional[bool] = True,
                          **kwargs) -> None:
     logger = logging.getLogger(__name__)
     for user_name, user in puppet_data.user.items():
@@ -279,82 +340,255 @@ def validate_user_groups(source_root: str,
                 if not (group_name in puppet_data.group or group_name in puppet_data.user):
                     logger.error(f'[red]ValidationError: {source_root}[/]')
                     logger.error(f'user.{user_name}.groups: {group_name} not a valid group.')
-                    if args.strict:
+                    if strict:
                         sys.exit(ExitCode.VALIDATION_ERROR)
 
 
-def parse_yaml_forest(yaml_files: list,
-                      merge_on: Optional[MergeStrategy] = MergeStrategy.NONE) -> dict:
-    yaml_forest = {}
-    if merge_on is MergeStrategy.ALL:
-        parsed_yamls = [parse_yaml(f) for f in yaml_files]
-        yaml_forest = {'merged-all': puppet_merge(*parsed_yamls)}
+class YamlRepo:
 
-    elif merge_on is MergeStrategy.NONE:
-        yaml_forest = {f: parse_yaml(f) for f in yaml_files}
+    def __init__(self, root: Path,
+                       max_depth: int = 1,
+                       strict: bool = True,
+                       load: bool = False,
+                       model: Type[BaseModel] = PuppetAccountMap):
 
-    elif merge_on is MergeStrategy.PREFIX:
-        file_groups = {}
-        for filename in yaml_files:
-            prefix, _, _ = os.path.basename(filename).partition('.')
-            if prefix in file_groups:
-                file_groups[prefix].append(parse_yaml(filename))
-            else:
-                file_groups[prefix] = [parse_yaml(filename)]
-        yaml_forest = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
+        self.root : Path = root
+        self.max_depth : int = max_depth
+        self.strict : bool = strict
+        self.model : Type[BaseModel] = model
+        self.data : Optional[BaseModel] = None
+        self.postload_validators : List[postload_validator_t] = []
+        if load:
+            self.load()
 
-    return yaml_forest
+    def find_yamls(self) -> List[Path]:
+        yamls = []
+        for root_dir, _, filenames in self.root.walk():
+            if len(root_dir.relative_to(self.root).parents) >= self.max_depth:
+                continue
+            for filename in filenames:
+                if filename.endswith('.yaml'):
+                    yamls.append(root_dir / filename)
+        return sorted(yamls, reverse=True)
+
+    def parse_yamls(self, yaml_paths: List[Path]) -> BaseModel:
+        yaml_forest = parse_yaml_forest(yaml_paths,
+                                        merge_on=MergeStrategy.ALL)
+        _, forest = next(validate_yaml_forest(yaml_forest,
+                                              self.model,
+                                              strict=self.strict))
+        return forest
+
+    def load(self):
+        yaml_paths = self.find_yamls()
+        logger = logging.getLogger(__name__)
+        logger.info(f'Loading {len(yaml_paths)} YAML files from {self.root}')
+        self.data = self.parse_yamls(yaml_paths)
+        self.postload_validate()
+
+    def _raise_notloaded(self):
+        if self.data is None:
+            raise RuntimeError('YamlRepo must have load() called.')
+
+    def register_validator(self, func: Callable[Concatenate[str, PuppetAccountMap, bool, ...], None]):
+        self.postload_validators.append(func)
+    
+    def postload_validate(self):
+        self._raise_notloaded()
+        for func in self.postload_validators:
+            func(str(self.root), self.data, self.strict) # type: ignore
 
 
-def validate_yaml_forest(yaml_forest: dict,
-                         MapSchema: Union[type[PuppetAccountMap],
-                                          type[PuppetGroupMap],
-                                          type[PuppetUserMap],
-                                          type[PuppetShareMap]],
-                         strict: Optional[bool] = False,
-                         partial: Optional[bool] = False): 
-    logger = logging.getLogger(__name__)
+class CommonData(YamlRepo):
 
-    for source_root, yaml_obj in yaml_forest.items():
+    def __init__(self, root: Path,
+                       key_dir: Optional[Path] = None,
+                       **kwargs):
 
-        try:
-            puppet_data = MapSchema.Schema().load(yaml_obj, #type: ignore
-                                                  partial=partial)
-        except marshmallow.exceptions.ValidationError as e: #type: ignore
-            logger.error(f'[red]ValidationError: {source_root}[/]')
-            logger.error(e.messages)
-            if strict:
-                sys.exit(ExitCode.VALIDATION_ERROR)
-            continue
+        if key_dir is None:
+            self.key_dir : Path = root / 'keys'
         else:
-            yield source_root, puppet_data
+            self.key_dir : Path = key_dir
+
+        self.user_schema = PuppetUserMap.common_schema()
+        self.group_schema = PuppetGroupMap.common_schema()
+
+        super().__init__(root, **kwargs)
+
+    def lock(self, timeout: int):
+        lock_path = self.root / '.cheeto.lock'
+        return FileLock(lock_path, timeout=timeout)
+
+    def write_key(self, user_name: str,
+                        key: str):
+        with (self.key_dir / f'{user_name}.pub').open('w') as fp:
+            print(key, file=fp)
+
+    def create_user(self, user_name: str,
+                          user: PuppetUserRecord):
+
+        logger = logging.getLogger(__name__)
+        file_path = self.root / f'{user_name}.yaml'
+        if file_path.exists():
+            logger.info(f'Common YAML {file_path} exists, skipping.')
+        else:
+            record = PuppetUserMap(user = {user_name: user})
+            with file_path.open('w') as fp:
+                print(self.user_schema.dumps(record), file=fp)
+        
+        return file_path
+
+    def create_group(self,
+                     group_name: str,
+                     gid: int,
+                     sponsors: Optional[List[str]] = None) -> PuppetGroupMap:
+
+        logger = logging.getLogger(__name__)
+        file_path = self.root / f'{group_name}.yaml'
+        group = PuppetGroupRecord(gid=gid, sponsors=sponsors)
+        record = PuppetGroupMap(group = {group_name: group})
+        if file_path.exists():
+            logger.info(f'Common YAML {file_path} exists, skipping.')
+        else:
+            with file_path.open('w') as fp:
+                print(self.group_schema.dumps(record), file=fp)
+
+        return record
+
+    def create_group_from_sponsor(self,
+                                  user_name: str,
+                                  uid: int) -> Tuple[str, PuppetGroupMap]:
+
+        group_name = f'{user_name}grp'
+        gid = MIN_PIGROUP_GID + uid
+        sponsors = [user_name]
+        return group_name, self.create_group(group_name, gid, sponsors=sponsors)
+            
+
+class SiteData(YamlRepo):
+
+    def __init__(self,
+                 root: Path,
+                 common_root: Optional[Path] = None,
+                 key_dir: Optional[Path] = None,
+                 load: bool = True,
+                 **kwargs):
+        
+        if common_root is None:
+            self.common = CommonData(root.parent.parent)
+        else:
+            self.common = CommonData(common_root,
+                                     key_dir=key_dir,
+                                     **kwargs)
+
+        self.user_schema = PuppetUserMap.site_schema()
+        self.group_schema = PuppetGroupMap.site_schema()
+
+        super().__init__(root, **kwargs)
+
+        if load:
+            self.load()
+
+    def lock(self, timeout: int):
+        return self.common.lock(timeout)
+
+    def write_key(self,
+                  user_name: str,
+                  key: str):
+        self.common.write_key(user_name, key)
+
+    def update_user(self,
+                    user_name: str,
+                    user: PuppetUserRecord):
+
+        logger = logging.getLogger(__name__)
+        logger.info(f'update_user: {user_name}')
+
+        site_path, common_path = self.get_entity_paths(user_name)
+        if not site_path.exists():
+            self.create_user(user_name, user)
+        else:
+            current_user = self.data.user[user_name]
+            merged = puppet_merge(asdict(user), asdict(current_user))
+            user = PuppetUserRecord(**merged)
+            record = PuppetUserMap(user = {user_name: user})
+            with site_path.open('w') as fp:
+                print(self.user_schema.dumps(record), file=fp)
+
+    def create_user(self,
+                    user_name: str,
+                    user: PuppetUserRecord):
+
+        site_path, common_path = self.get_entity_paths(user_name)
+        # Create the top-level common user.yaml file
+        self.common.create_user(user_name, user)
+        # Create the user.site.yaml file
+        record = PuppetUserMap(user = {user_name: user})
+        with site_path.open('w') as fp:
+            print(self.user_schema.dumps(record), file=fp)
+        # Link to the top-level user.yaml into the site directory
+        self.link_entity(common_path)
+
+    def create_group_from_sponsor(self,
+                                  user_name: str,
+                                  uid: int) -> str:
+        
+        # Build group name and create top level group.yaml
+        group_name, group_record = self.common.create_group_from_sponsor(user_name, uid)
+        site_path, common_path = self.get_entity_paths(group_name)
+        # Write out site-specific group.site.yaml
+        with site_path.open('w') as fp:
+            print(self.group_schema.dumps(group_record), file=fp)
+        # Link the top-level group.yaml into the site
+        self.link_entity(common_path)
+        return group_name
+    
+    def link_entity(self, common_path: Path):
+        logger = logging.getLogger(__name__)
+        try:
+            link_relative(self.root, common_path)
+        except FileExistsError:
+            logger.info(f'{common_path} already linked to {self.root}.')
+
+    def get_entity_paths(self, entity_basename: str) -> Tuple[Path, Path]:
+        return self.root / f'{entity_basename}.site.yaml', \
+               self.common.root / f'{entity_basename}.yaml'
+
+    def get_group_storage_paths(self, group_name: str):
+        self._raise_notloaded()
+        return get_group_storage_paths(group_name, self.data) # type: ignore
+
+    def get_group_slurm_partitions(self, group_name: str):
+        self._raise_notloaded()
+        return get_group_slurm_partitions(group_name, self.data) # type: ignore
 
 
-def add_yaml_load_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--merge',
+def add_validate_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group('YAML Validation')
+    group.add_argument('--dump', default='/dev/stdout',
+                  help='Dump the validated YAML to the given file')
+    group.add_argument('--echo', action='store_true', default=False)
+    group.add_argument('files', nargs='+',
+                        help='YAML files to validate.')
+    group.add_argument('--merge',
                         default=MergeStrategy.NONE,
                         type=MergeStrategy,
                         action=EnumAction,
                         help='Merge the given YAML files before validation.')
-    parser.add_argument('--strict', action='store_true', default=False,
+    group.add_argument('--strict', action='store_true', default=False,
                         help='Terminate on validation errors.')
-    parser.add_argument('--partial',
+    group.add_argument('--partial',
                         default=False,
                         action='store_true',
                         help='Allow partial loading (ie missing keys).')
+    group.add_argument('--postload-validate', default=False,
+                       action='store_true')
+    for func_name in _postload_validators.keys():
+        group.add_argument(f'--{func_name}', action='store_true', default=False)
 
 
-def add_validate_args(parser: argparse.ArgumentParser):
-    add_yaml_load_args(parser)
-    parser.add_argument('--dump', default='/dev/stdout',
-                        help='Dump the validated YAML to the given file')
-    parser.add_argument('--echo', action='store_true', default=False)
-    parser.add_argument('--postload-validate', default=False,
-                        action='store_true')
-    parser.add_argument('files', nargs='+',
-                        help='YAML files to validate.')
 
-
+@subcommand('validate', add_validate_args)
 def validate_yamls(args: argparse.Namespace):
 
     console = Console(stderr=True)
@@ -369,8 +603,12 @@ def validate_yamls(args: argparse.Namespace):
             console.rule(source_file, style='blue')
 
         if args.postload_validate:
-            validate_sponsors(source_file, puppet_data, args)
-            validate_user_groups(source_file, puppet_data, args)
+            for postload_func in _postload_validators.values():
+                postload_func(source_file, puppet_data, args.strict)
+        else:
+            for func_name in _postload_validators.keys():
+                if getattr(args, func_name):
+                    _postload_validators[func_name](source_file, puppet_data, args.strict)
 
         output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
         hl_yaml = Syntax(output_yaml,
@@ -402,7 +640,7 @@ def add_create_nologin_user_args(parser: argparse.ArgumentParser):
     for param in LDAPQueryParams:
         xgroup.add_argument(f'--{param.name}', metavar=param.value)
     
-    lgroup = parser.add_argument_group('LDAP Server Arguments')
+    lgroup = parser.add_argument_group('LDAP Server')
     lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
 
     parser.add_argument('--site-dir', 
@@ -423,6 +661,8 @@ def flatten_and_decode(data: dict) -> dict:
     return {key: value[0].decode() for key, value in data.items()} #type: ignore
 
 
+@subcommand('create-nologin-user', 
+            add_create_nologin_user_args)
 def create_nologin_user(args: argparse.Namespace):
     console = Console(stderr=True)
     logger = logging.getLogger(__name__)

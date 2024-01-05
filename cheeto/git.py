@@ -93,8 +93,14 @@ class Gh:
 
         return run_list
 
-    def pr_create(self, base: str = 'main') -> sh.Command:
-        return self.cmd.bake('pr', 'create', '--fill', '--base', base)
+    def pr_create(self, base: str = 'main',
+                        title: Optional[str] = None,
+                        body: Optional[str] = None) -> sh.Command:
+        if None in (title, body):
+            return self.cmd.bake('pr', 'create', '--fill', '--base', base)
+        else:
+            return self.cmd.bake('pr', 'create', '-t', title, 
+                                 '-b', body, '--base', base)
 
     def pr_view(self, branch: str) -> sh.Command:
         return self.cmd.bake('pr', 'view', branch)

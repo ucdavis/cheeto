@@ -9,27 +9,12 @@
 
 import argparse
 from dataclasses import is_dataclass
-from enum import Enum, IntEnum
-import os
+from enum import Enum
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
-from mergedeep import merge, Strategy
-from ruamel import yaml as ryaml
 
 __pkg_dir__ = Path(__file__).resolve().parent
-
-
-def parse_yaml(filename: str) -> dict:
-    with open(filename) as fp:
-        parsed = ryaml.safe_load(fp)
-        if parsed is None:
-            return {}
-        return parsed
-
-
-def puppet_merge(*dicts: dict) -> dict:
-    return merge(*dicts, strategy=Strategy.ADDITIVE) #type: ignore
 
 
 def filter_nulls(d: dict) -> dict:

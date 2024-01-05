@@ -7,8 +7,10 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 17.02.2023
 
-from dataclasses import asdict
+import argparse
 from datetime import datetime
+from enum import IntEnum, auto, Enum
+import glob
 import logging
 import os
 from pathlib import Path
@@ -17,7 +19,7 @@ import socket
 import sys
 import time
 import traceback
-from typing import Mapping, Optional, Tuple, Union, List
+from typing import Optional, Tuple, Union, List
 
 from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader
@@ -25,32 +27,21 @@ import marshmallow
 from marshmallow_dataclass import dataclass
 import sh
 
+from .args import subcommand
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
 from .mail import Mail
-from .puppet import (MIN_PIGROUP_GID, PuppetAccountMap, PuppetGroupMap, PuppetGroupRecord,
+from .parsing import (parse_yaml,
+                      parse_yaml_forest,
+                      validate_yaml_forest)
+from .puppet import (PuppetAccountMap, 
+                     SiteData,
                      PuppetUserRecord,
                      PuppetUserMap,
-                     parse_yaml_forest,
-                     validate_yaml_forest,
                      MergeStrategy)
-from .utils import link_relative, require_kwargs
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import link_relative, require_kwargs
-from .utils import parse_yaml, puppet_merge
-from .slurm import get_group_slurm_partitions
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoSponsor(BaseModel):
-    accountname: str
-    name: str
-    email: Email #type: ignore
-    kerb: KerberosID #type: ignore
-    iam: IAMID #type: ignore
-    mothra: MothraID #type: ignore
+from .utils import require_kwargs
 
 
 @require_kwargs
@@ -73,21 +64,9 @@ class HippoMeta(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class HippoRecord(BaseModel):
-    sponsor: HippoSponsor
+    groups: List[KerberosID] #type: ignore
     account: HippoAccount
     meta: HippoMeta
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoSponsorGroupMapping(BaseModel):
-    mapping: Mapping[KerberosID, KerberosID] #type: ignore
-
-
-@require_kwargs
-@dataclass(frozen=True)
-class HippoAdminSponsorList(BaseModel):
-    sponsors: List[KerberosID] #type: ignore
 
 
 def add_sanitize_args(parser):
@@ -101,7 +80,8 @@ def add_sanitize_args(parser):
                         help='Global puppet YAML.')
 
 
-def sanitize(args):
+@subcommand('sanitize', add_sanitize_args)
+def sanitize(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
     yaml_files = [args.global_file, args.site_file] if args.site_file.exists() \
@@ -119,8 +99,8 @@ def sanitize(args):
         logger.error(f'Merge resulted in multiple users.')
         sys.exit(ExitCode.BAD_MERGE)
 
-    site_dumper = PuppetUserMap.site_dumper()
-    global_dumper = PuppetUserMap.global_dumper()
+    site_dumper = PuppetUserMap.site_schema()
+    global_dumper = PuppetUserMap.common_schema()
 
     with args.global_file.open('w') as fp:
         print(global_dumper.dumps(user_record), file=fp)
@@ -136,7 +116,8 @@ def add_validate_args(parser):
                         required=True)
 
 
-def validate(args) -> None:
+@subcommand('validate', add_validate_args)
+def validate(args: argparse.Namespace) -> None:
     for hippo_file in args.hippo_file:
         record = load_hippo(hippo_file, quiet=args.quiet)
         if record is None:
@@ -161,130 +142,238 @@ def load_hippo(hippo_file: Path,
         return hippo_record
 
 
-def hippo_to_puppet(hippo_file: Path,
-                    global_dir: Path,
-                    site_dir: Path,
-                    key_dir: Path,
-                    current_state: PuppetAccountMap,
-                    group_map: HippoSponsorGroupMapping,
-                    admin_sponsors: HippoAdminSponsorList) -> Tuple[Optional[str],
-                                                                    Optional[str],
-                                                                    Optional[PuppetUserRecord],
-                                                                    Optional[HippoRecord]]:
+class ConversionState(IntEnum):
+    UNINIT = auto()
+    INVALID = auto()
+    ERROR = auto()
+    PREPROC = auto()
+    PROC = auto()
+    COMPLETE = auto()
+
+    
+class ConversionOp(Enum):
+    USER = 'USER'
+    SPONSOR = 'SPONSOR'
+    KEY = 'KEY'
+    NOOP = 'NOOP'
+
+
+def hippo_to_puppet(hippo_record: HippoRecord,
+                    site: SiteData,
+                    sponsors_group: str) -> Tuple[str, PuppetUserRecord, ConversionOp]:
+
     logger = logging.getLogger(__name__)
 
-    hippo_record = load_hippo(hippo_file)
-    if hippo_record is None:
-        logger.error(f'{hippo_file}: validation error!')
-        return None, None, None, None
-
     user_name = hippo_record.account.kerb
-    site_dumper = PuppetUserMap.site_dumper()
-    site_filename = site_dir / f'{user_name}.site.yaml'
+    uid = hippo_record.account.mothra
+    groups = set(hippo_record.groups)
+    dataop = ConversionOp.USER
 
-    global_dumper = PuppetUserMap.global_dumper()
-    global_filename = global_dir / f'{user_name}.yaml'
-
-    sponsor_group = f'{hippo_record.sponsor.kerb}grp'
-    if hippo_record.sponsor.kerb in admin_sponsors.sponsors:
-        logger.info(f'{user_name} appears to be a sponsor account.')
-        sponsor_group = create_sponsor_group(user_name,
-                                             hippo_record.account.mothra,
-                                             global_dir,
-                                             site_dir)
+    # Check if the group for sponsors is in the group request:
+    # if so, this is a new PI group and their group YAML should be created
+    if sponsors_group in groups: # type: ignore
+        logger.info(f'{user_name} appears to be a sponsor account, creating group.')
+        group_name = site.create_group_from_sponsor(user_name, uid)
+        # Make the sponsor a member of their own new group
+        groups.add(group_name)
+        dataop = ConversionOp.SPONSOR
     else:
         logger.info(f'{user_name} appears to be a user account.')
 
-        if hippo_record.sponsor.kerb in group_map.mapping:
-            sponsor_group = group_map.mapping[hippo_record.sponsor.kerb]
-            
-        if sponsor_group not in current_state.group: #type: ignore
-            logger.error(f'{hippo_file}: {sponsor_group} is not a valid group.')
-            return None, None, None, None
+    if not groups and dataop != ConversionOp.SPONSOR:
+        dataop = ConversionOp.KEY
 
-    user_record = PuppetUserRecord( #type: ignore
+    user = PuppetUserRecord( #type: ignore
         fullname = hippo_record.account.name,
         email = hippo_record.account.email,
-        uid = hippo_record.account.mothra,
-        gid = hippo_record.account.mothra,
-        groups = [sponsor_group] #type: ignore
+        uid = uid,
+        gid = uid,
+        groups = groups
     )
 
-    user_map = PuppetUserMap( #type: ignore
-        user = {user_name: user_record}
-    )
-
-    if os.path.exists(site_filename):
-        current_site_yaml = parse_yaml(str(site_filename))
-        merged_yaml = puppet_merge(asdict(user_map), current_site_yaml)
-        user_map = PuppetUserMap.Schema().load( #type: ignore
-            merged_yaml
-        )
-
-    if os.path.exists(global_filename):
-        logger.info(f'{hippo_file}: Global YAML {global_filename} exists, skipping.')
-    else:
-        with global_filename.open('w') as fp:
-            print(global_dumper.dumps(user_map), file=fp)
-
-    with site_filename.open('w') as fp:
-        print(site_dumper.dumps(user_map), file=fp)
-
-    try:
-        link_relative(site_dir, global_filename)
-    except FileExistsError:
-        logger.info(f'{global_filename} already linked to {site_dir}.')
-
-    if key_dir:
-        key_dest = key_dir / f'{hippo_record.account.kerb}.pub'
-        with key_dest.open('w') as fp:
-            print(hippo_record.account.key, file=fp)
+    site.update_user(user_name, user)
     
-    return user_name, sponsor_group, user_record, hippo_record
+    if hippo_record.account.key:
+        site.write_key(user_name, hippo_record.account.key)
+
+    logger.info(f'hippo_to_puppet: did {dataop.name} for {user_name} with groups {groups}') 
+
+    return user_name, user, dataop
 
 
-def create_sponsor_group(sponsor_username: str,
-                         sponsor_uid: int,
-                         global_dir: Path,
-                         site_dir: Path):
-    logger = logging.getLogger(__name__)
-    group_name = f'{sponsor_username}grp'
-    group_record = PuppetGroupRecord(
-        gid = MIN_PIGROUP_GID + sponsor_uid
-    )
-    group_map = PuppetGroupMap(
-        group = {group_name: group_record}
-    )
-    group_filename = global_dir / f'{group_name}.yaml'
-    if os.path.exists(group_filename):
-        logger.warning(f'{group_filename} already exists!')
-    else:
-        logger.info(f'Writing out {group_filename}')
-        group_map.save_yaml(group_filename)
-        link_relative(site_dir, group_filename)
+class HippoConverter:
 
-    return group_name
+    def __init__(self,
+                 input_file: Path,
+                 site: SiteData,
+                 jinja_env: Environment,
+                 processed_dir: Path,
+                 invalid_dir: Path,
+                 sponsors_group: str = 'sponsors'):
+
+        self.logger = logging.getLogger(__name__)
+        self.input_file = input_file
+        self.site = site
+        self.jinja_env = jinja_env
+        self.processed_dir = processed_dir
+        self.invalid_dir = invalid_dir
+        self.sponsors_group = sponsors_group
+        self.hippo_record : Optional[HippoRecord] = None
+        self.user_name : Optional[str] = None
+        self.user_record : Optional[PuppetUserRecord] = None
+        self.state : ConversionState = ConversionState.UNINIT
+        self.op : ConversionOp = ConversionOp.NOOP
+
+    def __str__(self):
+        return f'HippoConversion: {self.input_file}\n'\
+               f'         status: {self.state.name}\n'\
+               f'             op: {self.op.name}\n'\
+               f'           user: {self.user_name}\n'\
+               f'                 {self.user_record}'
+
+    def summary(self):
+        if self.op == ConversionOp.NOOP:
+            return f'op: no-op, file: {self.input_file}'
+        msg = f'op: {self.op}, user: {self.user_name}'
+        if self.op == ConversionOp.KEY:
+            return msg
+        else:
+            return f'{msg}, {self.user_record.groups}' #type: ignore
+
+    def set_invalid(self):
+        if self.state == ConversionState.INVALID:
+            self.logger.warning(f'{self.input_file} set Invalid twice.')
+            return
+        self.state = ConversionState.INVALID
+        self.logger.info(f'Moving {self.input_file} to invalid dir ({self.invalid_dir})')
+        shutil.move(self.input_file, self.invalid_dir)
+
+    def set_complete(self):
+        if self.state == ConversionState.INVALID:
+            self.logger.warning(f'{self.input_file}: tried to set_complete on invalid conversion.')
+            return
+        if self.state == ConversionState.COMPLETE:
+            self.logger.warning(f'{self.input_file} tried to set_complete on completed conversion.')
+            return
+        self.logger.info(f'Moving {self.input_file} to processed dir ({self.processed_dir})')
+        shutil.move(self.input_file, self.processed_dir)
+        self.state = ConversionState.COMPLETE
+
+    def preprocess(self):
+        self.logger.info(f'Loading {self.input_file}')
+        self.hippo_record = load_hippo(self.input_file)
+        if self.hippo_record is None:
+            self.logger.error(f'{self.input_file}: validation error!')
+            self.set_invalid()
+            return
+
+        for group in set(self.hippo_record.groups):
+            if group not in self.site.data.group: #type: ignore
+                self.logger.error(f'{self.input_file}: {group} is not a valid group.')
+                self.set_invalid()
+                return
+
+        self.state = ConversionState.PREPROC
+
+    def process(self):
+        if self.state == ConversionState.PREPROC and self.hippo_record is not None:
+            self.user_name, self.user_record, self.op = hippo_to_puppet(self.hippo_record,
+                                                                        self.site,
+                                                                        sponsors_group=self.sponsors_group)
+
+            self.state = ConversionState.PROC
+
+    def postprocess(self):
+        if self.state != ConversionState.PROC or self.user_record is None:
+            return
+
+        mail = Mail()
+
+        if self.op == ConversionOp.USER:
+            group = list(self.hippo_record.groups)[0]
+            slurm_account, slurm_partitions = self.site.get_group_slurm_partitions(group)
+            storages = self.site.get_group_storage_paths(group)
+            template = self.jinja_env.get_template('account-ready.txt.j2')
+            email_contents = template.render(
+                                cluster=self.hippo_record.meta.cluster,
+                                username=self.user_name,
+                                domain=self.site.root.name,
+                                slurm_account=slurm_account,
+                                slurm_partitions=slurm_partitions,
+                                storages=storages
+                             )
+            email_subject = f'Account Information: {self.hippo_record.meta.cluster}'
+            email_cmd = mail.send(self.user_record.email,
+                                  email_contents,
+                                  reply_to='hpc-help@ucdavis.edu',
+                                  subject=email_subject)
+        elif self.op == ConversionOp.KEY:
+            template = self.jinja_env.get_template('key-updated.txt.j2')
+            email_contents = template.render(
+                                cluster=self.hippo_record.meta.cluster,
+                                username=self.user_name,
+                                domain=self.site.root.name
+                             )
+            email_subject = f'Key Updated: {self.hippo_record.meta.cluster}'
+            email_cmd = mail.send(self.user_record.email,
+                                  email_contents,
+                                  reply_to='hpc-help@ucdavis.edu',
+                                  subject=email_subject)
+        else:
+            # okay this is ugly but if its a sponsor group, its new, so the only
+            # two elements in the groups will be "sponsors" and the new group
+            group = list(self.user_record.groups.copy() - {self.sponsors_group})[0]
+            template = self.jinja_env.get_template('new-sponsor.txt.j2')
+            email_contents = template.render(
+                                cluster=self.hippo_record.meta.cluster,
+                                username=self.user_name,
+                                domain=self.site.root.name,
+                                group=group
+                             )
+            email_subject = f'New Sponsor Account: {self.hippo_record.meta.cluster}'
+            email_cmd = mail.send(self.user_record.email,
+                                  email_contents,
+                                  reply_to='hpc-help@ucdavis.edu',
+                                  subject=email_subject)
 
 
-def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
-    try:
-        storage = puppet_data.group[group].storage
-    except (KeyError, AttributeError):
-        return None
-    else:
-        if storage is None:
-            return None
-        storages = []
-        for storage in storage:
-            if storage.owner == 'root' or 'root' in storage.name: # or storage.zfs is None or type(storage.zfs) is bool:
-                continue
-            path = Path('/group') / storage.name
-            if storage.zfs not in (None, True, False):
-                quota = storage.zfs.quota
-            else:
-                quota = None
-            storages.append(path)
-        return storages
+        self.logger.info(f'Sending email: \nSubject: {email_subject}\nBody: {email_contents}')
+        email_cmd()
+        self.set_complete()
+
+
+class HippoData:
+
+    def __init__(self,
+                 root: Path,
+                 processed_dir: Optional[Path] = None,
+                 invalid_dir: Optional[Path] = None):
+        self.root = root
+        if processed_dir is None:
+            self.processed_dir = root / '.processed'
+        else:
+            self.processed_dir = processed_dir
+        if invalid_dir is None:
+            self.invalid_dir = root / '.invalid'
+        else:
+            self.invalid_dir = invalid_dir
+
+    def find_yamls(self):
+        return self.root.glob('*.yaml')
+
+    def convert_yamls(self,
+                      site: SiteData,
+                      jinja_env: Environment,
+                      sponsors_group: str):
+
+        for hippo_file in self.find_yamls():
+            converter = HippoConverter(hippo_file,
+                                       site,
+                                       jinja_env,
+                                       self.processed_dir,
+                                       self.invalid_dir,
+                                       sponsors_group=sponsors_group)
+            yield converter
 
 
 def add_convert_args(parser):
@@ -308,16 +397,13 @@ def add_convert_args(parser):
                         type=Path,
                         required=True,
                         help='Path to merged cluster YAML.')
-    parser.add_argument('--group-map',
-                        type=Path,
-                        help='Sponsor KerberosID to group name mapping.')
-    parser.add_argument('--admin-sponsors',
-                        type=Path,
+    parser.add_argument('--sponsor-group',
                         required=True,
-                        help='Accounts that sponsor the sponsors.')
+                        help='Group that sponsors belong to.')
 
 
-def convert(args):
+@subcommand('convert', add_convert_args)
+def convert(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
     current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
@@ -341,19 +427,44 @@ def convert(args):
 
 
 def add_sync_args(parser):
-    add_convert_args(parser)
-    parser.add_argument('--timeout', type=int, default=30)
-    parser.add_argument('--processed-dir', required=True, type=Path,
+    parser.add_argument('-i', '--hippo-dir',
+                        type=Path,
+                        required=True,
+                        help='Incoming hippo directory.')
+    parser.add_argument('--site-dir', 
+                        type=Path,
+                        required=True,
+                        help='Site-specific puppet accounts directory.')
+    parser.add_argument('--sponsor-group',
+                        default='sponsors',
+                        help='Group that sponsors belong to.')
+    parser.add_argument('--global-dir',
+                        type=Path,
+                        help='Global puppet accounts directory.')
+    parser.add_argument('--key-dir',
+                        type=Path,
+                        help='Puppet SSH keys directory.')
+    parser.add_argument('--processed-dir', type=Path,
                         help='Directory to move completed user.txt files to.')
-    parser.add_argument('--base-branch', default='main')
+    parser.add_argument('--invalid-dir', type=Path,
+                        help='Directory to move invalid user.txt files to.')
+    parser.add_argument('--base-branch',
+                        default='main',
+                        help='Branch to make PR against.')
+    parser.add_argument('--timeout',
+                        type=int,
+                        default=30)
 
 
-def create_branch_name(prefix: Optional[str] = 'cheeto-hippo-sync') -> str:
-    timestamp = datetime.now().strftime('%Y-%m-%d.%H-%M-%S')
-    return f'{prefix}.{timestamp}'
+def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
+    now = datetime.now()
+    branch_name = f"{prefix}.{now.strftime('%Y-%m-%d.%H-%M-%S')}"
+    title = f"[{socket.getfqdn()}] {prefix}: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    return branch_name, title
 
 
-def sync(args):
+@subcommand('sync', add_sync_args)
+def sync(args: argparse.Namespace):
     templates_dir = PKG_TEMPLATES / 'emails'
     jinja_env = Environment(loader=FileSystemLoader(searchpath=templates_dir))
 
@@ -373,66 +484,58 @@ def sync(args):
 
 def _sync(args, jinja_env: Environment):
     logger = logging.getLogger(__name__)
-    lock_path = args.global_dir / '.cheeto.lock'
-    lock = FileLock(lock_path, timeout=args.timeout)
 
-    with lock:
+    site_data = SiteData(args.site_dir,
+                         common_root=args.global_dir,
+                         key_dir=args.key_dir,
+                         load=False)
+    hippo_data = HippoData(args.hippo_dir,
+                           processed_dir=args.processed_dir,
+                           invalid_dir=args.invalid_dir)
 
-        current_state = PuppetAccountMap.load_yaml(args.cluster_yaml) #type: ignore
+    with site_data.lock(args.timeout):
         
-        if args.group_map:
-            group_map = HippoSponsorGroupMapping.load_yaml(args.group_map) #type: ignore
-        else:
-            group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
-
-        admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
-
-
-        gh = Gh(working_dir=args.global_dir)
-        git = Git(working_dir=args.global_dir)
+        gh = Gh(working_dir=site_data.common.root)
+        git = Git(working_dir=site_data.common.root)
         git.checkout(branch=args.base_branch)()
         git.clean(force=True)()
         git.pull()()
-        working_branch = create_branch_name()
+
+        site_data.load()
+
+        working_branch, pr_title = branch_name_title()
         git.checkout(branch=working_branch, create=True)()
 
         fqdn = socket.getfqdn()
         
         get_commit = git.rev_parse()
         start_commit = get_commit().strip()
-        created_users = []
-        for hippo_file in args.hippo_file:
-            logger.info(f'Processing {hippo_file}...')
-            user, sponsor, user_record, hippo_record = hippo_to_puppet(hippo_file,
-                                                                       args.global_dir,
-                                                                       args.site_dir,
-                                                                       args.key_dir,
-                                                                       current_state,
-                                                                       group_map,
-                                                                       admin_sponsors_map)
-            created_users.append((user, sponsor, user_record, hippo_record))
-            if user is None:
-                continue
-            message = f'[{fqdn}] user: {user}, sponsor: {sponsor}'
-            git.add(Path('.'))()
-            try:
-                git.commit(message)()
-            except sh.ErrorReturnCode_1: #type: ignore
-                logger.info(f'Nothing to commit.')
+        converters = list(hippo_data.convert_yamls(site_data, jinja_env, args.sponsor_group))
+        for converter in converters:
+            converter.preprocess()
+            if converter.state == ConversionState.PREPROC:
+                converter.process()
+                message = f'[{fqdn}] {converter.summary()}'
+                git.add(Path('.'))()
+                try:
+                    git.commit(message)()
+                except sh.ErrorReturnCode_1: #type: ignore
+                    logger.info(f'Nothing to commit.')
         end_commit = get_commit().strip()
 
         if start_commit == end_commit:
             logger.info('No commits made, skipping PR flow.')
-            for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
-                if user is not None:
-                    os.remove(hippo_file)
+            for converter in converters:
+                converter.set_invalid()
+                logger.info(converter)
             return
         
         logger.info(f'Pushing and creating branch: {working_branch}.')
         git.push(remote_create=working_branch)()
 
         logger.info('Creating pull request.')
-        gh.pr_create(args.base_branch)()
+        pr_body = '\n'.join((f'- {c.summary()}' for c in converters))
+        gh.pr_create(args.base_branch, title=pr_title, body=pr_body)()
 
         wait_on_pull_request(gh, working_branch, args.timeout, jinja_env)
        
@@ -443,30 +546,10 @@ def _sync(args, jinja_env: Environment):
         git.checkout(branch=args.base_branch)()
         git.pull()()
 
-        notify_template = jinja_env.get_template('account-ready.txt.j2')
-        mail = Mail()
-        logger.info(f'Moving processed files to {args.processed_dir}')
-        for hippo_file, (user, sponsor, puppet_record, hippo_record) in zip(args.hippo_file, created_users): #type: ignore
-            if user is not None:
-                shutil.move(hippo_file, args.processed_dir / hippo_file.name)
-                slurm_account, slurm_partitions = get_group_slurm_partitions(sponsor, current_state)
-                storages = get_group_storage_paths(sponsor, current_state)
-
-                email_contents = notify_template.render(
-                                    cluster=hippo_record.meta.cluster,
-                                    username=user,
-                                    domain=args.site_dir.name,
-                                    slurm_account=slurm_account,
-                                    slurm_partitions=slurm_partitions,
-                                    storages=storages
-                                 )
-                logger.info(f'Sending email: {email_contents}')
-                email_subject = f'Account Information: {hippo_record.meta.cluster}'
-                mail.send(puppet_record.email,
-                          email_contents,
-                          reply_to='hpc-help@ucdavis.edu',
-                          subject=email_subject)()
-
+        logger.info(f'Moving processed files to {hippo_data.processed_dir}')
+        for converter in converters:
+            converter.postprocess()
+                
 
 def wait_on_pull_request(gh: Gh,
                          branch: str,

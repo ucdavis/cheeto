@@ -18,7 +18,6 @@ from marshmallow import post_dump
 from marshmallow_dataclass import NewType
 
 from . import _yaml
-from .utils import parse_yaml
 
 
 UINT_MAX = 4_294_967_296
@@ -26,7 +25,7 @@ UINT_MAX = 4_294_967_296
 
 class BaseModel:
 
-    SKIP_VALUES = [None]
+    SKIP_VALUES = [None, {}, []]
 
     def items(self):
         return dataclasses.asdict(self).items() #type: ignore
