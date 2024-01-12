@@ -1,3 +1,4 @@
+{% set EFI = true %}
 {%- extends "user-data.yaml.j2" %}
 {%- block disks %}
 # Physical disk, these systems have 1
@@ -6,21 +7,21 @@
     size: smallest
   ptable: gpt
   name: ''
-  grub_device: true
+  grub_device: {{ not EFI }}
   type: disk
   preserve: false
   wipe: superblock-recursive
 
 # Partitions
-- id: partition-grub
+- id: partition-{% if EFI %}efi-boot{% else %}grub{% endif %}
   device: disk-sda
-  size: 1048576
-  flag: bios_grub
+  size: {% if EFI %}512M{% else %}1M{% endif %}
+  flag: {% if EFI %}boot{% else %}bios_grub{% endif %}
   number: 1
   preserve: false
-  grub_device: false
+  grub_device: {{ EFI }}
   type: partition
-          
+
 - id: partition-root
   device: disk-sda
   size: -1
@@ -31,15 +32,29 @@
   type: partition
 
 # File-systems
+{% if EFI %}
+- id: format-efi-boot
+  volume: partition-efi-boot
+  fstype: fat32
+  preserve: false
+  type: format
+{% endif %}
 - id: format-root
   volume: partition-root
   fstype: ext4
   preserve: false
   type: format
-    
+
 # Mounts
 - id: mount-root
   device: format-root
   path: /
   type: mount
+
+{% if EFI %}
+- id: mount-efi-boot
+  device: format-efi-boot
+  path: /boot/efi
+  type: mount
+{% endif %}
 {%- endblock disks %}
