@@ -28,11 +28,14 @@ class MergeStrategy(Enum):
 
 
 def parse_yaml(filename: str) -> dict:
-    with open(filename) as fp:
-        parsed = ryaml.safe_load(fp)
-        if parsed is None:
-            return {}
-        return parsed
+    try:
+        with open(filename) as fp:
+            parsed = ryaml.safe_load(fp)
+            if parsed is None:
+                return {}
+            return parsed
+    except FileNotFoundError:
+        return {}
 
 
 def puppet_merge(*dicts: dict) -> dict:
