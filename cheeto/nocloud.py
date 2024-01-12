@@ -14,8 +14,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from .args import subcommand
-from .parsing import parse_yaml
-from .templating import PKG_TEMPLATES
+from .parsing import parse_yaml, puppet_merge
 
 
 def add_render_args(parser):
@@ -27,25 +26,27 @@ def add_render_args(parser):
     parser.add_argument('--output-dir', '-o',
                         default='nocloud-net',
                         type=Path)
-    parser.add_argument('--template-variables',
-                        type=Path)
+    parser.add_argument('--config-basename',
+                        default='config.yaml')
 
 
 @subcommand('render', add_render_args)
 def render(args: argparse.Namespace):
+    site_dir = args.site_dir
+    common_dir = site_dir.parent
+
     hosts_base = args.site_dir / "hosts"
     host_paths = list(hosts_base.glob('*.j2'))
 
     environment = Environment(loader=FileSystemLoader(
-                                        [str(args.site_dir),
-                                         str(args.site_dir.parent),
-                                         str(args.site_dir.parent / 'partitions')]
+                                        [str(site_dir),
+                                         str(common_dir),
+                                         str(common_dir/ 'partitions')]
                                       )
                               )
 
-    if args.template_variables is None:
-        args.template_variables = args.site_dir / 'variables.yaml'
-    template_variables = parse_yaml(str(args.template_variables))
+    config = puppet_merge(*[parse_yaml(f) for f in \
+                            [common_dir / args.config_basename, site_dir / args.config_basename]])
 
     ak = args.authorized_keys
     ssh_authorized_keys = [line for line in ak.read_text().splitlines() \
@@ -69,7 +70,7 @@ def render(args: argparse.Namespace):
         contents = host_j2.render(
             hostname=hostname,
             ssh_authorized_keys=ssh_authorized_keys,
-            **template_variables
+            **config
         )
 
         user_data_f = nocloud_host_dir / "user-data"
