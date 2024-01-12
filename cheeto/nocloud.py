@@ -42,7 +42,9 @@ def render(args: argparse.Namespace):
                                         [str(site_dir),
                                          str(common_dir),
                                          str(common_dir/ 'partitions')]
-                                      )
+                                      ),
+                              trim_blocks=True,
+                              lstrip_blocks=True
                               )
 
     config = puppet_merge(*[parse_yaml(f) for f in \
@@ -54,7 +56,7 @@ def render(args: argparse.Namespace):
 
     for host_path in host_paths: 
         hostname = host_path.stem
-        print(f"Processing: {hostname}")
+        print(f"Rendering: {hostname}")
 
         host_j2 = environment.get_template(f"hosts/{hostname}.j2")
         
