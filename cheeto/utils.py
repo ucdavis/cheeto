@@ -9,12 +9,18 @@
 
 import argparse
 from dataclasses import is_dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
 
 __pkg_dir__ = Path(__file__).resolve().parent
+TIMESTAMP_NOW = datetime.now()
+
+
+def sanitize_timestamp(ts: datetime) -> str:
+    return ts.strftime('%Y-%m-%d.%H-%M-%S')
 
 
 def filter_nulls(d: dict) -> dict:
