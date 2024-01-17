@@ -481,7 +481,8 @@ def sync(args: argparse.Namespace):
         subject = f'cheeto sync exception on {socket.getfqdn()}'
         contents = template.render(hostname=socket.getfqdn(),
                                    stacktrace=traceback.format_exc(),
-                                   logfile=args.log)
+                                   logfile=args.log,
+                                   timestamp=TIMESTAMP_NOW)
         Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
         
 
