@@ -23,6 +23,10 @@ def sanitize_timestamp(ts: datetime) -> str:
     return ts.strftime('%Y-%m-%d.%H-%M-%S')
 
 
+def human_timestamp(ts: datetime) -> str:
+    return ts.strftime('%Y-%m-%d %H:%M:%S')
+
+
 def filter_nulls(d: dict) -> dict:
     return {key: val for key, val in d.items() if val}
 

@@ -37,7 +37,8 @@ from .puppet import (PuppetAccountMap,
                      MergeStrategy)
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import (require_kwargs,
+from .utils import (human_timestamp,
+                    require_kwargs,
                     TIMESTAMP_NOW,
                     sanitize_timestamp)
 
@@ -455,9 +456,8 @@ def add_sync_args(parser):
 
 
 def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
-    now = TIMESTAMP_NOW
-    branch_name = f"{prefix}.{sanitize_timestamp(now)}"
-    title = f"[{socket.getfqdn()}] {prefix}: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
+    title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
     return branch_name, title
 
 
@@ -482,7 +482,7 @@ def sync(args: argparse.Namespace):
         contents = template.render(hostname=socket.getfqdn(),
                                    stacktrace=traceback.format_exc(),
                                    logfile=args.log,
-                                   timestamp=TIMESTAMP_NOW)
+                                   timestamp=human_timestamp(TIMESTAMP_NOW))
         Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
         
 
