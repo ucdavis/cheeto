@@ -8,12 +8,10 @@
 # Date   : 17.02.2023
 
 import argparse
-from datetime import datetime
 from enum import IntEnum, auto, Enum
-import glob
 import logging
-import os
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import sys
@@ -21,7 +19,6 @@ import time
 import traceback
 from typing import Optional, Tuple, Union, List
 
-from filelock import FileLock
 from jinja2 import Environment, FileSystemLoader
 import marshmallow
 from marshmallow_dataclass import dataclass
@@ -41,7 +38,10 @@ from .puppet import (PuppetAccountMap,
                      MergeStrategy)
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import require_kwargs
+from .utils import (human_timestamp,
+                    require_kwargs,
+                    TIMESTAMP_NOW,
+                    sanitize_timestamp)
 
 
 @require_kwargs
@@ -246,7 +246,7 @@ class HippoConverter:
             return
         self.state = ConversionState.INVALID
         self.logger.info(f'Moving {self.input_file} to invalid dir ({self.invalid_dir})')
-        shutil.move(self.input_file, self.invalid_dir)
+        shutil.move(self.input_file, self.invalid_dir / processed_filename(self.input_file))
 
     def set_complete(self):
         if self.state == ConversionState.INVALID:
@@ -256,7 +256,7 @@ class HippoConverter:
             self.logger.warning(f'{self.input_file} tried to set_complete on completed conversion.')
             return
         self.logger.info(f'Moving {self.input_file} to processed dir ({self.processed_dir})')
-        shutil.move(self.input_file, self.processed_dir)
+        shutil.move(self.input_file, self.processed_dir / processed_filename(self.input_file))
         self.state = ConversionState.COMPLETE
 
     def preprocess(self):
@@ -457,10 +457,14 @@ def add_sync_args(parser):
 
 
 def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
-    now = datetime.now()
-    branch_name = f"{prefix}.{now.strftime('%Y-%m-%d.%H-%M-%S')}"
-    title = f"[{socket.getfqdn()}] {prefix}: {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
+    title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
     return branch_name, title
+
+
+def processed_filename(filename: Path) -> str:
+    date_suffix = f'.{sanitize_timestamp(TIMESTAMP_NOW)}'
+    return filename.with_suffix(''.join((date_suffix, *filename.suffixes))).name
 
 
 @subcommand('sync', add_sync_args)
@@ -478,7 +482,10 @@ def sync(args: argparse.Namespace):
         subject = f'cheeto sync exception on {socket.getfqdn()}'
         contents = template.render(hostname=socket.getfqdn(),
                                    stacktrace=traceback.format_exc(),
-                                   logfile=args.log)
+                                   logfile=args.log,
+                                   timestamp=human_timestamp(TIMESTAMP_NOW),
+                                   pyexe=sys.executable,
+                                   exeargs=shlex.join(sys.argv))
         Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
         
 
