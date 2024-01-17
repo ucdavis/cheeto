@@ -11,6 +11,7 @@ import argparse
 from enum import IntEnum, auto, Enum
 import logging
 from pathlib import Path
+import shlex
 import shutil
 import socket
 import sys
@@ -482,7 +483,9 @@ def sync(args: argparse.Namespace):
         contents = template.render(hostname=socket.getfqdn(),
                                    stacktrace=traceback.format_exc(),
                                    logfile=args.log,
-                                   timestamp=human_timestamp(TIMESTAMP_NOW))
+                                   timestamp=human_timestamp(TIMESTAMP_NOW),
+                                   pyexe=sys.executable,
+                                   exeargs=shlex.join(sys.argv))
         Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
         
 
