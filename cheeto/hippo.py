@@ -191,7 +191,7 @@ def hippo_to_puppet(hippo_record: HippoRecord,
         groups = groups
     )
 
-    site.update_user(user_name, user)
+    site.update_user(user_name, user, enable=True)
     
     if hippo_record.account.key:
         site.write_key(user_name, hippo_record.account.key)
