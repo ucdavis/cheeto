@@ -22,6 +22,19 @@ from . import _yaml
 
 UINT_MAX = 4_294_967_296
 
+DEFAULT_SHELL = '/usr/bin/bash'
+
+ENABLED_SHELLS = {"/bin/sh",
+                  "/bin/bash",
+                  "/bin/zsh",
+                  "/usr/bin/sh",
+                  "/usr/bin/zsh",
+                  "/usr/bin/bash"}
+
+DISABLED_SHELLS = {"/usr/sbin/nologin-account-disabled",
+                   "/bin/false",
+                   "/usr/sbin/nologin"}
+
 
 class BaseModel:
 
@@ -48,6 +61,9 @@ class BaseModel:
     def save_yaml(self, filename: Path):
         with filename.open('w') as fp:
             print(type(self).Schema().dumps(self), file=fp) #type: ignore
+
+    def to_raw_yaml(self):
+        return type(self).Schema().dump(self) #type: ignore
 
 
 KerberosID = NewType(
@@ -93,14 +109,7 @@ LinuxPassword = NewType(
 
 Shell = NewType(
     "Shell", str, validate=mv.OneOf(
-        ("/bin/sh",
-         "/bin/bash",
-         "/bin/zsh",
-         "/usr/bin/zsh",
-         "/usr/bin/bash",
-         "/usr/sbin/nologin-account-disabled",
-         "/bin/false",
-         "/usr/sbin/nologin")
+        ENABLED_SHELLS | DISABLED_SHELLS
     )
 )
 

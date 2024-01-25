@@ -181,6 +181,7 @@ class PuppetUserMap(BaseModel):
                                           'user.group_sudo',
                                           'user.tag',
                                           'user.home',
+                                          'user.shell',
                                           'user.ensure',
                                           'user.membership',
                                           'user.storage',
@@ -499,7 +500,8 @@ class SiteData(YamlRepo):
 
     def update_user(self,
                     user_name: str,
-                    user: PuppetUserRecord):
+                    user: PuppetUserRecord,
+                    enable: bool = False):
 
         logger = logging.getLogger(__name__)
         logger.info(f'update_user: {user_name}')
@@ -509,11 +511,19 @@ class SiteData(YamlRepo):
             self.create_user(user_name, user)
         else:
             current_user = self.data.user[user_name]
-            merged = puppet_merge(asdict(user), asdict(current_user))
-            user = PuppetUserRecord(**merged)
+            merged = puppet_merge(current_user.to_raw_yaml(),
+                                  user.to_raw_yaml())
+            if enable and merged['shell'] in DISABLED_SHELLS:
+                merged['shell'] = DEFAULT_SHELL
+            user = PuppetUserRecord.Schema().load(merged)
             record = PuppetUserMap(user = {user_name: user})
             with site_path.open('w') as fp:
                 print(self.user_schema.dumps(record), file=fp)
+
+    def enable_user(self,
+                    user_name: str):
+        # TODO: implement this :)
+        pass
 
     def create_user(self,
                     user_name: str,
