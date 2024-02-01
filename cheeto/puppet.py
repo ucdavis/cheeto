@@ -513,7 +513,7 @@ class SiteData(YamlRepo):
             current_user = self.data.user[user_name]
             merged = puppet_merge(current_user.to_raw_yaml(),
                                   user.to_raw_yaml())
-            if enable and merged['shell'] in DISABLED_SHELLS:
+            if enable and merged.get('shell', None) in DISABLED_SHELLS:
                 merged['shell'] = DEFAULT_SHELL
             user = PuppetUserRecord.Schema().load(merged)
             record = PuppetUserMap(user = {user_name: user})
