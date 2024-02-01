@@ -46,10 +46,13 @@ class Git:
             return self.cmd.bake('push')
         return self.cmd.bake('push', '--set-upstream', 'origin', remote_create)
 
-    def clean(self, force: Optional[bool] = True) -> sh.Command:
+    def clean(self, force: Optional[bool] = True,
+                    exclude: Optional[str] = None) -> sh.Command:
         clean = self.cmd.bake('clean')
         if force:
             clean = clean.bake('-f')
+        if exclude is not None:
+            clean = clean.bake('--exclude', exclude)
         return clean
 
     def rev_parse(self, commit: Optional[str] = 'HEAD') -> sh.Command:

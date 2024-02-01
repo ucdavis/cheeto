@@ -10,6 +10,7 @@
 import argparse
 from enum import IntEnum, auto, Enum
 import logging
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -502,12 +503,13 @@ def _sync(args, jinja_env: Environment):
                            processed_dir=args.processed_dir,
                            invalid_dir=args.invalid_dir)
 
-    with site_data.lock(args.timeout):
+    lock = site_data.lock(args.timeout)
+    with lock:
         
         gh = Gh(working_dir=site_data.common.root)
         git = Git(working_dir=site_data.common.root)
         git.checkout(branch=args.base_branch)()
-        git.clean(force=True)()
+        git.clean(force=True, exclude=os.path.basename(lock.lock_file))()
         git.pull()()
 
         site_data.load()
