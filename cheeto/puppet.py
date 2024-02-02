@@ -121,7 +121,7 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, List[KerberosID]]] = None #type: ignore
+    account: Optional[Union[KerberosID, Set[KerberosID]]] = None #type: ignore
     partitions: Optional[Mapping[str, SlurmPartition]] = None
     max_jobs: Optional[UInt32] = None #type: ignore
 
