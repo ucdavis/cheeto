@@ -449,7 +449,7 @@ class CommonData(YamlRepo):
         group = PuppetGroupRecord(gid=gid, sponsors=sponsors)
         record = PuppetGroupMap(group = {group_name: group})
         if file_path.exists():
-            logger.info(f'Common YAML {file_path} exists, skipping.')
+            logger.warn(f'Common YAML {file_path} exists, skipping.')
         else:
             with file_path.open('w') as fp:
                 print(self.group_schema.dumps(record), file=fp)

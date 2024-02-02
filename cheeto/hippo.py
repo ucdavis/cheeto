@@ -53,7 +53,7 @@ class HippoAccount(BaseModel):
     kerb: KerberosID #type: ignore
     iam: IAMID #type: ignore
     mothra: MothraID #type: ignore
-    key: str
+    key: Optional[str] = None
 
 
 @require_kwargs
@@ -196,7 +196,7 @@ def hippo_to_puppet(hippo_record: HippoRecord,
     enable = dataop in (ConversionOp.USER, ConversionOp.SPONSOR)
     site.update_user(user_name, user, enable=enable)
     
-    if hippo_record.account.key:
+    if hippo_record.account.key is not None:
         site.write_key(user_name, hippo_record.account.key)
 
     logger.info(f'hippo_to_puppet: did {dataop.name} for {user_name} with groups {groups}') 
@@ -212,6 +212,7 @@ class HippoConverter:
                  jinja_env: Environment,
                  processed_dir: Path,
                  invalid_dir: Path,
+                 noop_dir: Path,
                  sponsors_group: str = 'sponsors'):
 
         self.logger = logging.getLogger(__name__)
@@ -220,6 +221,7 @@ class HippoConverter:
         self.jinja_env = jinja_env
         self.processed_dir = processed_dir
         self.invalid_dir = invalid_dir
+        self.noop_dir = noop_dir
         self.sponsors_group = sponsors_group
         self.hippo_record : Optional[HippoRecord] = None
         self.user_name : Optional[str] = None
@@ -227,12 +229,23 @@ class HippoConverter:
         self.state : ConversionState = ConversionState.UNINIT
         self.op : ConversionOp = ConversionOp.NOOP
 
+        for d in (self.invalid_dir, self.noop_dir, self.processed_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
     def __str__(self):
         return f'HippoConversion: {self.input_file}\n'\
                f'         status: {self.state.name}\n'\
                f'             op: {self.op.name}\n'\
                f'           user: {self.user_name}\n'\
                f'                 {self.user_record}'
+
+    def set_state(self, state: ConversionState):
+        self.logger.info(f'{self.input_file}: set state to {state.name}')
+        self.state = state
+
+    def set_op(self, op: ConversionOp):
+        self.logger.info(f'{self.input_file}: set op to {op.name}')
+        self.op = op
 
     def summary(self):
         if self.op == ConversionOp.NOOP:
@@ -247,9 +260,18 @@ class HippoConverter:
         if self.state == ConversionState.INVALID:
             self.logger.warning(f'{self.input_file} set Invalid twice.')
             return
-        self.state = ConversionState.INVALID
+        self.set_state(ConversionState.INVALID)
         self.logger.info(f'Moving {self.input_file} to invalid dir ({self.invalid_dir})')
         shutil.move(self.input_file, self.invalid_dir / processed_filename(self.input_file))
+
+    def set_noop(self):
+        if self.state != ConversionState.PROC:
+            self.logger.warning(f'{self.input_file}: tried to set_noop with state not PROC.')
+            return
+        self.set_state(ConversionState.COMPLETE)
+        self.set_op(ConversionOp.NOOP)
+        self.logger.info(f'Moving {self.input_file} to noop dir ({self.noop_dir})')
+        shutil.move(self.input_file, self.noop_dir / processed_filename(self.input_file))
 
     def set_complete(self):
         if self.state == ConversionState.INVALID:
@@ -260,7 +282,7 @@ class HippoConverter:
             return
         self.logger.info(f'Moving {self.input_file} to processed dir ({self.processed_dir})')
         shutil.move(self.input_file, self.processed_dir / processed_filename(self.input_file))
-        self.state = ConversionState.COMPLETE
+        self.set_state(ConversionState.COMPLETE)
 
     def preprocess(self):
         self.logger.info(f'Loading {self.input_file}')
@@ -276,15 +298,14 @@ class HippoConverter:
                 self.set_invalid()
                 return
 
-        self.state = ConversionState.PREPROC
+        self.set_state(ConversionState.PREPROC)
 
     def process(self):
         if self.state == ConversionState.PREPROC and self.hippo_record is not None:
             self.user_name, self.user_record, self.op = hippo_to_puppet(self.hippo_record,
                                                                         self.site,
                                                                         sponsors_group=self.sponsors_group)
-
-            self.state = ConversionState.PROC
+            self.set_state(ConversionState.PROC)
 
     def postprocess(self):
         if self.state != ConversionState.PROC or self.user_record is None:
@@ -339,7 +360,6 @@ class HippoConverter:
                                   reply_to='hpc-help@ucdavis.edu',
                                   subject=email_subject)
 
-
         self.logger.info(f'Sending email: \nSubject: {email_subject}\nBody: {email_contents}')
         email_cmd()
         self.set_complete()
@@ -350,7 +370,8 @@ class HippoData:
     def __init__(self,
                  root: Path,
                  processed_dir: Optional[Path] = None,
-                 invalid_dir: Optional[Path] = None):
+                 invalid_dir: Optional[Path] = None,
+                 noop_dir: Optional[Path] = None):
         self.root = root
         if processed_dir is None:
             self.processed_dir = root / '.processed'
@@ -360,6 +381,10 @@ class HippoData:
             self.invalid_dir = root / '.invalid'
         else:
             self.invalid_dir = invalid_dir
+        if noop_dir is None:
+            self.noop_dir = root / '.noop'
+        else:
+            self.noop_dir = noop_dir
 
     def find_yamls(self):
         return self.root.glob('*.yaml')
@@ -375,6 +400,7 @@ class HippoData:
                                        jinja_env,
                                        self.processed_dir,
                                        self.invalid_dir,
+                                       self.noop_dir,
                                        sponsors_group=sponsors_group)
             yield converter
 
@@ -521,7 +547,9 @@ def _sync(args, jinja_env: Environment):
         
         get_commit = git.rev_parse()
         start_commit = get_commit().strip()
-        converters = list(hippo_data.convert_yamls(site_data, jinja_env, args.sponsor_group))
+        converters = list(hippo_data.convert_yamls(site_data, 
+                                                   jinja_env, 
+                                                   args.sponsor_group))
         for converter in converters:
             converter.preprocess()
             if converter.state == ConversionState.PREPROC:
@@ -532,12 +560,13 @@ def _sync(args, jinja_env: Environment):
                     git.commit(message)()
                 except sh.ErrorReturnCode_1: #type: ignore
                     logger.info(f'Nothing to commit.')
+                    converter.set_noop()
         end_commit = get_commit().strip()
 
         if start_commit == end_commit:
             logger.info('No commits made, skipping PR flow.')
             for converter in converters:
-                converter.set_invalid()
+                #converter.set_noop()
                 logger.info(converter)
             return
         
