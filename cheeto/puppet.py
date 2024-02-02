@@ -121,7 +121,7 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, List[KerberosID]]] = None #type: ignore
+    account: Optional[Union[KerberosID, Set[KerberosID]]] = None #type: ignore
     partitions: Optional[Mapping[str, SlurmPartition]] = None
     max_jobs: Optional[UInt32] = None #type: ignore
 
@@ -449,7 +449,7 @@ class CommonData(YamlRepo):
         group = PuppetGroupRecord(gid=gid, sponsors=sponsors)
         record = PuppetGroupMap(group = {group_name: group})
         if file_path.exists():
-            logger.info(f'Common YAML {file_path} exists, skipping.')
+            logger.warn(f'Common YAML {file_path} exists, skipping.')
         else:
             with file_path.open('w') as fp:
                 print(self.group_schema.dumps(record), file=fp)
