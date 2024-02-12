@@ -50,6 +50,21 @@ class BaseModel:
             if value not in BaseModel.SKIP_VALUES
         ])
 
+    @staticmethod
+    def _sort(data):
+        try:
+            if isinstance(data, (set, list, tuple)):
+                return sorted(data)
+        except TypeError:
+            pass
+        return data
+
+    @post_dump
+    def sort_listlikes(self, data, **kwargs):
+        return OrderedDict([
+            (key, BaseModel._sort(value)) for key, value in data.items()
+        ])
+
     class Meta:
         ordered = True
         render_module = _yaml
