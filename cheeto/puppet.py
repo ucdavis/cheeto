@@ -202,12 +202,6 @@ class PuppetGroupRecord(BaseModel):
     storage: Optional[List[PuppetGroupStorage]] = None
     slurm: Optional[SlurmRecord] = None
 
-    @post_dump
-    def sort(self, item, **kwargs):
-        if 'tag' in item:
-            item['tag'] = sorted(item['tag'])
-        return item
-    
 
 @require_kwargs
 @dataclass(frozen=True)
