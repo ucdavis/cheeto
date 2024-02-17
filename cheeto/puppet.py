@@ -145,6 +145,7 @@ class PuppetUserRecord(BaseModel):
     shell: Optional[Shell] = None #type: ignore
     tag: Optional[Set[str]] = None
     home: Optional[str] = None
+    expiry: Optional[Union[Date, PuppetAbsent]] = None #type: ignore
 
     ensure: Optional[PuppetEnsure] = None #type: ignore
     membership: Optional[PuppetMembership] = None #type: ignore

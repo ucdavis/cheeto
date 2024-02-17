@@ -18,7 +18,6 @@ from mergedeep import merge, Strategy
 from ruamel import yaml as ryaml
 
 from .errors import ExitCode
-from .types import BaseModel
 
 
 class MergeStrategy(Enum):
@@ -75,7 +74,7 @@ def parse_yaml_forest(yaml_files: list,
 
 
 def validate_yaml_forest(yaml_forest: dict,
-                         MapSchema: Type[BaseModel],
+                         MapSchema, 
                          strict: Optional[bool] = False,
                          partial: Optional[bool] = False): 
 

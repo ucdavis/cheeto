@@ -9,6 +9,7 @@
 
 from collections import OrderedDict
 import dataclasses
+import datetime
 from pathlib import Path
 from typing import Union
 
@@ -18,6 +19,7 @@ from marshmallow import post_dump
 from marshmallow_dataclass import NewType
 
 from . import _yaml
+from .parsing import parse_yaml
 
 
 UINT_MAX = 4_294_967_296
@@ -93,6 +95,14 @@ IAMID = NewType(
     "IAMID", int, validate=mv.Range(min=0, max=UINT_MAX)
 )
 
+class SimpleDate(mf.Date):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, format='%Y-%m-%d', **kwargs)
+
+Date = NewType(
+    "Date", datetime.date, field=SimpleDate
+)
+
 Email = NewType(
     "Email", str, field=mf.Email
 )
@@ -149,3 +159,6 @@ SlurmQOSFlag = NewType(
     )
 )
 
+PuppetAbsent = NewType(
+    "PuppetAbsent", str, validate=mv.Equal("absent")
+)
