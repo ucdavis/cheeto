@@ -321,7 +321,8 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
         if user.slurm is not None and user.slurm.account is not None:
             for account in user.slurm.account:
                 group = puppet_mapping.group[account] #type: ignore
-                inherited_partitions.append((account, group.slurm.partitions))
+                if group.slurm is not None and group.slurm.partitions is not None:
+                    inherited_partitions.append((account, group.slurm.partitions))
 
         for account_name, partitions in inherited_partitions:
             for partition_name, partition in partitions.items():
