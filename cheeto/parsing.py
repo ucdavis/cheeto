@@ -29,7 +29,7 @@ class MergeStrategy(Enum):
 def parse_yaml(filename: str) -> dict:
     try:
         with open(filename) as fp:
-            parsed = ryaml.safe_load(fp)
+            parsed = ryaml.YAML(typ='safe').load(fp)
             if parsed is None:
                 return {}
             return parsed
@@ -83,7 +83,7 @@ def validate_yaml_forest(yaml_forest: dict,
     for source_root, yaml_obj in yaml_forest.items():
 
         try:
-            puppet_data = MapSchema.Schema().load(yaml_obj, #type: ignore
+            puppet_data = MapSchema.Schema().load(yaml_obj,
                                                   partial=partial)
         except marshmallow.exceptions.ValidationError as e: #type: ignore
             logger.error(f'[red]ValidationError: {source_root}[/]')
@@ -93,3 +93,6 @@ def validate_yaml_forest(yaml_forest: dict,
             continue
         else:
             yield source_root, puppet_data
+
+
+
