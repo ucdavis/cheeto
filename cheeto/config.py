@@ -11,13 +11,14 @@ from marshmallow_dataclass import dataclass
 
 from .args import subcommand
 from .errors import ExitCode
+from .parsing import parse_yaml
 from .types import *
 from .utils import require_kwargs
 from .xdg_base_dirs import xdg_config_home
 
 
 @require_kwargs
-@dataclass
+@dataclass(frozen=True)
 class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
@@ -26,22 +27,22 @@ class LDAPConfig(BaseModel):
 
 
 @require_kwargs
-@dataclass
+@dataclass(frozen=True)
 class LDAPSection(BaseModel):
     hpccf: LDAPConfig
     ucdavis: LDAPConfig
 
 @require_kwargs
-@dataclass
+@dataclass(frozen=True)
 class Config(BaseModel):
     ldap: LDAPSection
 
 
 def get_config_path() -> pathlib.Path:
-    return xdg_config_home() / '.cheeto' / 'config.yaml'
+    return xdg_config_home() / 'cheeto' / 'config.yaml'
 
 
-def get_config() -> Union[Config, None]:
+def get_config(config_path: Optional[pathlib.Path] = None) -> Union[Config, None]:
     logger = logging.getLogger(__name__)
 
     config_path = get_config_path()
@@ -54,7 +55,7 @@ def get_config() -> Union[Config, None]:
         logger.error(e.messages)
         return None
     else:
-        return config
+        return config #type: ignore
 
 
 def add_show_args(parser):

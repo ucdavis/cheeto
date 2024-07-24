@@ -53,7 +53,7 @@ class PuppetAutofs(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetZFS(BaseModel):
-    quota: DataQuota #type: ignore
+    quota: DataQuota 
 
 
 @require_kwargs
@@ -66,9 +66,9 @@ class PuppetUserStorage(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOSTRES(BaseModel):
-    cpus: Optional[UInt32] = None #type: ignore
-    gpus: Optional[UInt32] = None #type: ignore
-    mem: Optional[DataQuota] = None #type: ignore
+    cpus: Optional[UInt32] = None 
+    gpus: Optional[UInt32] = None 
+    mem: Optional[DataQuota] = None 
 
     @marshmallow.post_load
     def convert_mem(self, in_data, **kwargs):
@@ -90,11 +90,11 @@ class SlurmQOSTRES(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOS(BaseModel):
-    group: Optional[SlurmQOSTRES] = None #type: ignore
-    user: Optional[SlurmQOSTRES] = None #type: ignore
-    job: Optional[SlurmQOSTRES] = None #type: ignore
+    group: Optional[SlurmQOSTRES] = None 
+    user: Optional[SlurmQOSTRES] = None 
+    job: Optional[SlurmQOSTRES] = None 
     priority: Optional[int] = 0
-    flags: Optional[Set[SlurmQOSFlag]] = None #type: ignore
+    flags: Optional[Set[SlurmQOSFlag]] = None 
 
     def to_slurm(self) -> List[str]:
         tokens = []
@@ -121,9 +121,9 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, Set[KerberosID]]] = None #type: ignore
+    account: Optional[Union[KerberosID, Set[KerberosID]]] = None 
     partitions: Optional[Mapping[str, SlurmPartition]] = None
-    max_jobs: Optional[UInt32] = None #type: ignore
+    max_jobs: Optional[UInt32] = None 
 
 
 @require_kwargs
@@ -136,19 +136,19 @@ class SlurmRecordMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetUserRecord(BaseModel):
     fullname: str
-    email: Email #type: ignore
-    uid: LinuxUID #type: ignore
-    gid: LinuxGID #type: ignore
-    groups: Optional[Set[KerberosID]] = None #type: ignore
-    group_sudo: Optional[List[KerberosID]] = None #type: ignore
-    password: Optional[LinuxPassword] = None #type: ignore
-    shell: Optional[Shell] = None #type: ignore
+    email: Email
+    uid: LinuxUID 
+    gid: LinuxGID
+    groups: Optional[Set[KerberosID]] = None 
+    group_sudo: Optional[List[KerberosID]] = None 
+    password: Optional[LinuxPassword] = None 
+    shell: Optional[Shell] = None 
     tag: Optional[Set[str]] = None
     home: Optional[str] = None
-    expiry: Optional[Union[Date, PuppetAbsent]] = None #type: ignore
+    expiry: Optional[Union[Date, PuppetAbsent]] = None 
 
-    ensure: Optional[PuppetEnsure] = None #type: ignore
-    membership: Optional[PuppetMembership] = None #type: ignore
+    ensure: Optional[PuppetEnsure] = None 
+    membership: Optional[PuppetMembership] = None 
 
     storage: Optional[PuppetUserStorage] = None
     slurm: Optional[SlurmRecord] = None
@@ -157,11 +157,11 @@ class PuppetUserRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetUserMap(BaseModel):
-    user: Mapping[KerberosID, PuppetUserRecord] #type: ignore
+    user: Mapping[KerberosID, PuppetUserRecord] 
 
     @staticmethod
     def common_schema():
-        return PuppetUserMap.Schema(only=['user.fullname', #type: ignore
+        return PuppetUserMap.Schema(only=['user.fullname', 
                                           'user.email',
                                           'user.uid',
                                           'user.gid',
@@ -170,7 +170,7 @@ class PuppetUserMap(BaseModel):
 
     @staticmethod
     def site_schema():
-        return PuppetUserMap.Schema(only=['user.groups', #type: ignore
+        return PuppetUserMap.Schema(only=['user.groups', 
                                           'user.group_sudo',
                                           'user.tag',
                                           'user.home',
@@ -185,8 +185,8 @@ class PuppetUserMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupStorage(BaseModel):
     name: str
-    owner: KerberosID #type: ignore
-    group: Optional[KerberosID] = None #type: ignore
+    owner: KerberosID 
+    group: Optional[KerberosID] = None 
     autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
     globus: Optional[bool] = False
@@ -196,8 +196,8 @@ class PuppetGroupStorage(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupRecord(BaseModel):
     gid: LinuxGID #type: ignore
-    sponsors: Optional[List[KerberosID]] = None #type: ignore
-    ensure: Optional[PuppetEnsure] = None #type: ignore
+    sponsors: Optional[List[KerberosID]] = None 
+    ensure: Optional[PuppetEnsure] = None 
     tag: Optional[Set[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
@@ -207,11 +207,11 @@ class PuppetGroupRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetGroupMap(BaseModel):
-    group: Mapping[KerberosID, PuppetGroupRecord] #type: ignore
+    group: Mapping[KerberosID, PuppetGroupRecord] 
 
     @staticmethod
     def common_schema():
-        return PuppetGroupMap.Schema(only=['group.gid', #type: ignore
+        return PuppetGroupMap.Schema(only=['group.gid', 
                                            'group.tag',
                                            'group.ensure'])
 
@@ -227,8 +227,8 @@ class PuppetGroupMap(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetShareStorage(BaseModel):
-    owner: KerberosID #type: ignore
-    group: Optional[KerberosID] #type: ignore
+    owner: KerberosID 
+    group: Optional[KerberosID] 
     zfs: Union[PuppetZFS, bool]
     autofs: Optional[PuppetAutofs]
 
@@ -248,21 +248,21 @@ class PuppetShareMap(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetMeta(BaseModel):
-    admin_sponsors: List[KerberosID] #type: ignore
+    admin_sponsors: List[KerberosID] 
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetAccountMap(BaseModel):
-    group: Mapping[KerberosID, PuppetGroupRecord] = field(default_factory=dict) #type: ignore
-    user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) #type: ignore
+    group: Mapping[KerberosID, PuppetGroupRecord] = field(default_factory=dict) 
+    user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) 
     share: Mapping[str, PuppetShareRecord] = field(default_factory=dict)
     meta: Optional[PuppetMeta] = None
 
 
 def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
     try:
-        storage = puppet_data.group[group].storage #type: ignore
+        storage = puppet_data.group[group].storage 
     except (KeyError, AttributeError):
         return None
     else:
@@ -607,7 +607,7 @@ def validate_yamls(args: argparse.Namespace):
                 if getattr(args, func_name):
                     _postload_validators[func_name](source_file, puppet_data, args.strict)
 
-        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
+        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) 
         hl_yaml = Syntax(output_yaml,
                          'yaml',
                          theme='github-dark',

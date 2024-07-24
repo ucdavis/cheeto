@@ -11,12 +11,12 @@ from collections import OrderedDict
 import dataclasses
 import datetime
 from pathlib import Path
-from typing import Union
+from typing import Annotated, ClassVar, Type, Union
 
 from marshmallow import validate as mv
 from marshmallow import fields as mf
-from marshmallow import post_dump
-from marshmallow_dataclass import NewType
+from marshmallow import post_dump, Schema as _Schema
+from marshmallow_dataclass import dataclass
 
 from . import _yaml
 from .parsing import parse_yaml
@@ -38,7 +38,7 @@ DISABLED_SHELLS = {"/usr/sbin/nologin-account-disabled",
                    "/usr/sbin/nologin"}
 
 
-class BaseModel:
+class _BaseModel:
 
     SKIP_VALUES = [None, {}, []]
 
@@ -83,64 +83,49 @@ class BaseModel:
         return type(self).Schema().dump(self) #type: ignore
 
 
-KerberosID = NewType(
-    "KerberosID", str, validate=mv.Regexp(r'[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)')
-)
 
-MothraID = NewType(
-    "MothraID", int, validate=mv.Range(min=0, max=UINT_MAX)
-)
+@dataclass(frozen=True)
+class BaseModel(_BaseModel):
 
-IAMID = NewType(
-    "IAMID", int, validate=mv.Range(min=0, max=UINT_MAX)
-)
+    Schema: ClassVar[Type[_Schema]] = _Schema # For the type checker
+
+
+KerberosID = Annotated[str, mf.String(validate=mv.Regexp(r'[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)'))]
+
 
 class SimpleDate(mf.Date):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, format='%Y-%m-%d', **kwargs)
 
-Date = NewType(
-    "Date", datetime.date, field=SimpleDate
-)
 
-Email = NewType(
-    "Email", str, field=mf.Email
-)
+Date = Annotated[datetime.date, SimpleDate]
 
-IPv4 = NewType(
-    "IPv4", str, mf.IPv4
-)
+Email = Annotated[str, mf.Email]
 
-PuppetEnsure = NewType(
-    "PuppetEnsure", str, validate=mv.OneOf(("present", "absent"))
-)
+IPv4 = Annotated[str, mf.IPv4]
 
-PuppetMembership = NewType(
-    "PuppetMembership", str, validate=mv.OneOf(("inclusive", "minimum"))
-)
+PuppetEnsure = Annotated[str, mf.String(validate=mv.OneOf(("present", "absent")))]
 
-UInt32 = NewType(
-    "UInt32", int, validate=mv.Range(min=0, max=UINT_MAX)
-)
+PuppetMembership = Annotated[str, mf.String(validate=mv.OneOf(("inclusive", "minimum")))]
+
+PuppetAbsent = Annotated[str, mf.String(validate=mv.Equal("absent"))]
+
+UInt32 = Annotated[int, mf.Integer(validate=mv.Range(min=0, max=UINT_MAX))]
+
+IAMID = UInt32
+
+MothraID = UInt32
 
 LinuxUID = UInt32
 
 LinuxGID = UInt32
 
 # TODO: Needs to actually be "x" or "min length"
-LinuxPassword = NewType(
-    "LinuxPassword", str, validate=mv.Length(min=0)
-)
+LinuxPassword = Annotated[str, mf.String(validate=mv.Length(min=0))]
 
-Shell = NewType(
-    "Shell", str, validate=mv.OneOf(
-        ENABLED_SHELLS | DISABLED_SHELLS
-    )
-)
+Shell = Annotated[str, mf.String(validate=mv.OneOf(ENABLED_SHELLS | DISABLED_SHELLS))]
 
-DataQuota = NewType(
-    "DataQuota", str, validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]')
-)
+DataQuota = Annotated[str, mf.String(validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'))]
 
 SlurmQOSValidFlags = ("DenyOnLimit",
                       "EnforceUsageThreshold",
@@ -153,12 +138,5 @@ SlurmQOSValidFlags = ("DenyOnLimit",
                       "RequiresReservation",
                       "UsageFactorSafe")
 
-SlurmQOSFlag = NewType(
-    "SlurmQOSFlag", str, validate=mv.OneOf(
-        SlurmQOSValidFlags
-    )
-)
+SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 
-PuppetAbsent = NewType(
-    "PuppetAbsent", str, validate=mv.Equal("absent")
-)
