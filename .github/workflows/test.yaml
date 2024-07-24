@@ -15,7 +15,7 @@ jobs:
       - name: Install apt dependencies
         run: |
           sudo apt update
-          sudo apt install openldap
+          sudo apt install libldap
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
         with:
