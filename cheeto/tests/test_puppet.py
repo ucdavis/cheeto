@@ -4,11 +4,14 @@ from .conftest import run_shell_cmd
 from ..puppet import PuppetAccountMap
 from ..errors import ExitCode
 
-class TestValidateCommand:
+class TestValidateMergeCommand:
 
-    base_cmd = ['cheeto', 'puppet', 'validate']
+    base_cmd = ['cheeto', 'puppet', 'validate', 
+                '--merge', 'ALL', 
+                '--strict', 
+                '--dump']
 
-    def test_validate_basic(self, testdata , tmpdir):
+    def test_basic(self, testdata , tmpdir):
         '''
         Test `cheeto puppet validate --merge ALL` with no postload validation.
         '''
@@ -17,10 +20,7 @@ class TestValidateCommand:
         site_fn = testdata('testuser.site.yaml')
         out_fn = tmpdir.join('merged.yaml')
 
-        cmd = self.base_cmd + ['--merge', 'ALL', 
-                               '--strict', 
-                               '--dump', out_fn,
-                               base_fn, site_fn]
+        cmd = self.base_cmd + [out_fn, base_fn, site_fn]
 
         with tmpdir.as_cwd():
             retcode, stderr, p = run_shell_cmd(cmd)
@@ -32,7 +32,46 @@ class TestValidateCommand:
             user = merged.user['testuser']
             assert 'testgroup' in user.groups
 
-    def test_validate_basic_postfail(self, testdata , tmpdir):
+
+    def test_override_value(self, testdata , tmpdir):
+        '''
+        Test `cheeto puppet validate --merge ALL` with an override in site.yaml.
+        '''
+        
+        base_fn = testdata('testuser.yaml')
+        site_fn = testdata('testuser.site.override-value.yaml')
+        out_fn = tmpdir.join('merged.yaml')
+
+        cmd = self.base_cmd + [out_fn, base_fn, site_fn]
+
+        with tmpdir.as_cwd():
+            retcode, stderr, p = run_shell_cmd(cmd)
+            assert retcode == 0
+
+            merged = PuppetAccountMap.load_yaml(out_fn)
+            assert 'testuser' in merged.user
+            
+            user = merged.user['testuser']
+            assert user.shell == '/bin/bash'
+
+
+    def test_bad_override_value(self, testdata , tmpdir):
+        '''
+        Test `cheeto puppet validate --merge ALL` with an override in site.yaml.
+        '''
+        
+        base_fn = testdata('testuser.yaml')
+        site_fn = testdata('testuser.site.bad-override-value.yaml')
+        out_fn = tmpdir.join('merged.yaml')
+
+        cmd = self.base_cmd + [out_fn, base_fn, site_fn]
+
+        with tmpdir.as_cwd():
+            retcode, stderr, p = run_shell_cmd(cmd)
+            assert retcode == ExitCode.VALIDATION_ERROR
+            assert out_fn.exists() == False
+
+    def test_postvalidate_fail(self, testdata , tmpdir):
         '''
         Test `cheeto puppet validate --merge ALL --postload-validate` fails due to missing group.
         '''
@@ -41,10 +80,8 @@ class TestValidateCommand:
         site_fn = testdata('testuser.site.yaml')
         out_fn = tmpdir.join('merged.yaml')
 
-        cmd = self.base_cmd + ['--merge', 'ALL', 
-                               '--strict', 
-                               '--postload-validate', 
-                               '--dump', out_fn, 
+        cmd = self.base_cmd + [out_fn,
+                               '--postload-validate',
                                base_fn, site_fn]
 
         with tmpdir.as_cwd():
@@ -53,7 +90,7 @@ class TestValidateCommand:
             assert out_fn.exists() == False
 
 
-    def test_validate_basic_post(self, testdata , tmpdir):
+    def test_postvalidate_success(self, testdata , tmpdir):
         '''
         Test `cheeto puppet validate --merge ALL --postload-validate` succeeds.
         '''
@@ -63,10 +100,8 @@ class TestValidateCommand:
         group_fn = testdata('testgroup.yaml')
         out_fn = tmpdir.join('merged.yaml')
 
-        cmd = self.base_cmd + ['--merge', 'ALL', 
-                               '--strict', 
-                               '--postload-validate', 
-                               '--dump', out_fn, 
+        cmd = self.base_cmd + [out_fn,
+                               '--postload-validate',
                                base_fn, site_fn, group_fn]
 
         with tmpdir.as_cwd():
