@@ -11,7 +11,7 @@ from marshmallow_dataclass import dataclass
 
 from .args import subcommand
 from .errors import ExitCode
-from .parsing import parse_yaml
+from .yaml import parse_yaml
 from .types import *
 from .utils import require_kwargs
 from .xdg_base_dirs import xdg_config_home

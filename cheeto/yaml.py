@@ -2,22 +2,44 @@
 # -*- coding: utf-8 -*-
 # (c) Camille Scott, 2023
 # (c) The Regents of the University of California, Davis, 2023
-# File   : parsing.py
+# File   : _yaml.py
 # License: Modified BSD
 # Author : Camille Scott <cswel@ucdavis.edu>
-# Date   : 11.12.2023
+# Date   : 12.04.2023
 
+from collections import OrderedDict
+from typing import Any
 from enum import Enum
 import logging
 import os
 from typing import Optional, Type
 import sys
 
+
 import marshmallow
 from mergedeep import merge, Strategy
+
 from ruamel import yaml as ryaml
+from ruamel.yaml.compat import StringIO
+from ruamel.yaml.representer import RoundTripRepresenter
 
 from .errors import ExitCode
+
+
+class OrderedDictRepresenter(RoundTripRepresenter):
+    pass
+
+
+ryaml.add_representer(OrderedDict, OrderedDictRepresenter.represent_dict, 
+                      representer=OrderedDictRepresenter)
+
+def dumps(obj: Any, *args, many: bool | None = None, **kwarg) -> str:
+    #pprint(obj)
+    dumper = ryaml.YAML()
+    dumper.Representer = OrderedDictRepresenter
+    stream = StringIO()
+    dumper.dump(obj, stream)
+    return stream.getvalue()
 
 
 class MergeStrategy(Enum):
@@ -93,6 +115,5 @@ def validate_yaml_forest(yaml_forest: dict,
             continue
         else:
             yield source_root, puppet_data
-
 
 

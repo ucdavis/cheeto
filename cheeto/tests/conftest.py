@@ -50,7 +50,7 @@ def using(**kwargs):
     return wrapped
 
 
-def run_shell_cmd(cmd, in_directory=None):
+def run_shell_cmd(cmd, print_stderr=True, in_directory=None):
     cwd = os.getcwd()
     if in_directory:
         os.chdir(in_directory)
@@ -59,7 +59,9 @@ def run_shell_cmd(cmd, in_directory=None):
     print('running: ', cmd)
     try:
         p = subprocess.run(cmd, shell=True, check=False,
-                           stderr=subprocess.PIPE)
-        return p
+                           capture_output=True, encoding='utf-8') 
+        if print_stderr:
+            print('stderr:', p.stderr)
+        return p.returncode, p.stderr, p
     finally:
         os.chdir(cwd)

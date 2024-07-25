@@ -19,7 +19,7 @@ import sys
 from filelock import FileLock
 import ldap
 import marshmallow
-from marshmallow import post_dump
+from marshmallow import pre_dump
 from marshmallow_dataclass import dataclass
 from rich import print as rprint
 from rich.console import Console
@@ -27,7 +27,7 @@ from rich.syntax import Syntax
 
 from .args import subcommand
 from .errors import ExitCode
-from .parsing import (MergeStrategy,
+from .yaml import (MergeStrategy,
                       parse_yaml_forest,
                       puppet_merge,
                       validate_yaml_forest)
@@ -258,6 +258,15 @@ class PuppetAccountMap(BaseModel):
     user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) 
     share: Mapping[str, PuppetShareRecord] = field(default_factory=dict)
     meta: Optional[PuppetMeta] = None
+
+    @pre_dump
+    def sort_maps(self, data, **kwargs):
+        return PuppetAccountMap(
+            group = BaseModel._sort(data.group), #type: ignore
+            user = BaseModel._sort(data.user), #type: ignore
+            share = BaseModel._sort(data.share), #type: ignore
+            meta = data.meta
+        )
 
 
 def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):

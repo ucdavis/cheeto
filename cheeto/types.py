@@ -8,6 +8,7 @@
 # Date   : 22.03.2023
 
 from collections import OrderedDict
+from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import datetime
 from pathlib import Path
@@ -18,8 +19,8 @@ from marshmallow import fields as mf
 from marshmallow import post_dump, Schema as _Schema
 from marshmallow_dataclass import dataclass
 
-from . import _yaml
-from .parsing import parse_yaml
+from . import yaml
+from .yaml import parse_yaml
 
 
 UINT_MAX = 4_294_967_296
@@ -53,23 +54,40 @@ class _BaseModel:
         ])
 
     @staticmethod
-    def _sort(data):
+    def _sortable(data):
+        if not isinstance(data, Iterable):
+            return False
+        # Get the type of the first element
         try:
-            if isinstance(data, (set, list, tuple)):
+            first = next(iter(data))
+        except StopIteration:
+            # empty iterable, still sortable
+            return True
+        keytype = type(first)
+        # Check that all elements are of that type
+        return isinstance(first, Hashable) and all(map(lambda item: isinstance(item, keytype), data))
+
+    @staticmethod
+    def _sort(data):
+        if BaseModel._sortable(data):
+            if isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
                 return sorted(data)
-        except TypeError:
-            pass
-        return data
+            elif isinstance(data, (dict, OrderedDict)):
+
+                return OrderedDict(sorted(data.items(), key=lambda t: t[0]))
+            else:
+                return data
+        else:
+            return data
 
     @post_dump
     def sort_listlikes(self, data, **kwargs):
-        return OrderedDict([
-            (key, BaseModel._sort(value)) for key, value in data.items()
-        ])
+        return BaseModel._sort(data)
+
 
     class Meta:
         ordered = True
-        render_module = _yaml
+        render_module = yaml
 
     @classmethod
     def load_yaml(cls, filename: Union[Path, str]):

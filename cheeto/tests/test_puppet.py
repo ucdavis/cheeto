@@ -23,8 +23,8 @@ class TestValidateCommand:
                                base_fn, site_fn]
 
         with tmpdir.as_cwd():
-            ret = run_shell_cmd(cmd)
-            assert ret.returncode == 0
+            retcode, stderr, p = run_shell_cmd(cmd)
+            assert retcode == 0
 
             merged = PuppetAccountMap.load_yaml(out_fn)
             assert 'testuser' in merged.user
@@ -48,8 +48,8 @@ class TestValidateCommand:
                                base_fn, site_fn]
 
         with tmpdir.as_cwd():
-            ret = run_shell_cmd(cmd)
-            assert ret.returncode == ExitCode.VALIDATION_ERROR
+            retcode, stderr, p = run_shell_cmd(cmd)
+            assert retcode == ExitCode.VALIDATION_ERROR
             assert out_fn.exists() == False
 
 
@@ -70,8 +70,8 @@ class TestValidateCommand:
                                base_fn, site_fn, group_fn]
 
         with tmpdir.as_cwd():
-            ret = run_shell_cmd(cmd)
-            assert ret.returncode == 0
+            retcode, stderr, p = run_shell_cmd(cmd)
+            assert retcode == 0
 
             merged = PuppetAccountMap.load_yaml(out_fn)
             assert 'testuser' in merged.user
