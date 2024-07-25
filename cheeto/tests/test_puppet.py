@@ -1,8 +1,20 @@
 from pathlib import Path
 
 from .conftest import run_shell_cmd
-from ..puppet import PuppetAccountMap
+from ..puppet import PuppetAccountMap, PuppetUserRecord
 from ..errors import ExitCode
+
+
+class TestUserRecord:
+
+    def test_load(self, testdata):
+        fn = testdata('testuser.yaml')
+        record = PuppetAccountMap.load_yaml(fn)
+        assert hasattr(record, 'user')
+        assert 'testuser' in record.user
+        user = record.user['testuser']
+        assert user.fullname == 'Test Testerson'
+
 
 class TestValidateMergeCommand:
 
