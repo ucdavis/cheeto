@@ -1,5 +1,8 @@
 from pathlib import Path
 
+from marshmallow.exceptions import ValidationError
+import pytest
+
 from .conftest import run_shell_cmd
 from ..puppet import PuppetAccountMap, PuppetUserRecord
 from ..errors import ExitCode
@@ -8,12 +11,57 @@ from ..errors import ExitCode
 class TestUserRecord:
 
     def test_load(self, testdata):
+        '''
+        Test a basic load.
+        '''
         fn = testdata('testuser.yaml')
         record = PuppetAccountMap.load_yaml(fn)
         assert hasattr(record, 'user')
         assert 'testuser' in record.user
         user = record.user['testuser']
         assert user.fullname == 'Test Testerson'
+
+    def test_missing_required(self, testdata):
+        '''
+        Test a missing required field.
+        '''
+        fn = testdata('testuser.no-email.yaml')
+        with pytest.raises(ValidationError) as exinfo:
+            record = PuppetAccountMap.load_yaml(fn)
+        print(exinfo.value.messages)
+        assert exinfo.value.messages['user']['testuser']['value']['email'] #type: ignore
+
+    def test_bad_uid(self, testdata):
+        fn = testdata('testuser.bad-uid.yaml')
+        with pytest.raises(ValidationError) as exinfo:
+            record = PuppetAccountMap.load_yaml(fn)
+        assert exinfo.value.messages['user']['testuser']['value']['uid'] #type: ignore
+
+    def test_oob_uid(self, testdata):
+        fn = testdata('testuser.oob-uid.yaml')
+        with pytest.raises(ValidationError) as exinfo:
+            record = PuppetAccountMap.load_yaml(fn)
+        assert exinfo.value.messages['user']['testuser']['value']['uid'] #type: ignore
+
+    def test_bad_shell(self, testdata):
+        fn = testdata('testuser.bad-shell.yaml')
+        with pytest.raises(ValidationError) as exinfo:
+            record = PuppetAccountMap.load_yaml(fn)
+        assert exinfo.value.messages['user']['testuser']['value']['shell'] #type: ignore
+
+
+class TestGroupRecord:
+
+    def test_load(self, testdata):
+        '''
+        Test a basic group load.
+        '''
+        fn = testdata('testgroup.yaml')
+        record = PuppetAccountMap.load_yaml(fn)
+        assert hasattr(record, 'group')
+        assert 'testgroup' in record.group
+        group = record.group['testgroup']
+        assert group.gid == 111111
 
 
 class TestValidateMergeCommand:
