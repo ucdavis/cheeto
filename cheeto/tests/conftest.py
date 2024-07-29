@@ -19,9 +19,13 @@ def testdata(tmpdir, request):
     '''
     data_dir = Path(request.module.__file__).parent / 'data'
 
-    def getter(filename):
-        shutil.copy(data_dir / filename, tmpdir)
-        return tmpdir.join(filename)
+    def getter(*filenames):
+        filenames = list(filenames)
+        copied = tuple((shutil.copy(data_dir / filename, tmpdir) for filename in filenames))
+        if len(copied) == 1:
+            return copied[0]
+        else:
+            return copied
 
     return getter
 

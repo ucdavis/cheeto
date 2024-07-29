@@ -97,3 +97,59 @@ class TestPuppetMerge:
         merged = yaml.puppet_merge(a, b)
         assert merged['b']['aa'] == 2
         assert merged['b']['bb'] == [1, 2, 3, 4]
+
+
+class TestParseYamlForest:
+
+    def test_merge_all(self, testdata):
+        f1_fn, f1_site_fn, f2_fn, f2_site_fn = testdata('test-forest-1.yaml',
+                                                        'test-forest-1.site.yaml',
+                                                        'test-forest-2.yaml',
+                                                        'test-forest-2.site.yaml')
+        forest = yaml.parse_yaml_forest([f1_fn, f1_site_fn, f2_fn, f2_site_fn],
+                                        merge_on = yaml.MergeStrategy.ALL)
+        assert 'merged-all' in forest
+        assert len(forest) == 1
+        
+        data = forest['merged-all']
+        assert data['a'] == 3
+        assert data['b'] == 'cheeto'
+
+
+    def test_merge_none(self, testdata):
+        f1_fn, f1_site_fn, f2_fn, f2_site_fn = testdata('test-forest-1.yaml',
+                                                        'test-forest-1.site.yaml',
+                                                        'test-forest-2.yaml',
+                                                        'test-forest-2.site.yaml')
+        forest = yaml.parse_yaml_forest([f1_fn, f1_site_fn, f2_fn, f2_site_fn],
+                                        merge_on = yaml.MergeStrategy.NONE)
+        assert len(forest) == 4
+        
+        assert forest[f1_fn]['a'] == 1
+        assert forest[f1_site_fn]['a'] == 2
+
+        assert 'b' not in forest[f2_fn]
+        assert forest[f2_fn]['a'] == 3
+
+        assert 'a' not in forest[f2_site_fn]
+        assert forest[f2_site_fn]['b'] == 'cheeto'
+
+    def test_merge_prefix(self, testdata):
+        f1_fn, f1_site_fn, f2_fn, f2_site_fn = testdata('test-forest-1.yaml',
+                                                        'test-forest-1.site.yaml',
+                                                        'test-forest-2.yaml',
+                                                        'test-forest-2.site.yaml')
+        forest = yaml.parse_yaml_forest([f1_fn, f1_site_fn, f2_fn, f2_site_fn],
+                                        merge_on = yaml.MergeStrategy.PREFIX)
+
+        assert len(forest) == 2
+        assert 'test-forest-1' in forest
+        assert 'test-forest-2' in forest
+
+        forest_1 = forest['test-forest-1']
+        assert forest_1['a'] == 2
+        assert forest_1['b'] == [1, 2, 3]
+
+        forest_2 = forest['test-forest-2']
+        assert forest_2['a'] == 3
+        assert forest_2['b'] == 'cheeto'
