@@ -12,7 +12,8 @@ from typing import Any
 from enum import Enum
 import logging
 import os
-from typing import Optional, Type
+from pathlib import Path
+from typing import Optional, Union
 import sys
 
 
@@ -48,9 +49,9 @@ class MergeStrategy(Enum):
     NONE = 'none'
 
 
-def parse_yaml(filename: str) -> dict:
+def parse_yaml(filename: Union[str, Path]) -> dict:
     try:
-        with open(filename) as fp:
+        with open(str(filename)) as fp:
             parsed = ryaml.YAML(typ='safe').load(fp)
             if parsed is None:
                 return {}
