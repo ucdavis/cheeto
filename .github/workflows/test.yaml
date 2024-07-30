@@ -15,7 +15,7 @@ jobs:
       - name: Install apt dependencies
         run: |
           sudo apt update
-          sudo apt install libldap-2.5-0 libldap-dev libsasl2-dev
+          sudo apt install libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
         with:
