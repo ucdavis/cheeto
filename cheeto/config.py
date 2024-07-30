@@ -3,7 +3,7 @@ import argparse
 import logging
 import pathlib
 import sys
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Mapping
 
 from marshmallow import post_dump
 from marshmallow.exceptions import ValidationError
@@ -21,21 +21,16 @@ from .xdg_base_dirs import xdg_config_home
 @dataclass(frozen=True)
 class LDAPConfig(BaseModel):
     servers: List[str]
-    searchbase: str
     login_dn: str
     password: Optional[str]
+    searchbase: str
+    user_classes: List[str]
 
-
-@require_kwargs
-@dataclass(frozen=True)
-class LDAPSection(BaseModel):
-    hpccf: LDAPConfig
-    ucdavis: LDAPConfig
 
 @require_kwargs
 @dataclass(frozen=True)
 class Config(BaseModel):
-    ldap: LDAPSection
+    ldap: Mapping[str, LDAPConfig]
 
 
 def get_config_path() -> pathlib.Path:
@@ -81,17 +76,17 @@ def add_write_args(parser):
 def write(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
-    config = Config(ldap = LDAPSection(
+    config = Config(ldap = dict(
                         hpccf = LDAPConfig(servers=['ldaps://ldap1.hpc.ucdavis.edu', 'ldaps://ldap2.hpc.ucdavis.edu'],
-                                            searchbase='dc=hpc,dc=ucdavis,dc=edu',
-                                            login_dn='uid=cheeto,ou=Services,dc=hpc,dc=ucdavis,dc=edu',
-                                            password='password'
-                                            ),
+                                           searchbase='dc=hpc,dc=ucdavis,dc=edu',
+                                           login_dn='uid=cheeto,ou=Services,dc=hpc,dc=ucdavis,dc=edu',
+                                           password='password',
+                                           user_classes=['inetOrgPerson', 'posixAccount']),
                         ucdavis = LDAPConfig(servers=['ldaps://ldap.ucdavis.edu'],
-                                            searchbase='ou=People,dc=ucdavis,dc=edu',
-                                            login_dn='',
-                                            password=''
-                                            )
+                                             searchbase='ou=People,dc=ucdavis,dc=edu',
+                                             login_dn='',
+                                             password='',
+                                             user_classes=['inetOrgPerson'])
                     ))
 
     config_path = get_config_path()

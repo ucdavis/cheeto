@@ -34,8 +34,7 @@ class OrderedDictRepresenter(RoundTripRepresenter):
 ryaml.add_representer(OrderedDict, OrderedDictRepresenter.represent_dict, 
                       representer=OrderedDictRepresenter)
 
-def dumps(obj: Any, *args, many: bool | None = None, **kwarg) -> str:
-    #pprint(obj)
+def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
     dumper.Representer = OrderedDictRepresenter
     stream = StringIO()

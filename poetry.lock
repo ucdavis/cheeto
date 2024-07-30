@@ -12,6 +12,17 @@ files = [
 ]
 
 [[package]]
+name = "decorator"
+version = "5.1.1"
+description = "Decorators for Humans"
+optional = false
+python-versions = ">=3.5"
+files = [
+    {file = "decorator-5.1.1-py3-none-any.whl", hash = "sha256:b8c3f85900b9dc423225913c5aace94729fe1fa9763b38939a95226f02d37186"},
+    {file = "decorator-5.1.1.tar.gz", hash = "sha256:637996211036b6385ef91435e4fae22989472f9d571faba8927ba8253acbc330"},
+]
+
+[[package]]
 name = "filelock"
 version = "3.15.4"
 description = "A platform independent file lock."
@@ -26,6 +37,42 @@ files = [
 docs = ["furo (>=2023.9.10)", "sphinx (>=7.2.6)", "sphinx-autodoc-typehints (>=1.25.2)"]
 testing = ["covdefaults (>=2.3)", "coverage (>=7.3.2)", "diff-cover (>=8.0.1)", "pytest (>=7.4.3)", "pytest-asyncio (>=0.21)", "pytest-cov (>=4.1)", "pytest-mock (>=3.12)", "pytest-timeout (>=2.2)", "virtualenv (>=20.26.2)"]
 typing = ["typing-extensions (>=4.8)"]
+
+[[package]]
+name = "gssapi"
+version = "1.8.3"
+description = "Python GSSAPI Wrapper"
+optional = false
+python-versions = ">=3.7"
+files = [
+    {file = "gssapi-1.8.3-cp310-cp310-macosx_10_9_x86_64.whl", hash = "sha256:4e4a83e9b275fe69b5d40be6d5479889866b80333a12c51a9243f2712d4f0554"},
+    {file = "gssapi-1.8.3-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:8d57d67547e18f4e44a688bfb20abbf176d1b8df547da2b31c3f2df03cfdc269"},
+    {file = "gssapi-1.8.3-cp310-cp310-win32.whl", hash = "sha256:3a3f63105f39c4af29ffc8f7b6542053d87fe9d63010c689dd9a9f5571facb8e"},
+    {file = "gssapi-1.8.3-cp310-cp310-win_amd64.whl", hash = "sha256:b031c0f186ab4275186da385b2c7470dd47c9b27522cb3b753757c9ac4bebf11"},
+    {file = "gssapi-1.8.3-cp311-cp311-macosx_10_9_x86_64.whl", hash = "sha256:b03d6b30f1fcd66d9a688b45a97e302e4dd3f1386d5c333442731aec73cdb409"},
+    {file = "gssapi-1.8.3-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:ca6ceb17fc15eda2a69f2e8c6cf10d11e2edb32832255e5d4c65b21b6db4680a"},
+    {file = "gssapi-1.8.3-cp311-cp311-win32.whl", hash = "sha256:edc8ef3a9e397dbe18bb6016f8e2209969677b534316d20bb139da2865a38efe"},
+    {file = "gssapi-1.8.3-cp311-cp311-win_amd64.whl", hash = "sha256:8fdb1ff130cee49bc865ec1624dee8cf445cd6c6e93b04bffef2c6f363a60cb9"},
+    {file = "gssapi-1.8.3-cp312-cp312-macosx_10_9_x86_64.whl", hash = "sha256:19c373b3ba63ce19cd3163aa1495635e3d01b0de6cc4ff1126095eded1df6e01"},
+    {file = "gssapi-1.8.3-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:37f1a8046d695f2c9b8d640a6e385780d3945c0741571ed6fee6f94c31e431dc"},
+    {file = "gssapi-1.8.3-cp312-cp312-win32.whl", hash = "sha256:338db18612e3e6ed64e92b6d849242a535fdc98b365f21122992fb8cae737617"},
+    {file = "gssapi-1.8.3-cp312-cp312-win_amd64.whl", hash = "sha256:5731c5b40ecc3116cfe7fb7e1d1e128583ec8b3df1e68bf8cd12073160793acd"},
+    {file = "gssapi-1.8.3-cp37-cp37m-macosx_10_9_x86_64.whl", hash = "sha256:e556878da197ad115a566d36e46a8082d0079731d9c24d1ace795132d725ff2a"},
+    {file = "gssapi-1.8.3-cp37-cp37m-win32.whl", hash = "sha256:e2bb081f2db2111377effe7d40ba23f9a87359b9d2f4881552b731e9da88b36b"},
+    {file = "gssapi-1.8.3-cp37-cp37m-win_amd64.whl", hash = "sha256:4d9ed83f2064cda60aad90e6840ae282096801b2c814b8cbd390bf0df4635aab"},
+    {file = "gssapi-1.8.3-cp38-cp38-macosx_10_9_x86_64.whl", hash = "sha256:7d91fe6e2a5c89b32102ea8e374b8ae13b9031d43d7b55f3abc1f194ddce820d"},
+    {file = "gssapi-1.8.3-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:d5b28237afc0668046934792756dd4b6b7e957b0d95a608d02f296734a2819ad"},
+    {file = "gssapi-1.8.3-cp38-cp38-win32.whl", hash = "sha256:791e44f7bea602b8e3da1ec56fbdb383b8ee3326fdeb736f904c2aa9af13a67d"},
+    {file = "gssapi-1.8.3-cp38-cp38-win_amd64.whl", hash = "sha256:5b4bf84d0a6d7779a4bf11dacfd3db57ae02dd53562e2aeadac4219a68eaee07"},
+    {file = "gssapi-1.8.3-cp39-cp39-macosx_10_9_x86_64.whl", hash = "sha256:e40efc88ccefefd6142f8c47b8af498731938958b808bad49990442a91f45160"},
+    {file = "gssapi-1.8.3-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:ee74b9211c977b9181ff4652d886d7712c9a221560752a35393b58e5ea07887a"},
+    {file = "gssapi-1.8.3-cp39-cp39-win32.whl", hash = "sha256:465c6788f2ac6ef7c738394ba8fde1ede6004e5721766f386add63891d8c90af"},
+    {file = "gssapi-1.8.3-cp39-cp39-win_amd64.whl", hash = "sha256:8fb8ee70458f47b51ed881a6881f30b187c987c02af16cc0fff0079255d4d465"},
+    {file = "gssapi-1.8.3.tar.gz", hash = "sha256:aa3c8d0b1526f52559552bb2c9d2d6be013d76a8e5db00b39a1db5727e93b0b0"},
+]
+
+[package.dependencies]
+decorator = "*"
 
 [[package]]
 name = "iniconfig"
@@ -54,6 +101,25 @@ MarkupSafe = ">=2.0"
 
 [package.extras]
 i18n = ["Babel (>=2.7)"]
+
+[[package]]
+name = "ldap3"
+version = "2.10.1"
+description = "A strictly RFC 4510 conforming LDAP V3 pure Python client library"
+optional = false
+python-versions = "*"
+files = []
+develop = false
+
+[package.dependencies]
+pyasn1 = ">=0.4.6"
+pycryptodomex = "*"
+
+[package.source]
+type = "git"
+url = "https://github.com/ucdavis/ldap3.git"
+reference = "dev"
+resolved_reference = "edc8b742f79cbee2026ae71a41ca1dfbe6b0eac9"
 
 [[package]]
 name = "markdown-it-py"
@@ -274,6 +340,47 @@ files = [
 pyasn1 = ">=0.4.6,<0.7.0"
 
 [[package]]
+name = "pycryptodomex"
+version = "3.20.0"
+description = "Cryptographic library for Python"
+optional = false
+python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
+files = [
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-macosx_10_9_x86_64.whl", hash = "sha256:645bd4ca6f543685d643dadf6a856cc382b654cc923460e3a10a49c1b3832aeb"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-manylinux2010_i686.whl", hash = "sha256:ff5c9a67f8a4fba4aed887216e32cbc48f2a6fb2673bb10a99e43be463e15913"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-manylinux2010_x86_64.whl", hash = "sha256:8ee606964553c1a0bc74057dd8782a37d1c2bc0f01b83193b6f8bb14523b877b"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7805830e0c56d88f4d491fa5ac640dfc894c5ec570d1ece6ed1546e9df2e98d6"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-musllinux_1_1_aarch64.whl", hash = "sha256:bc3ee1b4d97081260d92ae813a83de4d2653206967c4a0a017580f8b9548ddbc"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-win32.whl", hash = "sha256:8af1a451ff9e123d0d8bd5d5e60f8e3315c3a64f3cdd6bc853e26090e195cdc8"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27m-win_amd64.whl", hash = "sha256:cbe71b6712429650e3883dc81286edb94c328ffcd24849accac0a4dbcc76958a"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27mu-manylinux2010_i686.whl", hash = "sha256:76bd15bb65c14900d98835fcd10f59e5e0435077431d3a394b60b15864fddd64"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27mu-manylinux2010_x86_64.whl", hash = "sha256:653b29b0819605fe0898829c8ad6400a6ccde096146730c2da54eede9b7b8baa"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27mu-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:62a5ec91388984909bb5398ea49ee61b68ecb579123694bffa172c3b0a107079"},
+    {file = "pycryptodomex-3.20.0-cp27-cp27mu-musllinux_1_1_aarch64.whl", hash = "sha256:108e5f1c1cd70ffce0b68739c75734437c919d2eaec8e85bffc2c8b4d2794305"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-macosx_10_9_universal2.whl", hash = "sha256:59af01efb011b0e8b686ba7758d59cf4a8263f9ad35911bfe3f416cee4f5c08c"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-macosx_10_9_x86_64.whl", hash = "sha256:82ee7696ed8eb9a82c7037f32ba9b7c59e51dda6f105b39f043b6ef293989cb3"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:91852d4480a4537d169c29a9d104dda44094c78f1f5b67bca76c29a91042b623"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:bca649483d5ed251d06daf25957f802e44e6bb6df2e8f218ae71968ff8f8edc4"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:6e186342cfcc3aafaad565cbd496060e5a614b441cacc3995ef0091115c1f6c5"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-musllinux_1_1_aarch64.whl", hash = "sha256:25cd61e846aaab76d5791d006497134602a9e451e954833018161befc3b5b9ed"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-musllinux_1_1_i686.whl", hash = "sha256:9c682436c359b5ada67e882fec34689726a09c461efd75b6ea77b2403d5665b7"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-musllinux_1_1_x86_64.whl", hash = "sha256:7a7a8f33a1f1fb762ede6cc9cbab8f2a9ba13b196bfaf7bc6f0b39d2ba315a43"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-win32.whl", hash = "sha256:c39778fd0548d78917b61f03c1fa8bfda6cfcf98c767decf360945fe6f97461e"},
+    {file = "pycryptodomex-3.20.0-cp35-abi3-win_amd64.whl", hash = "sha256:2a47bcc478741b71273b917232f521fd5704ab4b25d301669879e7273d3586cc"},
+    {file = "pycryptodomex-3.20.0-pp27-pypy_73-manylinux2010_x86_64.whl", hash = "sha256:1be97461c439a6af4fe1cf8bf6ca5936d3db252737d2f379cc6b2e394e12a458"},
+    {file = "pycryptodomex-3.20.0-pp27-pypy_73-win32.whl", hash = "sha256:19764605feea0df966445d46533729b645033f134baeb3ea26ad518c9fdf212c"},
+    {file = "pycryptodomex-3.20.0-pp310-pypy310_pp73-macosx_10_9_x86_64.whl", hash = "sha256:f2e497413560e03421484189a6b65e33fe800d3bd75590e6d78d4dfdb7accf3b"},
+    {file = "pycryptodomex-3.20.0-pp310-pypy310_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e48217c7901edd95f9f097feaa0388da215ed14ce2ece803d3f300b4e694abea"},
+    {file = "pycryptodomex-3.20.0-pp310-pypy310_pp73-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:d00fe8596e1cc46b44bf3907354e9377aa030ec4cd04afbbf6e899fc1e2a7781"},
+    {file = "pycryptodomex-3.20.0-pp310-pypy310_pp73-win_amd64.whl", hash = "sha256:88afd7a3af7ddddd42c2deda43d53d3dfc016c11327d0915f90ca34ebda91499"},
+    {file = "pycryptodomex-3.20.0-pp39-pypy39_pp73-macosx_10_9_x86_64.whl", hash = "sha256:d3584623e68a5064a04748fb6d76117a21a7cb5eaba20608a41c7d0c61721794"},
+    {file = "pycryptodomex-3.20.0-pp39-pypy39_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:0daad007b685db36d977f9de73f61f8da2a7104e20aca3effd30752fd56f73e1"},
+    {file = "pycryptodomex-3.20.0-pp39-pypy39_pp73-manylinux_2_5_i686.manylinux1_i686.manylinux_2_17_i686.manylinux2014_i686.whl", hash = "sha256:5dcac11031a71348faaed1f403a0debd56bf5404232284cf8c761ff918886ebc"},
+    {file = "pycryptodomex-3.20.0-pp39-pypy39_pp73-win_amd64.whl", hash = "sha256:69138068268127cd605e03438312d8f271135a33140e2742b417d027a0539427"},
+    {file = "pycryptodomex-3.20.0.tar.gz", hash = "sha256:7a710b79baddd65b806402e14766c721aee8fb83381769c27920f26476276c1e"},
+]
+
+[[package]]
 name = "pygments"
 version = "2.18.0"
 description = "Pygments is a syntax highlighting package written in Python."
@@ -471,4 +578,4 @@ typing-extensions = ">=3.7.4"
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "947d0b2e25ca7e3339fcbfc2a02a5fb0cb1394672206feaff2ade3f2d05bfb48"
+content-hash = "c7ddbad8a61c52e23c17db9e2d1e398c559fd8fddcc577d86b96025197bc4a20"

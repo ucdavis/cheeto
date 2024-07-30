@@ -1,0 +1,724 @@
+{
+    "entries": [
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "users"
+                ]
+            },
+            "dn": "ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "users"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hpccf"
+                ]
+            },
+            "dn": "ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hpccf"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hive"
+                ]
+            },
+            "dn": "ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hive"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "groups"
+                ]
+            },
+            "dn": "ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "groups"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.master",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.master,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.master"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountInformation": "auto.home",
+                "automountKey": "/home",
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            },
+            "dn": "automountKey=/home,automountMapName=auto.master,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountInformation": [
+                    "auto.home"
+                ],
+                "automountKey": [
+                    "/home"
+                ],
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.home",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.home,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.home"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountInformation": "auto.group",
+                "automountKey": "/group",
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            },
+            "dn": "automountKey=/group,automountMapName=auto.master,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountInformation": [
+                    "auto.group"
+                ],
+                "automountKey": [
+                    "/group"
+                ],
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.group",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.group,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.group"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "cluster-users"
+                ],
+                "gidNumber": 4000000025,
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ],
+                "ou": [
+                    "cluster-users"
+                ]
+            },
+            "dn": "ou=cluster-users,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "cluster-users"
+                ],
+                "gidNumber": [
+                    "4000000025"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ],
+                "ou": [
+                    "cluster-users"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "class-users"
+                ],
+                "gidNumber": 4000000026,
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ],
+                "ou": [
+                    "class-users"
+                ]
+            },
+            "dn": "ou=class-users,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "class-users"
+                ],
+                "gidNumber": [
+                    "4000000026"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ],
+                "ou": [
+                    "class-users"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Omen Wild"
+                ],
+                "displayName": "Omen Wild",
+                "gecos": "Omen (LDAP) Wild <omen@ucdavis.edu>",
+                "gidNumber": 457597,
+                "givenName": [
+                    "Omen CHANGE"
+                ],
+                "homeDirectory": "/home/omen",
+                "loginShell": "/bin/bash",
+                "mail": [
+                    "omen@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount"
+                ],
+                "sn": [
+                    "Wild"
+                ],
+                "uid": [
+                    "omen"
+                ],
+                "uidNumber": 457597
+            },
+            "dn": "uid=omen,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Omen Wild"
+                ],
+                "displayName": [
+                    "Omen Wild"
+                ],
+                "gecos": [
+                    "Omen (LDAP) Wild <omen@ucdavis.edu>"
+                ],
+                "gidNumber": [
+                    "457597"
+                ],
+                "givenName": [
+                    "Omen CHANGE"
+                ],
+                "homeDirectory": [
+                    "/home/omen"
+                ],
+                "loginShell": [
+                    "/bin/bash"
+                ],
+                "mail": [
+                    "omen@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount"
+                ],
+                "sn": [
+                    "Wild"
+                ],
+                "uid": [
+                    "omen"
+                ],
+                "uidNumber": [
+                    "457597"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Janet Campbell"
+                ],
+                "displayName": "Janet Campbell",
+                "gecos": "Janet (LDAP) Campbell <janca@ucdavis.edu>",
+                "gidNumber": 2250435,
+                "givenName": [
+                    "Janet"
+                ],
+                "homeDirectory": "/home/janca",
+                "loginShell": "/bin/bash",
+                "mail": [
+                    "janca@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount"
+                ],
+                "sn": [
+                    "Campbell"
+                ],
+                "uid": [
+                    "janca"
+                ],
+                "uidNumber": 2250435
+            },
+            "dn": "uid=janca,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Janet Campbell"
+                ],
+                "displayName": [
+                    "Janet Campbell"
+                ],
+                "gecos": [
+                    "Janet (LDAP) Campbell <janca@ucdavis.edu>"
+                ],
+                "gidNumber": [
+                    "2250435"
+                ],
+                "givenName": [
+                    "Janet"
+                ],
+                "homeDirectory": [
+                    "/home/janca"
+                ],
+                "loginShell": [
+                    "/bin/bash"
+                ],
+                "mail": [
+                    "janca@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount"
+                ],
+                "sn": [
+                    "Campbell"
+                ],
+                "uid": [
+                    "janca"
+                ],
+                "uidNumber": [
+                    "2250435"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Class Tmp Account 01"
+                ],
+                "displayName": "Class Tmp Account 01",
+                "gecos": "Class Tmp Account 01",
+                "gidNumber": 8650001,
+                "givenName": [
+                    "01"
+                ],
+                "homeDirectory": "/home/hive-class-tmp-01",
+                "loginShell": "/bin/bash",
+                "mail": [
+                    "hpc-help@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "shadowAccount"
+                ],
+                "shadowExpire": 1718402144,
+                "sn": [
+                    "Class Tmp Account"
+                ],
+                "uid": [
+                    "hive-class-tmp-01",
+                    "hive-class-01"
+                ],
+                "uidNumber": 8650001,
+                "userPassword": [
+                    "{SSHA}ay6P3yEoKoe3R0BNEsws7huGHE8hFMpF"
+                ]
+            },
+            "dn": "uid=hive-class-01,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Class Tmp Account 01"
+                ],
+                "displayName": [
+                    "Class Tmp Account 01"
+                ],
+                "gecos": [
+                    "Class Tmp Account 01"
+                ],
+                "gidNumber": [
+                    "8650001"
+                ],
+                "givenName": [
+                    "01"
+                ],
+                "homeDirectory": [
+                    "/home/hive-class-tmp-01"
+                ],
+                "loginShell": [
+                    "/bin/bash"
+                ],
+                "mail": [
+                    "hpc-help@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "shadowAccount"
+                ],
+                "shadowExpire": [
+                    "1718402144"
+                ],
+                "sn": [
+                    "Class Tmp Account"
+                ],
+                "uid": [
+                    "hive-class-tmp-01",
+                    "hive-class-01"
+                ],
+                "uidNumber": [
+                    "8650001"
+                ],
+                "userPassword": [
+                    "{SSHA}ay6P3yEoKoe3R0BNEsws7huGHE8hFMpF"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "jrigrp"
+                ],
+                "gidNumber": 9997,
+                "memberUid": [
+                    "omen"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=jrigrp,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "jrigrp"
+                ],
+                "gidNumber": [
+                    "9997"
+                ],
+                "memberUid": [
+                    "omen"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "ctbrowngrp"
+                ],
+                "gidNumber": 34857,
+                "memberUid": [
+                    "janca"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=ctbrowngrp,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "ctbrowngrp"
+                ],
+                "gidNumber": [
+                    "34857"
+                ],
+                "memberUid": [
+                    "janca"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "compute-ssh-users"
+                ],
+                "gidNumber": 4100000000,
+                "memberUid": [
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=compute-ssh-users,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "compute-ssh-users"
+                ],
+                "gidNumber": [
+                    "4100000000"
+                ],
+                "memberUid": [
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "top",
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit",
+                    "top"
+                ],
+                "ou": [
+                    "Services"
+                ]
+            },
+            "dn": "ou=Services,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit",
+                    "top"
+                ],
+                "ou": [
+                    "Services"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "description": [
+                    "Cheeto Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "cheeto"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            },
+            "dn": "uid=cheeto,ou=Services,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "description": [
+                    "Cheeto Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "cheeto"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "description": [
+                    "MirrorMode Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "mirrormode"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            },
+            "dn": "uid=mirrormode,ou=Services,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "description": [
+                    "MirrorMode Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "mirrormode"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "description": [
+                    "Syncrepl Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "syncrepl"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            },
+            "dn": "uid=syncrepl,ou=Services,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "description": [
+                    "Syncrepl Sync Account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "syncrepl"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "description": [
+                    "icinga monitoring account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "icinga"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            },
+            "dn": "uid=icinga,ou=Services,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "description": [
+                    "icinga monitoring account"
+                ],
+                "objectClass": [
+                    "account",
+                    "simpleSecurityObject"
+                ],
+                "uid": [
+                    "icinga"
+                ],
+                "userPassword": [
+                    "test-password"
+                ]
+            }
+        }
+    ]
+}
