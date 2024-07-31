@@ -15,6 +15,12 @@ include = [
 [tool.poetry.scripts]
 cheeto = "cheeto.__main__:main"
 
+[tool.poetry.group.dev]
+optional = true
+
+[tool.poetry.group.dev.dependencies]
+ipython = "^8.26.0"
+
 [tool.poetry_bumpversion.file."cheeto/__init__.py"]
 
 [tool.poetry.dependencies]
