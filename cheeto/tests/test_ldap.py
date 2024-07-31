@@ -4,27 +4,15 @@ from ldap3 import Server, MOCK_SYNC
 import pytest
 from rich import print
 
-from ..config import LDAPConfig
+from ..config import get_config, LDAPConfig
 from ..ldap import LDAPManager, sort_on_attr
 
 
-TEST_LOGIN_DN = 'uid=test-user,ou=Services,dc=hpc,dc=ucdavis,dc=edu'
-TEST_PASSWORD = 'test-password'
-
-
-def get_ldap_config():
-    config = LDAPConfig(servers=['test-server'],
-                        searchbase='dc=hpc,dc=ucdavis,dc=edu',
-                        login_dn=TEST_LOGIN_DN,
-                        password=TEST_PASSWORD,
-                        user_classes=['inetOrgPerson', 'posixAccount']
-                        )
-    return config
-
 
 @pytest.fixture
-def mock_config():
-    return get_ldap_config()
+def mock_config(testdata):
+    config = get_config(testdata('config.yaml'))
+    return config.ldap['test-server']
 
 
 @pytest.fixture
@@ -38,8 +26,8 @@ def mock_ldap(testdata, mock_config):
                            servers=[server],
                            strategy=MOCK_SYNC,
                            auto_bind=False)
-    ldap_mgr.connection.strategy.add_entry(TEST_LOGIN_DN,
-                                           {'userPassword': TEST_PASSWORD,
+    ldap_mgr.connection.strategy.add_entry(mock_config.login_dn,
+                                           {'userPassword': mock_config.password,
                                             'sn': 'bind_sn'})
     ldap_mgr.connection.strategy.entries_from_json(server_data)
     assert ldap_mgr.connection.bind()
