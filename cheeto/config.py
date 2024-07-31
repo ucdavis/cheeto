@@ -21,10 +21,16 @@ from .xdg_base_dirs import xdg_config_home
 @dataclass(frozen=True)
 class LDAPConfig(BaseModel):
     servers: List[str]
-    login_dn: str
-    password: Optional[str]
     searchbase: str
     user_classes: List[str]
+    user_attrs: Mapping[str, str]
+
+    login_dn: Optional[str] = None
+    password: Optional[str] = None
+
+    group_classes: Optional[List[str]] = None
+    group_attrs: Optional[Mapping[str, str]] = None
+
 
 
 @require_kwargs
@@ -40,7 +46,8 @@ def get_config_path() -> pathlib.Path:
 def get_config(config_path: Optional[pathlib.Path] = None) -> Union[Config, None]:
     logger = logging.getLogger(__name__)
 
-    config_path = get_config_path()
+    if config_path is None:
+        config_path = get_config_path()
     config_yaml = parse_yaml(str(config_path))
 
     try:
