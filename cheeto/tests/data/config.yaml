@@ -1,0 +1,24 @@
+ldap:
+  test-server:
+    servers:
+    - test-server
+    searchbase: dc=hpc,dc=ucdavis,dc=edu
+    login_dn: 'uid=test-user,ou=Services,dc=hpc,dc=ucdavis,dc=edu'
+    password: test-password
+    user_classes:
+      - inetOrgPerson
+      - posixAccount
+    user_attrs:
+      uid: uid
+      email: mail
+      uid_number: uidNumber
+      gid_number: gidNumber
+      fullname: displayName
+      surname: sn
+    group_classes:
+      - posixGroup
+      - groupOfMembers
+    group_attrs:
+      gid: cn
+      gid_number: gidNumber
+      members: memberUid
