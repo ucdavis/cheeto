@@ -18,6 +18,8 @@ from marshmallow import validate as mv
 from marshmallow import fields as mf
 from marshmallow import post_dump, Schema as _Schema
 from marshmallow_dataclass import dataclass
+import marshmallow_dataclass
+import marshmallow_dataclass.collection_field
 
 from . import yaml
 from .yaml import parse_yaml
@@ -37,6 +39,10 @@ ENABLED_SHELLS = {"/bin/sh",
 DISABLED_SHELLS = {"/usr/sbin/nologin-account-disabled",
                    "/bin/false",
                    "/usr/sbin/nologin"}
+
+
+def is_listlike(obj):
+    return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
 
 
 class _BaseModel:
@@ -158,3 +164,10 @@ SlurmQOSValidFlags = ("DenyOnLimit",
 
 SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 
+
+SEQUENCE_FIELDS = {
+    marshmallow_dataclass.collection_field.Sequence,
+    marshmallow_dataclass.collection_field.Set,
+    mf.List,
+    mf.Tuple
+}

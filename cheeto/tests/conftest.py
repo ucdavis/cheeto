@@ -6,9 +6,7 @@ import subprocess
 
 import pytest
 
-
-def is_listlike(obj):
-    return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
+from cheeto.types import is_listlike
 
 
 @pytest.fixture

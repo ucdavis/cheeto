@@ -15,6 +15,9 @@ ldap:
       gid_number: gidNumber
       fullname: displayName
       surname: sn
+      home_directory: homeDirectory
+      shell: loginShell
+    user_base: ou=users,dc=hpc,dc=ucdavis,dc=edu
     group_classes:
       - posixGroup
       - groupOfMembers

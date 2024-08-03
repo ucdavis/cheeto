@@ -22,8 +22,10 @@ from .xdg_base_dirs import xdg_config_home
 class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
+
     user_classes: List[str]
     user_attrs: Mapping[str, str]
+    user_base: Optional[str] = None
 
     login_dn: Optional[str] = None
     password: Optional[str] = None
