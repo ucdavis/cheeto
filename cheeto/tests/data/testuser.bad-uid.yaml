@@ -1,0 +1,8 @@
+user:
+  testuser:
+    fullname: Test Testerson
+    email: test@test.edu
+    uid: ABCD
+    gid: 012345
+    password: x
+    shell: /bin/zsh

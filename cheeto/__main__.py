@@ -10,6 +10,7 @@
 import argparse
 
 from . import __version__
+from . import config
 from . import hippo
 from . import monitor
 from . import log
@@ -25,6 +26,11 @@ def main():
     parser.set_defaults(func = lambda _: parser.print_help())
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
     commands = parser.add_subparsers()
+
+    config_parser = commands.add_parser('config')
+    config_commands = config_parser.add_subparsers()
+    config.show(config_commands)
+    config.write(config_commands)
 
     hippo_parser = commands.add_parser('hippo')
     hippo_commands = hippo_parser.add_subparsers()

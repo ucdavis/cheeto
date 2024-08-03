@@ -14,7 +14,7 @@ from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
 
 from .args import subcommand
-from .parsing import parse_yaml, puppet_merge
+from .yaml import parse_yaml, puppet_merge
 
 
 def add_render_args(parser):

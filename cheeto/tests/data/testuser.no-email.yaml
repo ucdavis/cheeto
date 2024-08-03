@@ -1,0 +1,7 @@
+user:
+  testuser:
+    fullname: Test Testerson
+    uid: 012345
+    gid: 012345
+    password: x
+    shell: /bin/zsh

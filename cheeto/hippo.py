@@ -29,7 +29,7 @@ from .args import subcommand
 from .errors import ExitCode
 from .git import Git, Gh, CIStatus
 from .mail import Mail
-from .parsing import (parse_yaml,
+from .yaml import (parse_yaml,
                       parse_yaml_forest,
                       validate_yaml_forest)
 from .puppet import (PuppetAccountMap, 
