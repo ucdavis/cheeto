@@ -19,6 +19,7 @@ from . import puppet
 from . import slurm
 
 from .args import add_common_args
+from .config import get_config
 
 
 def main():
@@ -43,6 +44,7 @@ def main():
     puppet_commands = puppet_parser.add_subparsers()
     puppet.validate_yamls(puppet_commands)
     puppet.create_nologin_user(puppet_commands)
+    puppet.sync_ldap(puppet_commands)
 
     nocloud_parser = commands.add_parser('nocloud')
     nocloud_commands = nocloud_parser.add_subparsers()

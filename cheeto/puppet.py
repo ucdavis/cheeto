@@ -12,8 +12,10 @@ from dataclasses import asdict, field
 from enum import Enum
 import logging
 import os
+import traceback
 from typing import Callable, Optional, List, Mapping, Union, Set, Tuple, Type
 from typing_extensions import Concatenate
+import socket
 import sys
 
 from filelock import FileLock
@@ -27,6 +29,8 @@ from rich.syntax import Syntax
 
 from .args import subcommand
 from .errors import ExitCode
+from .git import Gh, Git, branch_name_title
+from .ldap import LDAPManager
 from .yaml import (MergeStrategy,
                       parse_yaml_forest,
                       puppet_merge,
@@ -422,11 +426,12 @@ class CommonData(YamlRepo):
             print(key, file=fp)
 
     def create_user(self, user_name: str,
-                          user: PuppetUserRecord):
+                          user: PuppetUserRecord,
+                          force: bool = False):
 
         logger = logging.getLogger(__name__)
         file_path = self.root / f'{user_name}.yaml'
-        if file_path.exists():
+        if file_path.exists() and not force:
             logger.info(f'Common YAML {file_path} exists, skipping.')
         else:
             record = PuppetUserMap(user = {user_name: user})
@@ -523,7 +528,7 @@ class SiteData(YamlRepo):
 
     def create_user(self,
                     user_name: str,
-                    user: PuppetUserRecord):
+                  user: PuppetUserRecord):
 
         site_path, common_path = self.get_entity_paths(user_name)
         # Create the top-level common user.yaml file
@@ -567,6 +572,14 @@ class SiteData(YamlRepo):
     def get_group_slurm_partitions(self, group_name: str):
         self._raise_notloaded()
         return get_group_slurm_partitions(group_name, self.data) # type: ignore
+
+    def users(self):
+        for user_name in self.data.user.keys(): #type: ignore
+            yield user_name
+
+    def iter_users(self):
+        for user_name, user_record in self.data.user.items(): #type: ignore
+            yield user_name, user_record
 
 
 def add_validate_args(parser: argparse.ArgumentParser):
@@ -732,3 +745,88 @@ def create_nologin_user(args: argparse.Namespace):
         except FileExistsError:
             logger.info(f'{yaml_filename} already linked to {args.site_dir}.')
 
+
+def add_repo_args(parser):
+    parser.add_argument('--site-dir', 
+                        type=Path,
+                        required=True,
+                        help='Site-specific puppet accounts directory.')
+    parser.add_argument('--global-dir',
+                        type=Path,
+                        required=True,
+                        help='Global puppet accounts directory.')
+    parser.add_argument('--key-dir',
+                        type=Path,
+                        required=True,
+                        help='Puppet SSH keys directory.')
+    parser.add_argument('--base-branch',
+                        default='main',
+                        help='Branch to make PR against.')
+    parser.add_argument('--timeout',
+                        type=int,
+                        default=30)
+
+
+@subcommand('sync-ldap', add_repo_args)
+def sync_ldap(args: argparse.Namespace):
+    try:
+        _sync_ldap(args)
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.critical(traceback.format_exc())
+
+
+def _sync_ldap(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    
+    site_data = SiteData(args.site_dir,
+                         common_root=args.global_dir,
+                         key_dir=args.key_dir,
+                         load=False)
+    lm = LDAPManager(config=args.config.ldap['ucdavis'])
+
+    lock = site_data.lock(args.timeout)
+    with lock:
+    #    gh = Gh(working_dir=site_data.common.root)
+    #    git = Git(working_dir=site_data.common.root)
+    #    git.checkout(branch=args.base_branch)()
+    #    git.clean(force=True, exclude=os.path.basename(lock.lock_file))()
+    #    git.pull()()
+#
+        site_data.load()
+
+    #   working_branch, pr_title = branch_name_title()
+    #    git.checkout(branch=working_branch, create=True)()
+
+    #    fqdn = socket.getfqdn()
+        
+    #    get_commit = git.rev_parse()
+    #    start_commit = get_commit().strip()
+
+        for user_name, user_record in site_data.iter_users():
+            synced_record = update_user_from_ldap(lm, user_name, user_record)
+            if synced_record != user_record:
+                logger.info(user_record)
+                logger.info(synced_record)
+                site_data.common.create_user(user_name, synced_record, force=True)
+
+
+def update_user_from_ldap(lm: LDAPManager, user_name: str, user_record: PuppetUserRecord) -> PuppetUserRecord:
+    logger = logging.getLogger(__name__)
+    logger.info(f'LDAP: Querying {user_name} against {lm.config.servers}')
+    status, response = lm._search_user([user_name])
+    if status is False:
+        logger.warning(f'LDAP: query failed on user {user_name}; response: {response}')
+        return user_record
+    #logger.info(f'LDAP: got status {status}, response {response}')
+    ldap_record = response[0]['attributes']
+    if 'mail' not in ldap_record:
+        logger.warning(f'LDAP: user {user_name} has no "mail" attribute.')
+        return user_record
+    if ldap_record['displayName'] != user_record.fullname or \
+        ldap_record['mail'][0] != user_record.email:
+        return PuppetUserRecord.from_other(user_record,
+                                           fullname=ldap_record['displayName'],
+                                           email=ldap_record['mail'][0])
+    else:
+        return user_record

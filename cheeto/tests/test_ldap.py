@@ -6,7 +6,7 @@ import pytest
 from rich import print
 
 from ..config import get_config, LDAPConfig
-from ..ldap import LDAPInvalidUser, LDAPManager, LDAPUser, sort_on_attr
+from ..ldap import LDAPGroup, LDAPInvalidUser, LDAPManager, LDAPUser, sort_on_attr
 
 
 
@@ -45,6 +45,12 @@ def testuser():
                                        gid_number=11111111,
                                        fullname='Test User',
                                        surname='User'))
+
+
+@pytest.fixture
+def testgroup():
+    return LDAPGroup.Schema().load(dict(gid='test-group',
+                                        gid_number=22222222))
 
 
 class TestLDAPUser:
@@ -122,3 +128,22 @@ class TestLDAPManager:
         assert mock_ldap.query_group('ctbrowngrp', 'hive').members == {'janca'}
         with pytest.raises(LDAPInvalidUser):
             committed = mock_ldap.add_user_to_group('plumbus', 'ctbrowngrp', 'hive', verify_uid=True)
+
+    def test_add_group_dn(self, mock_ldap, testgroup):
+        dn = 'cn=test-group,ou=groups,ou=test-cluster,dc=hpc,dc=ucdavis,dc=edu'
+        testgroup = LDAPGroup.from_other(testgroup, dn=dn)
+        entry = mock_ldap.add_group(testgroup, 'ignore')
+        newgroup = mock_ldap.query_group(testgroup.gid, 'test-cluster')
+
+        assert newgroup.dn == dn
+        assert newgroup.gid == testgroup.gid
+        assert newgroup.gid_number == testgroup.gid_number
+
+    def test_add_group_no_dn(self, mock_ldap, testgroup):
+        entry = mock_ldap.add_group(testgroup, 'hive')
+        newgroup = mock_ldap.query_group(testgroup.gid, 'hive')
+
+        assert newgroup.dn == 'cn=test-group,ou=groups,ou=hive,dc=hpc,dc=ucdavis,dc=edu'
+        assert newgroup.gid == testgroup.gid
+        assert newgroup.gid_number == testgroup.gid_number
+        assert newgroup.members == testgroup.members

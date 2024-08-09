@@ -22,7 +22,7 @@ import marshmallow_dataclass
 import marshmallow_dataclass.collection_field
 
 from . import yaml
-from .yaml import parse_yaml
+from .yaml import parse_yaml, puppet_merge
 
 
 UINT_MAX = 4_294_967_296
@@ -106,6 +106,9 @@ class _BaseModel:
     def to_raw_yaml(self):
         return type(self).Schema().dump(self) #type: ignore
 
+    @classmethod
+    def from_other(cls, other, **kwargs):
+        return cls.Schema().load(puppet_merge(other.to_raw_yaml(), dict(**kwargs))) #type: ignore
 
 
 @dataclass(frozen=True)

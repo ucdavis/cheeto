@@ -70,11 +70,10 @@ def add_show_args(parser):
 def show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
-    config = get_config()
-    if config is None:
+    if args.config is None:
         sys.exit(ExitCode.VALIDATION_ERROR)
     else:
-        print(Config.Schema().dumps(config))
+        print(Config.Schema().dumps(args.config))
 
 
 def add_write_args(parser):

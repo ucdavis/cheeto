@@ -11,9 +11,12 @@ from enum import Enum, auto
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+import socket
+from typing import Optional, Tuple
 
 import sh
+
+from .utils import human_timestamp, TIMESTAMP_NOW, sanitize_timestamp
 
 
 class Git:
@@ -133,3 +136,11 @@ class Gh:
         else:
             return CIStatus.UNKNOWN
             #raise ValueError(f'Unknown CI Status: "{status}"')
+
+
+def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
+    branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
+    title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
+    return branch_name, title
+
+

@@ -27,7 +27,7 @@ import sh
 
 from .args import subcommand
 from .errors import ExitCode
-from .git import Git, Gh, CIStatus
+from .git import Git, Gh, CIStatus, branch_name_title
 from .mail import Mail
 from .yaml import (parse_yaml,
                       parse_yaml_forest,
@@ -483,12 +483,6 @@ def add_sync_args(parser):
     parser.add_argument('--timeout',
                         type=int,
                         default=30)
-
-
-def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
-    branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
-    title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
-    return branch_name, title
 
 
 def processed_filename(filename: Path) -> str:

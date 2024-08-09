@@ -30,8 +30,6 @@ def sort_on_attr(entries, attr: str = 'uid'):
 @dataclass(frozen=True)
 class LDAPRecord(BaseModel):
 
-    dn: str
-
     @classmethod
     def entry_getter(cls, to_key, from_key, entry):
         to_field = cls.Schema().fields[to_key]
@@ -60,6 +58,8 @@ class LDAPUser(LDAPRecord):
     home_directory: str = field(default='')
     shell: str = field(default=DEFAULT_SHELL)
 
+    dn: Optional[str] = None
+
     @post_load
     def default_home_directory(self, in_data, **kwargs):
         if not in_data['home_directory']:
@@ -72,7 +72,9 @@ class LDAPUser(LDAPRecord):
 class LDAPGroup(LDAPRecord):
     gid: KerberosID
     gid_number: LinuxGID
-    members: Optional[Set[KerberosID]] = None
+    members: Optional[Set[KerberosID]] = field(default_factory=set)
+
+    dn: Optional[str] = None
 
 
 class LDAPExpectedSingleResult(Exception):
@@ -172,11 +174,15 @@ class LDAPManager:
         reader = self._query_user(user.uid)
         writer = Writer.from_cursor(reader)
         
-        dn = f'uid={escape_rdn(user.uid)},{self.config.user_base}'
+        dn = f'uid={escape_rdn(user.uid)},{self.config.user_base}' \
+            if user.dn is None \
+            else user.dn
         entry = writer.new(dn)
         entry.cn = user.fullname
         for from_key, to_key in self.config.user_attrs.items():
-            entry[to_key] = getattr(user, from_key)
+            value = getattr(user, from_key)
+            if value is not None:
+                entry[to_key] = value
         status = entry.entry_commit_changes()
         if status is False:
             raise LDAPCommitFailed(f'Failed to add user {user.uid}.')
@@ -218,3 +224,22 @@ class LDAPManager:
         if status is False:
             raise LDAPCommitFailed(f'Could not add {uid} to group {gid}.')
         return group_entry
+
+    def add_group(self, group: LDAPGroup, cluster: str):
+        reader = self._query_group(group.gid, cluster)
+        writer = Writer.from_cursor(reader)
+
+        dn = self.searchbase(('cn', group.gid), ('ou', 'groups'), ('ou', cluster)) \
+            if group.dn is None \
+            else group.dn
+        entry = writer.new(dn)
+        entry.cn = group.gid
+        for from_key, to_key in self.config.group_attrs.items():
+            value = getattr(group, from_key)
+            if value is not None:
+                entry[to_key] = value
+        status = entry.entry_commit_changes()
+        if status is False:
+            raise LDAPCommitFailed(f'Failed to add group: {dn}.')
+        return entry
+
