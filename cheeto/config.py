@@ -34,11 +34,22 @@ class LDAPConfig(BaseModel):
     group_attrs: Optional[Mapping[str, str]] = None
 
 
+@require_kwargs
+@dataclass(frozen=True)
+class MongoConfig(BaseModel):
+    uri: str
+    port: int
+    user: str
+    password: str
+    database: str
+    collection: str
+
 
 @require_kwargs
 @dataclass(frozen=True)
 class Config(BaseModel):
     ldap: Mapping[str, LDAPConfig]
+    mongo: MongoConfig
 
 
 def get_config_path() -> pathlib.Path:

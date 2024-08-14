@@ -40,6 +40,10 @@ DISABLED_SHELLS = {"/usr/sbin/nologin-account-disabled",
                    "/bin/false",
                    "/usr/sbin/nologin"}
 
+USER_TYPES = {'user',
+              'admin',
+              'system'}
+
 
 def is_listlike(obj):
     return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
@@ -106,9 +110,16 @@ class _BaseModel:
     def to_raw_yaml(self):
         return type(self).Schema().dump(self) #type: ignore
 
+    def to_dict(self):
+        return self.to_raw_yaml()
+
     @classmethod
     def from_other(cls, other, **kwargs):
         return cls.Schema().load(puppet_merge(other.to_raw_yaml(), dict(**kwargs))) #type: ignore
+
+    @classmethod
+    def field_names(cls):
+        return set(cls.__dataclass_fields__.keys()) - {'Schema'}
 
 
 @dataclass(frozen=True)
@@ -166,6 +177,8 @@ SlurmQOSValidFlags = ("DenyOnLimit",
                       "UsageFactorSafe")
 
 SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
+
+UserType = Annotated[str, mf.String(validate=mv.OneOf(USER_TYPES))]
 
 
 SEQUENCE_FIELDS = {

@@ -11,6 +11,7 @@ import argparse
 
 from . import __version__
 from . import config
+from . import database
 from . import hippo
 from . import monitor
 from . import log
@@ -58,7 +59,15 @@ def main():
     monitor_parser = commands.add_parser('monitor')
     monitor_commands = monitor_parser.add_subparsers()
     monitor.power(monitor_commands)
-    
+
+    database_parser = commands.add_parser('database')
+    database_commands = database_parser.add_subparsers()
+    database.load(database_commands)
+
+    query_parser = database_commands.add_parser('query')
+    query_commands = query_parser.add_subparsers()
+    database.query_users(query_commands)
+
     args = parser.parse_args()
     with args.log.open('a') as log_fp:
         log.setup(log_fp, quiet=args.quiet)

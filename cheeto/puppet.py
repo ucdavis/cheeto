@@ -581,6 +581,10 @@ class SiteData(YamlRepo):
         for user_name, user_record in self.data.user.items(): #type: ignore
             yield user_name, user_record
 
+    def iter_groups(self):
+        for group_name, group_record in self.data.group.items(): #type: ignore
+            yield group_name, group_record
+
 
 def add_validate_args(parser: argparse.ArgumentParser):
     group = parser.add_argument_group('YAML Validation')
