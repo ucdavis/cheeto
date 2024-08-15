@@ -42,7 +42,6 @@ class MongoConfig(BaseModel):
     user: str
     password: str
     database: str
-    collection: str
 
 
 @require_kwargs

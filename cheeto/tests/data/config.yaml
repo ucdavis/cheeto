@@ -25,3 +25,9 @@ ldap:
       gid: cn
       gid_number: gidNumber
       members: memberUid
+mongo:
+  uri: 127.0.0.1
+  port: 27017
+  user: cheeto
+  password: cheeto-password
+  database: hpccf
