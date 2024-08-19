@@ -244,29 +244,30 @@ def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
                             upsert=True)
 
 
-def query_site_user(db: Database, sitename: str, username: str):
-    result = db.sites.find_one({'sitename': sitename}, 
-                               projection={'users': 
-                                            {'$filter': 
-                                              {'input': '$users', 
-                                               'as': 'user', 
-                                               'cond': {'$eq': ['$$user.username', username] }}}})
-    if result is not None and result['users']:
-        return SiteUserRecord.load(result['users'].pop())
+def _query_site_user_q(sitename: str, username: str):
+    return ({'sitename': sitename}, 
+            {'users': {'$filter': 
+                      {'input': '$users', 
+                       'as': 'user', 
+                       'cond': {'$eq': ['$$user.username', username] }}}})
+
+
+def query_site_user(db: Database, sitename: str, username: str,
+                    full=True):
+    query, projection = _query_site_user_q(sitename, username)
+    result = db.sites.find_one(query, projection=projection)
+    if result is None or not result['users']:
+        return None
+
+    site_user = SiteUserRecord.load(result['users'].pop())
+
+    if full:
+        global_user = query_global_user(db, username)
+        return FullUserRecord.load(puppet_merge(global_user.to_dict(),
+                                                site_user.to_dict(), 
+                                                {'sitename': sitename}))
     else:
-        return None
-
-
-def query_user(db: Database, sitename: str, username: str):
-    global_user = query_global_user(db, username)
-    if global_user is None:
-        return None
-
-    site_user = query_site_user(db, sitename, username)
-    if site_user is None:
-        return None
-    else:
-        return FullUserRecord.load(puppet_merge(global_user.to_dict(), site_user.to_dict(), {'sitename': sitename}))
+        return site_user
 
 
 def upsert_global_group(db: Database, group: GlobalGroupRecord):
@@ -276,7 +277,8 @@ def upsert_global_group(db: Database, group: GlobalGroupRecord):
 
 
 def upsert_site_group(db: Database, sitename: str, group: SiteGroupRecord):
-    result = db.sites.update_one({'sitename': sitename, 'groups': {'$elemMatch': {'groupname': group.groupname}}},
+    result = db.sites.update_one({'sitename': sitename,
+                                  'groups': {'$elemMatch': {'groupname': group.groupname}}},
                                  {'$set': { 'groups.$': group.to_dict() }})
     if result.modified_count == 0:
         db.sites.update_one({'sitename': sitename}, 
@@ -346,7 +348,6 @@ def build_query(args: argparse.Namespace):
 
 
 def add_query_user_args(parser: argparse.ArgumentParser):
-
     parser.add_argument('--site')
 
 
