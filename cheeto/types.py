@@ -100,6 +100,10 @@ class _BaseModel:
         render_module = yaml
 
     @classmethod
+    def load(cls, data: dict):
+        return cls.Schema().load(data)
+
+    @classmethod
     def load_yaml(cls, filename: Union[Path, str]):
         return cls.Schema().load(parse_yaml(str(filename))) #type: ignore
 

@@ -20,6 +20,8 @@ from pymongo.collection import Collection
 from pymongo.database import Database as Database
 from rich import print
 
+from cheeto.yaml import puppet_merge
+
 from .args import subcommand
 from .config import MongoConfig
 from .puppet import PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_args, SiteData
@@ -90,6 +92,29 @@ class SiteUserRecord(BaseModel):
             slurm = puppet_record.slurm,
             tag = puppet_record.tag
         ))
+
+
+@dataclass(frozen=True)
+class FullUserRecord(BaseModel):
+    username: KerberosID
+    sitename: str
+    email: str
+    uid: LinuxUID
+    gid: LinuxGID
+    fullname: str
+    shell: Shell
+    home_directory: str
+    type: UserType
+    expiry: Optional[Date] = None
+    slurm: Optional[SlurmRecord] = None
+    tag: Optional[Set[str]] = None
+
+    _id: Optional[str] = None
+
+    @post_load
+    def _set_id(self, in_data, **kwargs):
+        in_data['_id'] = in_data['username']
+        return in_data
 
 
 @dataclass(frozen=True)
@@ -177,11 +202,14 @@ def bootstrap_database(db: Database, bootstrap_yaml: Optional[Path] = None):
     sites.create_index('sitename', unique=True)
     sites.create_index('users.username')
     sites.create_index('groups.groupname')
+    sites.create_index({'users.tag': 'text', 'groups.sponsors': 'text', 'groups.members': 'text'})
 
     users = db['users']
     for user in data.users:
         users.insert_one(user.to_dict())
     users.create_index('username', unique=True)
+    users.create_index({'fullname': 'text',
+                        'email': 'text', 'type': 'text', 'home_directory': 'text'})
 
     groups = db['groups']
     for group in data.groups:
@@ -200,6 +228,13 @@ def upsert_global_user(db: Database, user: GlobalUserRecord):
                         upsert=True)
 
 
+def query_global_user(db: Database, username: str):
+    result = db.users.find_one({'username': username})
+    if result is not None:
+        return GlobalUserRecord.load(result)
+    return result
+
+
 def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
     result = db.sites.update_one({'sitename': sitename, 'users': {'$elemMatch': {'username': user.username}}},
                                  {'$set': { 'users.$': user.to_dict() }})
@@ -207,6 +242,31 @@ def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
         db.sites.update_one({'sitename': sitename}, 
                             {'$addToSet': {'users': user.to_dict()}},
                             upsert=True)
+
+
+def query_site_user(db: Database, sitename: str, username: str):
+    result = db.sites.find_one({'sitename': sitename}, 
+                               projection={'users': 
+                                            {'$filter': 
+                                              {'input': '$users', 
+                                               'as': 'user', 
+                                               'cond': {'$eq': ['$$user.username', username] }}}})
+    if result is not None and result['users']:
+        return SiteUserRecord.load(result['users'].pop())
+    else:
+        return None
+
+
+def query_user(db: Database, sitename: str, username: str):
+    global_user = query_global_user(db, username)
+    if global_user is None:
+        return None
+
+    site_user = query_site_user(db, sitename, username)
+    if site_user is None:
+        return None
+    else:
+        return FullUserRecord.load(puppet_merge(global_user.to_dict(), site_user.to_dict(), {'sitename': sitename}))
 
 
 def upsert_global_group(db: Database, group: GlobalGroupRecord):
@@ -261,21 +321,26 @@ def load(args: argparse.Namespace):
 def add_query_args(parser: argparse.ArgumentParser):
     parser.add_argument('--in', dest='val_in', nargs='+', action='append')
     parser.add_argument('--not-in', dest='val_not_in', nargs='+', action='append')
+    parser.add_argument('--search', '-s', nargs='+', action='append')
     parser.add_argument('--all', default=False, action='store_true')
 
 
 def build_query(args: argparse.Namespace):
     query = {}
-    if args.val_in:
-        for query_group in args.val_in:
-            #if query_group[0] not in record_type.field_names():
-            #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
-            query[query_group[0]] = {'$in': query_group[1:]}
-    if args.val_not_in:
-        for query_group in args.val_not_in:
-            #if query_group[0] not in record_type.field_names():
-            #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
-            query[query_group[0]] = {'$nin': query_group[1:]}
+    if args.search:
+        for query_group in args.search:
+            query['$text'] = {'$search': ' '.join(query_group)}
+    else:
+        if args.val_in:
+            for query_group in args.val_in:
+                #if query_group[0] not in record_type.field_names():
+                #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
+                query[query_group[0]] = {'$in': query_group[1:]}
+        if args.val_not_in:
+            for query_group in args.val_not_in:
+                #if query_group[0] not in record_type.field_names():
+                #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
+                query[query_group[0]] = {'$nin': query_group[1:]}
     return query
 
 
