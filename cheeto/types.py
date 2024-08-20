@@ -57,6 +57,11 @@ USER_STATUSES = {
     'disabled'
 }
 
+ACCESS_TYPES = {
+    'ssh',
+    'ondemand'
+}
+
 
 def is_listlike(obj):
     return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
@@ -222,6 +227,8 @@ SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 UserType = Annotated[str, mf.String(validate=mv.OneOf(USER_TYPES))]
 
 UserStatus = Annotated[str, mf.String(validate=mv.OneOf(USER_STATUSES))]
+
+AccessType = Annotated[str, mf.String(validate=mv.OneOf(ACCESS_TYPES))]
 
 
 SEQUENCE_FIELDS = {

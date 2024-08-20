@@ -64,6 +64,7 @@ def main():
     database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
     database.load(database_commands)
+    database.do_index(database_commands)
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())

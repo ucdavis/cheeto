@@ -16,10 +16,12 @@ from typing import List, Mapping, Optional, Set, Tuple, TypedDict, Union
 
 from marshmallow import post_load
 from marshmallow_dataclass import dataclass
+from rich.console import Console
+from rich.syntax import Syntax
 from pymongo import MongoClient, ASCENDING
 from pymongo.collection import Collection
 from pymongo.database import Database as Database
-from rich import print
+from rich import print as pprint
 
 from cheeto.yaml import puppet_merge
 
@@ -27,7 +29,7 @@ from .args import subcommand
 from .config import MongoConfig
 from .errors import ExitCode
 from .puppet import PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_args, SiteData
-from .types import (DEFAULT_SHELL, DISABLED_SHELLS, BaseModel, Date, KerberosID, LinuxGID, LinuxUID, 
+from .types import (DEFAULT_SHELL, DISABLED_SHELLS, AccessType, BaseModel, Date, KerberosID, LinuxGID, LinuxUID, 
                     SEQUENCE_FIELDS, describe_schema, is_listlike, Shell, UserType, UserStatus)
 from .utils import TIMESTAMP_NOW, require_kwargs, __pkg_dir__
 from cheeto import puppet
@@ -41,14 +43,15 @@ MONGO_UPDATE_OPERATORS = {
 }
 
 
+class InvalidUser(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class MongoModel(BaseModel):
 
     @classmethod
     def validate_db_update(cls, updates: dict):
-        print(updates)
-        print(cls)
-        print(cls.Schema())
         for update_op, op_updates in updates.items():
             if update_op not in MONGO_UPDATE_OPERATORS:
                 raise RuntimeError(f'{update_op} not a support Mongo update operator.')
@@ -73,6 +76,7 @@ class GlobalUserRecord(MongoModel):
     status: UserStatus
 
     ssh_key: Optional[str] = None
+    access: Optional[AccessType] = 'ssh'
     comments: Optional[List[str]] = None
     _id: Optional[str] = None
 
@@ -84,7 +88,7 @@ class GlobalUserRecord(MongoModel):
     @classmethod
     def from_puppet(cls, username: str, 
                          puppet_record: PuppetUserRecord,
-                    ssh_key: Optional[str] = None):
+                         ssh_key: Optional[str] = None):
         if puppet_record.groups is not None and 'hpccfgrp' in puppet_record.groups: #type: ignore
             usertype = 'admin'
         elif puppet_record.uid > 3000000000:
@@ -109,7 +113,8 @@ class GlobalUserRecord(MongoModel):
             home_directory = f'/home/{username}',
             type = usertype,
             status = userstatus,
-            ssh_key = ssh_key
+            ssh_key = ssh_key,
+            access = 'ondemand' if ssh_key is None else 'ssh'
         ))
 
 
@@ -152,16 +157,18 @@ class FullUserRecord(MongoModel):
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
     tag: Optional[Set[str]] = None
+    access: Optional[AccessType] = 'ssh'
     ssh_key: Optional[str] = None
 
     comments: Optional[List[str]] = None
 
     _id: Optional[str] = None
 
-    @post_load
-    def _set_id(self, in_data, **kwargs):
-        in_data['_id'] = in_data['username']
-        return in_data
+    @classmethod
+    def from_merge(cls, global_record: GlobalUserRecord, site_record: SiteUserRecord, sitename: str):
+        return FullUserRecord.load(puppet_merge(global_record.to_dict(),
+                                                site_record.to_dict(),
+                                                {'sitename': sitename}))
 
 
 @dataclass(frozen=True)
@@ -189,6 +196,7 @@ class SiteGroupRecord(MongoModel):
     groupname: KerberosID
     members: Optional[Set[KerberosID]] = field(default_factory=set)
     sponsors: Optional[Set[KerberosID]] = field(default_factory=set)
+    sudoers: Optional[Set[KerberosID]] = field(default_factory=set)
     slurm: Optional[SlurmRecord] = None
 
     _id: Optional[str] = None
@@ -205,6 +213,24 @@ class SiteGroupRecord(MongoModel):
             sponsors = puppet_record.sponsors,
             slurm = puppet_record.slurm.to_dict() if puppet_record.slurm is not None else None
         ))
+
+
+@dataclass(frozen=True)
+class FullGroupRecord(MongoModel):
+    groupname: KerberosID
+    gid: LinuxGID
+    sitename: str
+    members: Optional[Set[KerberosID]] = field(default_factory=set)
+    sponsors: Optional[Set[KerberosID]] = field(default_factory=set)
+    slurm: Optional[SlurmRecord] = None
+
+    _id: Optional[str] = None
+
+    @classmethod
+    def from_merge(cls, global_record: GlobalGroupRecord, site_record: SiteGroupRecord, sitename: str):
+        return FullGroupRecord.load(puppet_merge(global_record.to_dict(),
+                                                   site_record.to_dict(),
+                                                   {'sitename': sitename}))
 
 
 @dataclass(frozen=True)
@@ -262,7 +288,23 @@ def bootstrap_database(db: Database, bootstrap_yaml: Optional[Path] = None):
     for group in data.groups:
         groups.insert_one(group.to_dict())
     groups.create_index('groupname', unique=True)
-    
+
+
+def add_indices(db: Database):
+    sites = db['sites']
+    sites.create_index('sitename', unique=True)
+    sites.create_index('users.username')
+    sites.create_index('groups.groupname')
+    sites.create_index({'users.tag': 'text', 'groups.sponsors': 'text', 'groups.members': 'text'})
+
+    users = db['users']
+    users.create_index('username', unique=True)
+    users.create_index({'fullname': 'text',
+                        'email': 'text', 'type': 'text', 'home_directory': 'text'})
+   
+    groups = db['groups']
+    groups.create_index('groupname', unique=True)
+
 
 def add_site(db: Database, site: SiteRecord):
     sites = db['sites']
@@ -275,14 +317,14 @@ def upsert_global_user(db: Database, user: GlobalUserRecord):
                         upsert=True)
 
 
-def query_global_user(db: Database, username: str):
+def query_global_user(db: Database, username: str) -> (GlobalUserRecord | None):
     result = db.users.find_one({'username': username})
     if result is not None:
         return GlobalUserRecord.load(result)
     return result
 
 
-def replace_global_user(db: Database, user: GlobalUserRecord):
+def replace_global_user(db: Database, user: GlobalUserRecord) -> bool:
     result = db.users.update_one({'username': user.username},
                                  {'$set': user.to_dict()})
     if result.modified_count == 0:
@@ -291,7 +333,7 @@ def replace_global_user(db: Database, user: GlobalUserRecord):
         return True
 
 
-def add_user_comment(db: Database, username: str, comment: str):
+def add_user_comment(db: Database, username: str, comment: str) -> bool:
     comment = tag_comment(comment)
     result = db.users.update_one({'username': username},
                                  {'$push': {'comments': comment}})
@@ -299,6 +341,14 @@ def add_user_comment(db: Database, username: str, comment: str):
         return False
     else:
         return True
+
+
+def user_exists(db: Database, username: str, sitename: Optional[str] = None) -> bool:
+    if sitename is not None:
+        return db.sites.count_documents({'sitename': sitename, 
+                                         'users': {'$elemMatch': {'username': username}}}) > 0
+    else:
+        return db.users.count_documents({'username': username}) > 0
 
 
 def update_global_user(db: Database, username: str, updates: dict, comment: str = ''):
@@ -356,11 +406,49 @@ def query_site_user(db: Database, sitename: str, username: str,
 
     if full:
         global_user = query_global_user(db, username)
-        return FullUserRecord.load(puppet_merge(global_user.to_dict(),
-                                                site_user.to_dict(), 
-                                                {'sitename': sitename}))
+        return FullUserRecord.from_merge(global_user, site_user, sitename)
     else:
         return site_user
+
+
+def query_global_group(db: Database, groupname: str) -> (GlobalGroupRecord | None):
+    result = db.groups.find_one({'groupname': groupname})
+    if result is not None:
+        return GlobalGroupRecord.load(result)
+    return result
+
+
+def _query_site_group_q(sitename: str, groupnames: List[str],
+                        op: Optional[str] = '$eq'):
+    match op:
+        case '$in':
+            cond = {'$in': ['$$group.groupname', groupnames] }
+        case '$nin':
+            cond = {'$nin': ['$$group.groupname', groupnames] }
+        case _:
+            cond = {'$eq': ['$$group.groupname', groupnames[0]] }
+
+    return ({'sitename': sitename}, 
+            {'groups': {'$filter': 
+                      {'input': '$groups', 
+                       'as': 'group', 
+                       'cond': cond}}})
+
+
+def query_site_group(db: Database, sitename: str, groupname: str,
+                     full=True):
+    query, projection = _query_site_group_q(sitename, [groupname])
+    result = db.sites.find_one(query, projection=projection)
+    if result is None or not result['groups']:
+        return None
+
+    site_group = SiteGroupRecord.load(result['groups'].pop())
+
+    if full:
+        global_group = query_global_group(db, groupname)
+        return FullGroupRecord.from_merge(global_group, site_group, sitename)
+    else:
+        return site_group
 
 
 def upsert_global_group(db: Database, group: GlobalGroupRecord):
@@ -377,6 +465,30 @@ def upsert_site_group(db: Database, sitename: str, group: SiteGroupRecord):
         db.sites.update_one({'sitename': sitename}, 
                             {'$addToSet': {'groups': group.to_dict()}},
                             upsert=True)
+
+
+def add_user_to_group(db: Database, sitename: str, username: str, groupname: str):
+    if not user_exists(db, username, sitename=sitename):
+        raise InvalidUser(f'User {username} not a site user in {sitename}.')
+
+    db.sites.update_one({'sitename': sitename, 'groups': {'$elemMatch': {'groupname': groupname}}},
+                        {'$addToSet': {'groups.$.members': username}})
+
+
+def add_sponsor_to_group(db: Database, sitename: str, username: str, groupname: str):
+    if not user_exists(db, username, sitename=sitename):
+        raise InvalidUser(f'User {username} not a site user in {sitename}.')
+
+    db.sites.update_one({'sitename': sitename, 'groups': {'$elemMatch': {'groupname': groupname}}},
+                        {'$addToSet': {'groups.$.sponsors': username}})
+
+
+def add_sudoer_to_group(db: Database, sitename: str, username: str, groupname: str):
+    if not user_exists(db, username, sitename=sitename):
+        raise InvalidUser(f'User {username} not a site user in {sitename}.')
+
+    db.sites.update_one({'sitename': sitename, 'groups': {'$elemMatch': {'groupname': groupname}}},
+                        {'$addToSet': {'groups.$.sudoers': username}})
 
 
 def add_load_args(parser: argparse.ArgumentParser):
@@ -415,6 +527,20 @@ def load(args: argparse.Namespace):
             print(site_record)
             upsert_site_user(db, args.sitename, site_record) #type: ignore
 
+            if user_record.groups is not None:
+                for group_name in user_record.groups:
+                    add_user_to_group(db, args.sitename, user_name, group_name)
+
+            if user_record.group_sudo is not None:
+                for group_name in user_record.group_sudo:
+                    add_sudoer_to_group(db, args.sitename, user_name, group_name)
+
+
+@subcommand('index')
+def do_index(args: argparse.Namespace):
+    db = get_database(args.config.mongo)
+    add_indices(db)
+
 
 def add_query_args(parser: argparse.ArgumentParser):
     parser.add_argument('--in', dest='val_in', nargs='+', action='append')
@@ -423,7 +549,7 @@ def add_query_args(parser: argparse.ArgumentParser):
     parser.add_argument('--all', default=False, action='store_true')
 
 
-def build_query(args: argparse.Namespace):
+def build_simple_query(args: argparse.Namespace):
     query = {}
     if args.search:
         for query_group in args.search:
@@ -442,6 +568,22 @@ def build_query(args: argparse.Namespace):
     return query
 
 
+def build_nested_filter_projection(args: argparse.Namespace,
+                                   nested_name: str):
+    
+    conditions = {}
+    if args.val_in:
+        for query_group in args.val_in:
+            field = query_group[0]
+            conditions['$in'] = [f'$$item.{field}', query_group[1:]]
+    if args.val_not_in:
+        for query_group in args.val_not_in:
+            field = query_group[0]
+            conditions['$nin'] = [f'$$item.{field}', query_group[1:]]
+
+    return {nested_name: {'$filter': {'input': f'${nested_name}',
+                                      'as': 'item',
+                                      'cond': conditions}}}
 
 def add_query_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site')
@@ -461,6 +603,7 @@ def query_users(args: argparse.Namespace):
         return
 
     db = get_database(args.config.mongo)
+    console = Console()
 
     records = []
 
@@ -480,31 +623,44 @@ def query_users(args: argparse.Namespace):
             global_records = [GlobalUserRecord.load(user) for user in results]
 
             for global_record, site_record in zip(global_records, site_records):
-                record = FullUserRecord.load(puppet_merge(global_record.to_dict(),
-                                                          site_record.to_dict(),
-                                                          {'sitename': args.site}))
+                record = FullUserRecord.from_merge(global_record, site_record, args.site)
                 records.append(record)
         else:
-            query = build_query(args)
-            search = db.users.find(query)
-            for record in search:
-                records.append(GlobalUserRecord.load(record))
+            site_records = []
+            query = {'sitename': args.site}
+            projection = build_nested_filter_projection(args, 'users')
+            results = db.sites.find(query, projection=projection)[0]['users']
+            
+            for record in results:
+                site_records.append(SiteUserRecord.load(record))
+
+            for site_record in site_records:
+                global_record = query_global_user(db, site_record.username)
+                records.append(FullUserRecord.from_merge(global_record,
+                                                         site_record,
+                                                         args.site))
     else:
         if args.all:
             results = db.users.find()
             for record in results:
                 records.append(GlobalUserRecord.load(record))
         else:
-            query = build_query(args)
+            query = build_simple_query(args)
             search = db.users.find(query)
             for record in search:
                 records.append(GlobalUserRecord.load(record))
     
-    for record in records:
-        if args.fields:
-            print(record.Schema(only=args.fields).dumps(record))
-        else:
-            print(record.Schema(exclude=['_id']).dumps(record))
+    if args.fields:
+        dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+    else:
+        dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+
+    output_txt = dumper.dumps(records, many=True)
+    output_txt = Syntax(output_txt,
+                        'yaml',
+                        theme='github-dark',
+                        background_color='default')
+    console.print(output_txt)
 
 
 def add_user_modify_args(parser: argparse.ArgumentParser):
