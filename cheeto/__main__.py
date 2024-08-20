@@ -73,6 +73,11 @@ def main():
     database.enable_user(user_commands)
     database.disable_user(user_commands)
 
+    group_parser = database_commands.add_parser('group')
+    group_parser.set_defaults(func = lambda _: group_parser.print_help())
+    group_commands = group_parser.add_subparsers()
+    database.query_groups(group_commands)
+
     args = parser.parse_args()
     if not hasattr(args, 'log'):
         args.func(args)

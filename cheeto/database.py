@@ -704,3 +704,79 @@ def deactivate_user(args: argparse.Namespace):
     comment = f'deactivate, {args.comment}'
 
     update_global_user(db, args.user, {'$set': {'status': 'inactive'}}, comment=comment)
+
+
+def add_query_group_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--site')
+    parser.add_argument('--fields', nargs='+', choices=FullGroupRecord.field_names())
+    parser.add_argument('--list-fields', action='store_true', default=False)
+
+
+@subcommand('query', add_query_args, add_query_group_args)
+def query_groups(args: argparse.Namespace):
+    if args.list_fields:
+        print('Global Fields:')
+        describe_schema(GlobalGroupRecord.Schema())
+        print()
+        print('Site Fields:')
+        describe_schema(SiteGroupRecord.Schema())
+        return
+
+    db = get_database(args.config.mongo)
+    console = Console()
+    records = []
+
+    if args.site:
+        if args.all:
+            query = {'sitename': args.site}
+            projection = {'groups': True}
+            results = db.sites.find_one(query, projection=projection)
+            if results is None or 'groups' not in results:
+                return
+            
+            results = results['groups']
+            site_records = sorted([SiteGroupRecord.load(group) for group in results], key=lambda r: r.groupname)
+            
+            site_groupnames = [group.groupname for group in site_records]
+            results = db.groups.find({'groupname': {'$in': site_groupnames}}).sort('groupname', ASCENDING)
+            global_records = [GlobalGroupRecord.load(group) for group in results]
+
+            for global_record, site_record in zip(global_records, site_records):
+                record = FullGroupRecord.from_merge(global_record, site_record, args.site)
+                records.append(record)
+        else:
+            site_records = []
+            query = {'sitename': args.site}
+            projection = build_nested_filter_projection(args, 'groups')
+            results = db.sites.find(query, projection=projection)[0]['groups']
+            
+            for record in results:
+                site_records.append(SiteGroupRecord.load(record))
+
+            for site_record in site_records:
+                global_record = query_global_group(db, site_record.groupname)
+                records.append(FullGroupRecord.from_merge(global_record,
+                                                          site_record,
+                                                          args.site))
+    else:
+        if args.all:
+            results = db.groups.find()
+            for record in results:
+                records.append(GlobalGroupRecord.load(record))
+        else:
+            query = build_simple_query(args)
+            search = db.groups.find(query)
+            for record in search:
+                records.append(GlobalGroupRecord.load(record))
+
+    if args.fields:
+        dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+    else:
+        dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+
+    output_txt = dumper.dumps(records, many=True)
+    output_txt = Syntax(output_txt,
+                        'yaml',
+                        theme='github-dark',
+                        background_color='default')
+    console.print(output_txt)
