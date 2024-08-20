@@ -31,14 +31,20 @@ class OrderedDictRepresenter(RoundTripRepresenter):
     pass
 
 
-ryaml.add_representer(OrderedDict, OrderedDictRepresenter.represent_dict, 
-                      representer=OrderedDictRepresenter)
+def str_representer(dumper, data):
+    if len(data) > 80:
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+    else:
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
 
 def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
-    dumper.Representer = OrderedDictRepresenter
+    dumper.Representer.add_representer(OrderedDict,
+                                       OrderedDictRepresenter.represent_dict)
+    dumper.Representer.add_representer(str, str_representer)
     stream = StringIO()
-    dumper.dump(obj, stream)
+    dumper.dump(obj, stream, **kwargs)
     return stream.getvalue()
 
 
