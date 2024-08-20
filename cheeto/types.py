@@ -20,6 +20,7 @@ from marshmallow import post_dump, Schema as _Schema
 from marshmallow_dataclass import dataclass
 import marshmallow_dataclass
 import marshmallow_dataclass.collection_field
+from marshmallow_dataclass.union_field import Union as mdUnion
 
 from . import yaml
 from .yaml import parse_yaml, puppet_merge
@@ -29,20 +30,32 @@ UINT_MAX = 4_294_967_296
 
 DEFAULT_SHELL = '/usr/bin/bash'
 
-ENABLED_SHELLS = {"/bin/sh",
-                  "/bin/bash",
-                  "/bin/zsh",
-                  "/usr/bin/sh",
-                  "/usr/bin/zsh",
-                  "/usr/bin/bash"}
+ENABLED_SHELLS = {
+    "/bin/sh",
+    "/bin/bash",
+    "/bin/zsh",
+    "/usr/bin/sh",
+    "/usr/bin/zsh",
+    "/usr/bin/bash"
+}
 
-DISABLED_SHELLS = {"/usr/sbin/nologin-account-disabled",
-                   "/bin/false",
-                   "/usr/sbin/nologin"}
+DISABLED_SHELLS = {
+    "/usr/sbin/nologin-account-disabled",
+    "/bin/false",
+    "/usr/sbin/nologin"
+}
 
-USER_TYPES = {'user',
-              'admin',
-              'system'}
+USER_TYPES = {
+    'user',
+    'admin',
+    'system'
+}
+
+USER_STATUSES = {
+    'active',
+    'inactive',
+    'disabled'
+}
 
 
 def is_listlike(obj):
@@ -103,6 +116,9 @@ class _BaseModel:
     def load(cls, data: dict):
         return cls.Schema().load(data)
 
+    def dumps(self):
+        return type(self).Schema().dumps(self) #type: ignore
+
     @classmethod
     def load_yaml(cls, filename: Union[Path, str]):
         return cls.Schema().load(parse_yaml(str(filename))) #type: ignore
@@ -123,7 +139,28 @@ class _BaseModel:
 
     @classmethod
     def field_names(cls):
-        return set(cls.__dataclass_fields__.keys()) - {'Schema'}
+        return set(cls.Schema().fields.keys())
+
+
+def _describe_schema(fields, level):
+    for field in fields:
+        indent = ' ' * level * 4
+        if isinstance(field, mf.Nested):
+            print(f'{indent}- {field.name}: {field.nested.__name__}')
+            _describe_schema(field.schema.fields.values(), level + 1)
+            continue
+        elif isinstance(field, mdUnion):
+            types = '|'.join((t[1].__class__.__name__ for t in field.union_fields))
+            print(f'{indent}- {field.name}: {types}')
+            continue
+        elif isinstance(field, tuple):
+            field = field[1]
+        print(f'{indent}- {field.name}: {field.__class__.__name__}')
+
+
+def describe_schema(schema):
+    _describe_schema(schema.fields.values(), 0)
+
 
 
 @dataclass(frozen=True)
@@ -183,6 +220,8 @@ SlurmQOSValidFlags = ("DenyOnLimit",
 SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 
 UserType = Annotated[str, mf.String(validate=mv.OneOf(USER_TYPES))]
+
+UserStatus = Annotated[str, mf.String(validate=mv.OneOf(USER_STATUSES))]
 
 
 SEQUENCE_FIELDS = {

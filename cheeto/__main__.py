@@ -61,17 +61,24 @@ def main():
     monitor.power(monitor_commands)
 
     database_parser = commands.add_parser('database')
+    database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
     database.load(database_commands)
 
-    query_parser = database_commands.add_parser('query')
-    query_commands = query_parser.add_subparsers()
-    database.query_users(query_commands)
+    user_parser = database_commands.add_parser('user')
+    user_parser.set_defaults(func = lambda _: user_parser.print_help())
+    user_commands = user_parser.add_subparsers()
+    database.query_users(user_commands)
+    database.enable_user(user_commands)
+    database.disable_user(user_commands)
 
     args = parser.parse_args()
-    with args.log.open('a') as log_fp:
-        log.setup(log_fp, quiet=args.quiet)
+    if not hasattr(args, 'log'):
         args.func(args)
+    else:
+        with args.log.open('a') as log_fp:
+            log.setup(log_fp, quiet=args.quiet)
+            args.func(args)
 
 
 if __name__ == '__main__':

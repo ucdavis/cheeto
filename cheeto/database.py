@@ -11,6 +11,7 @@ import argparse
 from dataclasses import field
 import logging
 from pathlib import Path
+import sys
 from typing import List, Mapping, Optional, Set, Tuple, TypedDict, Union
 
 from marshmallow import post_load
@@ -24,15 +25,43 @@ from cheeto.yaml import puppet_merge
 
 from .args import subcommand
 from .config import MongoConfig
+from .errors import ExitCode
 from .puppet import PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_args, SiteData
-from .types import (DEFAULT_SHELL, BaseModel, Date, KerberosID, LinuxGID, LinuxUID, 
-                    SEQUENCE_FIELDS, is_listlike, Shell, UserType)
-from .utils import require_kwargs, __pkg_dir__
+from .types import (DEFAULT_SHELL, DISABLED_SHELLS, BaseModel, Date, KerberosID, LinuxGID, LinuxUID, 
+                    SEQUENCE_FIELDS, describe_schema, is_listlike, Shell, UserType, UserStatus)
+from .utils import TIMESTAMP_NOW, require_kwargs, __pkg_dir__
 from cheeto import puppet
 
 
+MONGO_UPDATE_OPERATORS = {
+    '$set',
+    '$push',
+    '$inc',
+    '$addToSet'
+}
+
+
 @dataclass(frozen=True)
-class GlobalUserRecord(BaseModel):
+class MongoModel(BaseModel):
+
+    @classmethod
+    def validate_db_update(cls, updates: dict):
+        print(updates)
+        print(cls)
+        print(cls.Schema())
+        for update_op, op_updates in updates.items():
+            if update_op not in MONGO_UPDATE_OPERATORS:
+                raise RuntimeError(f'{update_op} not a support Mongo update operator.')
+            for field_name, new_value in op_updates.items():
+                if field_name not in cls.Schema().fields:
+                    raise RuntimeError(f'{field_name} not a valid field on {cls}')
+                validate = cls.Schema().fields[field_name].validate
+                if validate is not None:
+                    validate(new_value)
+
+
+@dataclass(frozen=True)
+class GlobalUserRecord(MongoModel):
     username: KerberosID
     email: str
     uid: LinuxUID
@@ -41,7 +70,10 @@ class GlobalUserRecord(BaseModel):
     shell: Shell
     home_directory: str
     type: UserType
+    status: UserStatus
 
+    ssh_key: Optional[str] = None
+    comments: Optional[List[str]] = None
     _id: Optional[str] = None
 
     @post_load
@@ -50,7 +82,9 @@ class GlobalUserRecord(BaseModel):
         return in_data
 
     @classmethod
-    def from_puppet(cls, username: str, puppet_record: PuppetUserRecord):
+    def from_puppet(cls, username: str, 
+                         puppet_record: PuppetUserRecord,
+                    ssh_key: Optional[str] = None):
         if puppet_record.groups is not None and 'hpccfgrp' in puppet_record.groups: #type: ignore
             usertype = 'admin'
         elif puppet_record.uid > 3000000000:
@@ -58,20 +92,29 @@ class GlobalUserRecord(BaseModel):
         else:
             usertype = 'user'
 
+        shell = puppet_record.shell if puppet_record.shell else DEFAULT_SHELL
+
+        if shell in DISABLED_SHELLS and usertype in ('admin', 'user'):
+            userstatus = 'inactive'
+        else:
+            userstatus = 'active'
+
         return cls.Schema().load(dict(
             username = username,
             email = puppet_record.email,
             uid = puppet_record.uid,
             gid = puppet_record.gid,
             fullname = puppet_record.fullname,
-            shell = puppet_record.shell if puppet_record.shell else DEFAULT_SHELL,
+            shell = shell,
             home_directory = f'/home/{username}',
-            type = usertype
+            type = usertype,
+            status = userstatus,
+            ssh_key = ssh_key
         ))
 
 
 @dataclass(frozen=True)
-class SiteUserRecord(BaseModel):
+class SiteUserRecord(MongoModel):
     username: KerberosID
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
@@ -95,7 +138,7 @@ class SiteUserRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class FullUserRecord(BaseModel):
+class FullUserRecord(MongoModel):
     username: KerberosID
     sitename: str
     email: str
@@ -105,9 +148,13 @@ class FullUserRecord(BaseModel):
     shell: Shell
     home_directory: str
     type: UserType
+    status: UserStatus
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
     tag: Optional[Set[str]] = None
+    ssh_key: Optional[str] = None
+
+    comments: Optional[List[str]] = None
 
     _id: Optional[str] = None
 
@@ -118,7 +165,7 @@ class FullUserRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class GlobalGroupRecord(BaseModel):
+class GlobalGroupRecord(MongoModel):
     groupname: KerberosID
     gid: LinuxGID
 
@@ -138,7 +185,7 @@ class GlobalGroupRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class SiteGroupRecord(BaseModel):
+class SiteGroupRecord(MongoModel):
     groupname: KerberosID
     members: Optional[Set[KerberosID]] = field(default_factory=set)
     sponsors: Optional[Set[KerberosID]] = field(default_factory=set)
@@ -161,7 +208,7 @@ class SiteGroupRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class SiteRecord(BaseModel):
+class SiteRecord(MongoModel):
     sitename: str
     fqdn: str
     users: List[SiteUserRecord]
@@ -176,7 +223,7 @@ class SiteRecord(BaseModel):
 
 
 @dataclass(frozen=True)
-class Collections(BaseModel):
+class Collections(MongoModel):
     users: List[GlobalUserRecord]
     groups: List[GlobalGroupRecord]
     sites: List[SiteRecord]
@@ -235,6 +282,43 @@ def query_global_user(db: Database, username: str):
     return result
 
 
+def replace_global_user(db: Database, user: GlobalUserRecord):
+    result = db.users.update_one({'username': user.username},
+                                 {'$set': user.to_dict()})
+    if result.modified_count == 0:
+        return False
+    else:
+        return True
+
+
+def add_user_comment(db: Database, username: str, comment: str):
+    comment = tag_comment(comment)
+    result = db.users.update_one({'username': username},
+                                 {'$push': {'comments': comment}})
+    if result.modified_count == 0:
+        return False
+    else:
+        return True
+
+
+def update_global_user(db: Database, username: str, updates: dict, comment: str = ''):
+    _comment = tag_comment(str(updates))
+    if comment:
+        _comment += f', {comment}'
+    if '$push' in updates:
+        updates['$push']['comments'] = _comment
+    else:
+        updates['$push'] = {'comments': _comment}
+
+    GlobalUserRecord.validate_db_update(updates)
+    result = db.users.update_one({'username': username},
+                                 updates)
+
+    if result.modified_count == 0:
+        return False
+    else:
+        return True
+
 def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
     result = db.sites.update_one({'sitename': sitename, 'users': {'$elemMatch': {'username': user.username}}},
                                  {'$set': { 'users.$': user.to_dict() }})
@@ -244,17 +328,26 @@ def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
                             upsert=True)
 
 
-def _query_site_user_q(sitename: str, username: str):
+def _query_site_user_q(sitename: str, usernames: List[str],
+                       op: Optional[str] = '$eq'):
+    match op:
+        case '$in':
+            cond = {'$in': ['$$user.username', usernames] }
+        case '$nin':
+            cond = {'$nin': ['$$user.username', usernames] }
+        case _:
+            cond = {'$eq': ['$$user.username', usernames[0]] }
+
     return ({'sitename': sitename}, 
             {'users': {'$filter': 
                       {'input': '$users', 
                        'as': 'user', 
-                       'cond': {'$eq': ['$$user.username', username] }}}})
+                       'cond': cond}}})
 
 
 def query_site_user(db: Database, sitename: str, username: str,
                     full=True):
-    query, projection = _query_site_user_q(sitename, username)
+    query, projection = _query_site_user_q(sitename, [username])
     result = db.sites.find_one(query, projection=projection)
     if result is None or not result['users']:
         return None
@@ -312,7 +405,10 @@ def load(args: argparse.Namespace):
             upsert_site_group(db, args.sitename, site_record) #type: ignore
 
         for user_name, user_record in site_data.iter_users():
-            global_record = GlobalUserRecord.from_puppet(user_name, user_record)
+            ssh_key_path, ssh_key = args.key_dir / f'{user_name}.pub', None
+            if ssh_key_path.exists():
+                ssh_key = ssh_key_path.read_text().strip()
+            global_record = GlobalUserRecord.from_puppet(user_name, user_record, ssh_key=ssh_key)
             upsert_global_user(db, global_record) #type: ignore
 
             site_record = SiteUserRecord.from_puppet(user_name, user_record)
@@ -349,21 +445,106 @@ def build_query(args: argparse.Namespace):
 
 def add_query_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site')
+    parser.add_argument('--fields', nargs='+', choices=FullUserRecord.field_names())
+    parser.add_argument('--list-fields', action='store_true', default=False)
 
 
-@subcommand('users', add_query_args)
+@subcommand('query', add_query_args, add_query_user_args)
 def query_users(args: argparse.Namespace):
+
+    if args.list_fields:
+        print('Global Fields:')
+        describe_schema(GlobalUserRecord.Schema())
+        print()
+        print('Site Fields:')
+        describe_schema(SiteUserRecord.Schema())
+        return
+
     db = get_database(args.config.mongo)
 
-    if args.all:
-        search = db.users.find()
-        for record in search:
-            record = GlobalUserRecord.Schema().load(record)
-            print(record)
+    records = []
+
+    if args.site:
+        if args.all:
+            query = {'sitename': args.site}
+            projection = {'users': True}
+            results = db.sites.find_one(query, projection=projection)
+            if results is None or 'users' not in results:
+                return
+            
+            results = results['users']
+            site_records = sorted([SiteUserRecord.load(user) for user in results], key=lambda r: r.username)
+            
+            site_usernames = [user.username for user in site_records]
+            results = db.users.find({'username': {'$in': site_usernames}}).sort('username', ASCENDING)
+            global_records = [GlobalUserRecord.load(user) for user in results]
+
+            for global_record, site_record in zip(global_records, site_records):
+                record = FullUserRecord.load(puppet_merge(global_record.to_dict(),
+                                                          site_record.to_dict(),
+                                                          {'sitename': args.site}))
+                records.append(record)
+        else:
+            query = build_query(args)
+            search = db.users.find(query)
+            for record in search:
+                records.append(GlobalUserRecord.load(record))
     else:
-        query = build_query(args)
-        search = db.users.find(query)
-        for record in search:
-            record = GlobalUserRecord.Schema().load(record)
-            print(record)
-        
+        if args.all:
+            results = db.users.find()
+            for record in results:
+                records.append(GlobalUserRecord.load(record))
+        else:
+            query = build_query(args)
+            search = db.users.find(query)
+            for record in search:
+                records.append(GlobalUserRecord.load(record))
+    
+    for record in records:
+        if args.fields:
+            print(record.Schema(only=args.fields).dumps(record))
+        else:
+            print(record.Schema(exclude=['_id']).dumps(record))
+
+
+def add_user_modify_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--user', '-u', required=True)
+    parser.add_argument('--comment', '-c', default='')
+
+
+def tag_comment(comment: str):
+    return f'[{TIMESTAMP_NOW}]: {comment}'
+
+
+@subcommand('enable', add_user_modify_args)
+def enable_user(args: argparse.Namespace):
+    db = get_database(args.config.mongo)
+    comment = f'enable, {args.comment}' if args.comment else 'enable'
+
+    update_global_user(db, args.user, {'$set': {'status': 'active'}}, comment=comment)
+
+
+@subcommand('disable', add_user_modify_args)
+def disable_user(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    db = get_database(args.config.mongo)
+
+    if not args.comment:
+        logger.error('Must supply a comment when disabling a user.')
+        sys.exit(ExitCode.BAD_CMDLINE_ARGS)
+    comment = f'disable, {args.comment}'
+
+    update_global_user(db, args.user, {'$set': {'status': 'disabled'}}, comment=comment)
+
+
+@subcommand('deactivate', add_user_modify_args)
+def deactivate_user(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    db = get_database(args.config.mongo)
+
+    if not args.comment:
+        logger.error('Must supply a comment when deactivating a user.')
+        sys.exit(ExitCode.BAD_CMDLINE_ARGS)
+    comment = f'deactivate, {args.comment}'
+
+    update_global_user(db, args.user, {'$set': {'status': 'inactive'}}, comment=comment)
