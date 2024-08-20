@@ -8,6 +8,7 @@
 # Date   : 09.08.2024
 
 import argparse
+from collections import defaultdict
 from dataclasses import field
 import logging
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import List, Mapping, Optional, Set, Tuple, TypedDict, Union
 
 from marshmallow import post_load
 from marshmallow_dataclass import dataclass
+from pyasn1.codec import der
 from rich.console import Console
 from rich.syntax import Syntax
 from pymongo import MongoClient, ASCENDING
@@ -60,7 +62,10 @@ class MongoModel(BaseModel):
                     raise RuntimeError(f'{field_name} not a valid field on {cls}')
                 validate = cls.Schema().fields[field_name].validate
                 if validate is not None:
-                    validate(new_value)
+                    validate(new_value) #type: ignore
+
+    def __hash__(self):
+        return self._id #type: ignore
 
 
 @dataclass(frozen=True)
@@ -545,41 +550,84 @@ def do_index(args: argparse.Namespace):
 def add_query_args(parser: argparse.ArgumentParser):
     parser.add_argument('--in', dest='val_in', nargs='+', action='append')
     parser.add_argument('--not-in', dest='val_not_in', nargs='+', action='append')
+    parser.add_argument('--gt', nargs=2, action='append')
+    parser.add_argument('--lt', nargs=2, action='append')
     parser.add_argument('--search', '-s', nargs='+', action='append')
     parser.add_argument('--all', default=False, action='store_true')
 
 
-def build_simple_query(args: argparse.Namespace):
-    query = {}
+def build_simple_query(args: argparse.Namespace,
+                       record_type: MongoModel):
+    query = defaultdict(dict)
+
     if args.search:
         for query_group in args.search:
             query['$text'] = {'$search': ' '.join(query_group)}
     else:
         if args.val_in:
             for query_group in args.val_in:
-                #if query_group[0] not in record_type.field_names():
-                #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
-                query[query_group[0]] = {'$in': query_group[1:]}
+                field = query_group[0]
+                if field in record_type.field_names():
+                    deserialize = record_type.Schema().fields[field].deserialize
+                    query[field]['$in'] = [deserialize(v) for v in query_group[1:]]
         if args.val_not_in:
             for query_group in args.val_not_in:
-                #if query_group[0] not in record_type.field_names():
-                #    raise ValueError(f'Query key must be one of: {record_type.field_names()}')
-                query[query_group[0]] = {'$nin': query_group[1:]}
-    return query
+                field = query_group[0]
+                if field in record_type.field_names():
+                    deserialize = record_type.Schema().fields[field].deserialize
+                    query[field]['$nin'] = [deserialize(v) for v in query_group[1:]]
+        if args.lt:
+            for query_group in args.lt:
+                field, val = query_group
+                if field in record_type.field_names():
+                    deserialize = record_type.Schema().fields[field].deserialize
+                    query[field]['$lt'] = deserialize(val)
+        if args.gt:
+            for query_group in args.gt:
+                field, val = query_group
+                if field in record_type.field_names():
+                    deserialize = record_type.Schema().fields[field].deserialize
+                    query[field]['$gt'] = deserialize(val)
+
+    return dict(query)
+
+
+
+def build_filter_condition(args: argparse.Namespace,
+                           field: str,
+                           params: List[str]):
+    pass
 
 
 def build_nested_filter_projection(args: argparse.Namespace,
-                                   nested_name: str):
+                                   nested_name: str,
+                                   record_type: MongoModel):
     
     conditions = {}
     if args.val_in:
         for query_group in args.val_in:
-            field = query_group[0]
-            conditions['$in'] = [f'$$item.{field}', query_group[1:]]
+            field, values = query_group[0], query_group[1:]
+            if field in record_type.field_names():
+                deserialize = record_type.Schema().fields[field].deserialize
+                conditions['$in'] = [f'$$item.{field}', list(map(deserialize, values))]
     if args.val_not_in:
         for query_group in args.val_not_in:
-            field = query_group[0]
-            conditions['$nin'] = [f'$$item.{field}', query_group[1:]]
+            field, values = query_group[0], query_group[1:]
+            if field in record_type.field_names():
+                deserialize = record_type.Schema().fields[field].deserialize
+                conditions['$nin'] = [f'$$item.{field}', list(map(deserialize, values))]
+    if args.lt:
+        for query_group in args.lt:
+            field, val = query_group
+            if field in record_type.field_names():
+                deserialize = record_type.Schema().fields[field].deserialize
+                conditions['$lt'] = [f'$$item.{field}', deserialize(val)]
+    if args.gt:
+        for query_group in args.gt:
+            field, val = query_group
+            if field in record_type.field_names():
+                deserialize = record_type.Schema().fields[field].deserialize
+                conditions['$gt'] = [f'$$item.{field}', deserialize(val)]
 
     return {nested_name: {'$filter': {'input': f'${nested_name}',
                                       'as': 'item',
@@ -626,16 +674,19 @@ def query_users(args: argparse.Namespace):
                 record = FullUserRecord.from_merge(global_record, site_record, args.site)
                 records.append(record)
         else:
-            site_records = []
             query = {'sitename': args.site}
-            projection = build_nested_filter_projection(args, 'users')
+            projection = build_nested_filter_projection(args, 'users',
+                                                        record_type=SiteUserRecord)
             results = db.sites.find(query, projection=projection)[0]['users']
-            
-            for record in results:
-                site_records.append(SiteUserRecord.load(record))
+            site_records = {record['_id']: SiteUserRecord.load(record) for record in results}
 
-            for site_record in site_records:
-                global_record = query_global_user(db, site_record.username)
+            query = build_simple_query(args, record_type=GlobalUserRecord)
+            query['username'] = {'$in': list(site_records.keys())}
+            results = db.users.find(query)
+            global_records = [GlobalUserRecord.load(user) for user in results]
+
+            for global_record in global_records:
+                site_record = site_records[global_record.username]
                 records.append(FullUserRecord.from_merge(global_record,
                                                          site_record,
                                                          args.site))
@@ -645,22 +696,23 @@ def query_users(args: argparse.Namespace):
             for record in results:
                 records.append(GlobalUserRecord.load(record))
         else:
-            query = build_simple_query(args)
+            query = build_simple_query(args, record_type=GlobalUserRecord)
             search = db.users.find(query)
             for record in search:
                 records.append(GlobalUserRecord.load(record))
     
-    if args.fields:
-        dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
-    else:
-        dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+    if records:
+        if args.fields:
+            dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+        else:
+            dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
 
-    output_txt = dumper.dumps(records, many=True)
-    output_txt = Syntax(output_txt,
-                        'yaml',
-                        theme='github-dark',
-                        background_color='default')
-    console.print(output_txt)
+        output_txt = dumper.dumps(records, many=True)
+        output_txt = Syntax(output_txt,
+                            'yaml',
+                            theme='github-dark',
+                            background_color='default')
+        console.print(output_txt)
 
 
 def add_user_modify_args(parser: argparse.ArgumentParser):
@@ -769,14 +821,15 @@ def query_groups(args: argparse.Namespace):
             for record in search:
                 records.append(GlobalGroupRecord.load(record))
 
-    if args.fields:
-        dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
-    else:
-        dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+    if records:
+        if args.fields:
+            dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+        else:
+            dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
 
-    output_txt = dumper.dumps(records, many=True)
-    output_txt = Syntax(output_txt,
-                        'yaml',
-                        theme='github-dark',
-                        background_color='default')
-    console.print(output_txt)
+        output_txt = dumper.dumps(records, many=True)
+        output_txt = Syntax(output_txt,
+                            'yaml',
+                            theme='github-dark',
+                            background_color='default')
+        console.print(output_txt)
