@@ -12,12 +12,14 @@ from collections import defaultdict
 from dataclasses import field
 import logging
 from pathlib import Path
+import re
 import sys
 from typing import List, Mapping, Optional, Set, Tuple, TypedDict, Union
 
 from marshmallow import post_load
-from marshmallow_dataclass import dataclass
+from marshmallow_dataclass import _field_for_union_type, dataclass
 from pyasn1.codec import der
+from pygments.lexer import default
 from rich.console import Console
 from rich.syntax import Syntax
 from pymongo import MongoClient, ASCENDING
@@ -34,7 +36,7 @@ from .puppet import PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_a
 from .types import (DEFAULT_SHELL, DISABLED_SHELLS, AccessType, BaseModel, Date, KerberosID, LinuxGID, LinuxUID, 
                     SEQUENCE_FIELDS, describe_schema, is_listlike, Shell, UserType, UserStatus)
 from .utils import TIMESTAMP_NOW, require_kwargs, __pkg_dir__
-from cheeto import puppet
+from .yaml import dumps as dumps_yaml, highlight_yaml
 
 
 MONGO_UPDATE_OPERATORS = {
@@ -78,10 +80,10 @@ class GlobalUserRecord(MongoModel):
     shell: Shell
     home_directory: str
     type: UserType
-    status: UserStatus
 
+    status: Optional[UserStatus] = 'active'
     ssh_key: Optional[str] = None
-    access: Optional[AccessType] = 'ssh'
+    access: Optional[Set[AccessType]] = field(default_factory=lambda: {'ssh'})
     comments: Optional[List[str]] = None
     _id: Optional[str] = None
 
@@ -94,9 +96,12 @@ class GlobalUserRecord(MongoModel):
     def from_puppet(cls, username: str, 
                          puppet_record: PuppetUserRecord,
                          ssh_key: Optional[str] = None):
+        
+        tags = {} if puppet_record.tag is None else puppet_record.tag
+
         if puppet_record.groups is not None and 'hpccfgrp' in puppet_record.groups: #type: ignore
             usertype = 'admin'
-        elif puppet_record.uid > 3000000000:
+        elif puppet_record.uid > 3000000000 or 'system-tag' in tags or puppet_record.uid == 0:
             usertype = 'system'
         else:
             usertype = 'user'
@@ -107,6 +112,25 @@ class GlobalUserRecord(MongoModel):
             userstatus = 'inactive'
         else:
             userstatus = 'active'
+
+        if ssh_key is None and usertype != 'system':
+            access = {'ondemand'}
+        else:
+            access = {'ssh'}
+
+        if puppet_record.tag is not None:
+            tags = puppet_record.tag
+            if 'root-ssh-tag' in tags:
+                access.add('root-ssh')
+            if 'ssh-tag' in tags:
+                access.add('compute-ssh')
+            if 'sudo-tag' in tags:
+                access.add('sudo')
+
+        if usertype == 'admin':
+            access.add('root-ssh')
+            access.add('compute-ssh')
+            access.add('sudo')
 
         return cls.Schema().load(dict(
             username = username,
@@ -119,7 +143,7 @@ class GlobalUserRecord(MongoModel):
             type = usertype,
             status = userstatus,
             ssh_key = ssh_key,
-            access = 'ondemand' if ssh_key is None else 'ssh'
+            access = access
         ))
 
 
@@ -128,7 +152,7 @@ class SiteUserRecord(MongoModel):
     username: KerberosID
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
-    tag: Optional[Set[str]] = None
+    access: Optional[Set[AccessType]] = field(default_factory=set)
 
     _id: Optional[str] = None
 
@@ -139,11 +163,21 @@ class SiteUserRecord(MongoModel):
 
     @classmethod
     def from_puppet(cls, username: str, puppet_record: PuppetUserRecord):
+        puppet_record = puppet_record.to_dict()
+        access = set()
+        if 'tag' in puppet_record:
+            tags = puppet_record['tag']
+            if 'root-ssh-tag' in tags:
+                access.add('root-ssh')
+            if 'ssh-tag' in tags:
+                access.add('compute-ssh')
+            if 'sudo-tag' in tags:
+                access.add('sudo')
         return cls.Schema().load(dict(
             username = username,
-            expiry = puppet_record.expiry,
-            slurm = puppet_record.slurm,
-            tag = puppet_record.tag
+            expiry = puppet_record.get('expiry', None),
+            slurm = puppet_record.get('slurm', None),
+            access = access
         ))
 
 
@@ -162,7 +196,7 @@ class FullUserRecord(MongoModel):
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
     tag: Optional[Set[str]] = None
-    access: Optional[AccessType] = 'ssh'
+    access: Optional[Set[AccessType]] = field(default_factory=set)
     ssh_key: Optional[str] = None
 
     comments: Optional[List[str]] = None
@@ -227,6 +261,7 @@ class FullGroupRecord(MongoModel):
     sitename: str
     members: Optional[Set[KerberosID]] = field(default_factory=set)
     sponsors: Optional[Set[KerberosID]] = field(default_factory=set)
+    sudoers: Optional[Set[KerberosID]] = field(default_factory=set)
     slurm: Optional[SlurmRecord] = None
 
     _id: Optional[str] = None
@@ -313,7 +348,9 @@ def add_indices(db: Database):
 
 def add_site(db: Database, site: SiteRecord):
     sites = db['sites']
-    sites.insert_one(site.to_dict())
+    sites.update_one({'sitename': site.sitename},
+                     {'$set': site.to_dict()},
+                     upsert=True)
 
 
 def upsert_global_user(db: Database, user: GlobalUserRecord):
@@ -456,6 +493,55 @@ def query_site_group(db: Database, sitename: str, groupname: str,
         return site_group
 
 
+def pipeline_groups_with_subset(db: Database, site: str, subfield: str, subset: Set[str],
+                                as_array=True, objects=False):
+    pipeline = [
+        {'$match': {'sitename': site}},
+        {
+            '$project': {
+                'groups': {
+                    '$filter': {
+                        'input': '$groups',
+                        'as': 'item',
+                        'cond': {
+                            '$and': [
+                                {'$ne': [{'$type': f'$$item.{subfield}'}, 'missing']},
+                                {'$setIsSubset': [list(subset), f'$$item.{subfield}']}
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+        #{'$project': {'groups.groupname': True, '_id': False}},
+        {'$unwind': '$groups'},
+        {'$group': {'_id': None, 'groupnames': {'$push': '$groups.groupname'}}},
+        {'$project': {'_id': False, 'groupnames': True}}
+    ]
+
+    return pipeline
+
+
+def query_user_groups(db: Database, sitename: str, username: str) -> List[str]:
+    pipeline = pipeline_groups_with_subset(db, sitename, 'members', {username})
+    try:
+        result = db.sites.aggregate(pipeline).next()
+    except StopIteration:
+        return []
+    else:
+        return result['groupnames']
+
+
+def query_user_sponsor_of(db: Database, sitename: str, username: str) -> List[str]:
+    pipeline = pipeline_groups_with_subset(db, sitename, 'sponsors', {username})
+    try:
+        result = db.sites.aggregate(pipeline).next()
+    except StopIteration:
+        return []
+    else:
+        return result['groupnames']
+
+
 def upsert_global_group(db: Database, group: GlobalGroupRecord):
     db.groups.update_one({'groupname': group.groupname},
                          {'$set': group.to_dict()},
@@ -513,14 +599,23 @@ def load(args: argparse.Namespace):
     with site_data.lock(args.timeout):
         site_data.load()
 
+        site = SiteRecord(sitename=args.sitename,
+                          fqdn=args.site_dir.name,
+                          users=[],
+                          groups=[])
+        logger.info(f'Updating Site: {site}')
+        add_site(db, site)
+
+        logger.info(f'Adding {len(site_data.data.group)} groups.')
         for group_name, group_record in site_data.iter_groups():
             global_record = GlobalGroupRecord.from_puppet(group_name, group_record)
             upsert_global_group(db, global_record) #type: ignore
 
             site_record = SiteGroupRecord.from_puppet(group_name, group_record)
-            print(site_record)
+            #print(site_record)
             upsert_site_group(db, args.sitename, site_record) #type: ignore
 
+        logger.info(f'Adding {len(site_data.data.user)} users.')
         for user_name, user_record in site_data.iter_users():
             ssh_key_path, ssh_key = args.key_dir / f'{user_name}.pub', None
             if ssh_key_path.exists():
@@ -529,7 +624,7 @@ def load(args: argparse.Namespace):
             upsert_global_user(db, global_record) #type: ignore
 
             site_record = SiteUserRecord.from_puppet(user_name, user_record)
-            print(site_record)
+            #print(site_record)
             upsert_site_user(db, args.sitename, site_record) #type: ignore
 
             if user_record.groups is not None:
@@ -539,6 +634,7 @@ def load(args: argparse.Namespace):
             if user_record.group_sudo is not None:
                 for group_name in user_record.group_sudo:
                     add_sudoer_to_group(db, args.sitename, user_name, group_name)
+        logger.info('Done.')
 
 
 @subcommand('index')
@@ -550,14 +646,38 @@ def do_index(args: argparse.Namespace):
 def add_query_args(parser: argparse.ArgumentParser):
     parser.add_argument('--in', dest='val_in', nargs='+', action='append')
     parser.add_argument('--not-in', dest='val_not_in', nargs='+', action='append')
+    parser.add_argument('--contains', nargs='+', action='append')
     parser.add_argument('--gt', nargs=2, action='append')
     parser.add_argument('--lt', nargs=2, action='append')
+    parser.add_argument('--match', '-m', nargs=2, action='append')
     parser.add_argument('--search', '-s', nargs='+', action='append')
     parser.add_argument('--all', default=False, action='store_true')
 
 
+def validate_query_groups(groups, record_type, min_args=2, single=False):
+    logger = logging.getLogger(__name__)
+    for query_group in groups:
+        field = query_group[0]
+        if field not in record_type.field_names():
+            logger.warning(f'Skipping query group, {field} is not valid for {record_type}: {query_group}.')
+            continue
+        deserialize = record_type.field_deserializer(field)
+        if len(query_group) < min_args:
+            raise RuntimeError(f'Query argument group needs at least {min_args} arguments, got: {query_group}.')
+        if single:
+            if len(query_group) != 2:
+                raise RuntimeError(f'Query group should have exactly two arguments, got {query_group}.')
+            value = query_group[1]
+            yield field, deserialize(value)
+        else:
+            values = query_group[1:]
+            yield field, list(map(deserialize, values))
+
+
 def build_simple_query(args: argparse.Namespace,
                        record_type: MongoModel):
+
+    logger = logging.getLogger(__name__)
     query = defaultdict(dict)
 
     if args.search:
@@ -565,30 +685,28 @@ def build_simple_query(args: argparse.Namespace,
             query['$text'] = {'$search': ' '.join(query_group)}
     else:
         if args.val_in:
-            for query_group in args.val_in:
-                field = query_group[0]
-                if field in record_type.field_names():
-                    deserialize = record_type.Schema().fields[field].deserialize
-                    query[field]['$in'] = [deserialize(v) for v in query_group[1:]]
+            for field, values in validate_query_groups(args.val_in, record_type):
+                query[field]['$in'] = values
         if args.val_not_in:
-            for query_group in args.val_not_in:
-                field = query_group[0]
-                if field in record_type.field_names():
-                    deserialize = record_type.Schema().fields[field].deserialize
-                    query[field]['$nin'] = [deserialize(v) for v in query_group[1:]]
+            for field, values in validate_query_groups(args.val_not_in, record_type):
+                query[field]['$nin'] = values
         if args.lt:
-            for query_group in args.lt:
-                field, val = query_group
-                if field in record_type.field_names():
-                    deserialize = record_type.Schema().fields[field].deserialize
-                    query[field]['$lt'] = deserialize(val)
+            for field, value in validate_query_groups(args.lt, record_type, single=True):
+                query[field]['$lt'] = value
         if args.gt:
-            for query_group in args.gt:
-                field, val = query_group
-                if field in record_type.field_names():
-                    deserialize = record_type.Schema().fields[field].deserialize
-                    query[field]['$gt'] = deserialize(val)
+            for field, value in validate_query_groups(args.gt, record_type, single=True):
+                query[field]['$gt'] = value
+        if args.match:
+            for field, value in validate_query_groups(args.match, record_type, single=True):
+                query[field] = value
+        if args.contains:
+            for field, values in validate_query_groups(args.contains, record_type):
+                if len(values) > 1:
+                    query['$and'] = [{field: val} for val in values]
+                else:
+                    query[field] = values[0]
 
+    logger.debug(f'Simple query: \n{dict(query)}')
     return dict(query)
 
 
@@ -602,36 +720,40 @@ def build_filter_condition(args: argparse.Namespace,
 def build_nested_filter_projection(args: argparse.Namespace,
                                    nested_name: str,
                                    record_type: MongoModel):
-    
-    conditions = {}
-    if args.val_in:
-        for query_group in args.val_in:
-            field, values = query_group[0], query_group[1:]
-            if field in record_type.field_names():
-                deserialize = record_type.Schema().fields[field].deserialize
-                conditions['$in'] = [f'$$item.{field}', list(map(deserialize, values))]
-    if args.val_not_in:
-        for query_group in args.val_not_in:
-            field, values = query_group[0], query_group[1:]
-            if field in record_type.field_names():
-                deserialize = record_type.Schema().fields[field].deserialize
-                conditions['$nin'] = [f'$$item.{field}', list(map(deserialize, values))]
-    if args.lt:
-        for query_group in args.lt:
-            field, val = query_group
-            if field in record_type.field_names():
-                deserialize = record_type.Schema().fields[field].deserialize
-                conditions['$lt'] = [f'$$item.{field}', deserialize(val)]
-    if args.gt:
-        for query_group in args.gt:
-            field, val = query_group
-            if field in record_type.field_names():
-                deserialize = record_type.Schema().fields[field].deserialize
-                conditions['$gt'] = [f'$$item.{field}', deserialize(val)]
 
-    return {nested_name: {'$filter': {'input': f'${nested_name}',
-                                      'as': 'item',
-                                      'cond': conditions}}}
+    logger = logging.getLogger(__name__)
+    
+    conditions = []
+    if args.val_in:
+        for field, values in validate_query_groups(args.val_in, record_type):
+            deserialize = record_type.field_deserializer(field)
+            conditions.append({'$in': [f'$$item.{field}', values]})
+    if args.val_not_in:
+        for field, values in validate_query_groups(args.val_not_in, record_type):
+            conditions.append({'$nin': [f'$$item.{field}', values]})
+    if args.lt:
+        for field, value in validate_query_groups(args.lt, record_type, single=True):
+            conditions.append({'$lt': [f'$$item.{field}', value]})
+    if args.gt:
+        for field, value in validate_query_groups(args.gt, record_type, single=True):
+            conditions.append({'$gt': [f'$$item.{field}', value]})
+
+    if args.contains:
+        for field, values in validate_query_groups(args.contains, record_type):
+            conditions.append({'$ne': [{'$type': f'$$item.{field}'}, 'missing']})
+            conditions.append({'$setIsSubset': [values, f'$$item.{field}']})
+
+    if len(conditions) == 1:
+        condexpr = conditions[0]
+    else:
+        condexpr = {'$and': conditions}
+
+    projection = {nested_name: {'$filter': {'input': f'${nested_name}',
+                                            'as': 'item',
+                                            'cond': condexpr}}}
+    logger.debug(f'Filter projection: \n{projection}')
+    return projection
+
 
 def add_query_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site')
@@ -703,9 +825,9 @@ def query_users(args: argparse.Namespace):
     
     if records:
         if args.fields:
-            dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+            dumper = records[0].Schema(only=args.fields)
         else:
-            dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+            dumper = records[0].Schema(exclude=['_id'])
 
         output_txt = dumper.dumps(records, many=True)
         output_txt = Syntax(output_txt,
@@ -758,6 +880,24 @@ def deactivate_user(args: argparse.Namespace):
     update_global_user(db, args.user, {'$set': {'status': 'inactive'}}, comment=comment)
 
 
+def add_user_membership_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--site', '-s', required=True)
+    parser.add_argument('users', nargs='+')
+
+
+@subcommand('groups', add_user_membership_args)
+def user_groups(args: argparse.Namespace):
+    db = get_database(args.config.mongo)
+    console = Console()
+
+    output = {}
+    for username in args.users:
+        output[username] = query_user_groups(db, args.site, username)
+
+    dumped = dumps_yaml(output)
+    console.print(highlight_yaml(dumped))
+
+
 def add_query_group_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site')
     parser.add_argument('--fields', nargs='+', choices=FullGroupRecord.field_names())
@@ -797,35 +937,38 @@ def query_groups(args: argparse.Namespace):
                 record = FullGroupRecord.from_merge(global_record, site_record, args.site)
                 records.append(record)
         else:
-            site_records = []
             query = {'sitename': args.site}
-            projection = build_nested_filter_projection(args, 'groups')
+            projection = build_nested_filter_projection(args, 'groups',
+                                                        record_type=SiteGroupRecord)
             results = db.sites.find(query, projection=projection)[0]['groups']
-            
-            for record in results:
-                site_records.append(SiteGroupRecord.load(record))
+            site_records = {record['_id']: SiteGroupRecord.load(record) for record in results}
 
-            for site_record in site_records:
-                global_record = query_global_group(db, site_record.groupname)
+            query = build_simple_query(args, record_type=GlobalGroupRecord)
+            query['groupname'] = {'$in': list(site_records.keys())}
+            results = db.groups.find(query)
+            global_records = [GlobalGroupRecord.load(group) for group in results]
+
+            for global_record in global_records:
+                site_record = site_records[global_record.groupname]
                 records.append(FullGroupRecord.from_merge(global_record,
-                                                          site_record,
-                                                          args.site))
+                                                         site_record,
+                                                         args.site))
     else:
         if args.all:
             results = db.groups.find()
             for record in results:
                 records.append(GlobalGroupRecord.load(record))
         else:
-            query = build_simple_query(args)
+            query = build_simple_query(args, record_type=GlobalGroupRecord)
             search = db.groups.find(query)
             for record in search:
                 records.append(GlobalGroupRecord.load(record))
 
     if records:
         if args.fields:
-            dumper = records[0].Schema(only=args.fields)# .dumps(records, many=True))
+            dumper = records[0].Schema(only=args.fields)
         else:
-            dumper = records[0].Schema(exclude=['_id'])# .dumps(records, many=True))
+            dumper = records[0].Schema(exclude=['_id'])
 
         output_txt = dumper.dumps(records, many=True)
         output_txt = Syntax(output_txt,
@@ -833,3 +976,29 @@ def query_groups(args: argparse.Namespace):
                             theme='github-dark',
                             background_color='default')
         console.print(output_txt)
+
+
+def add_group_add_member_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--site', '-s', required=True)
+    parser.add_argument('--users', '-u', nargs='+', required=True)
+    parser.add_argument('--groups', '-g', nargs='+', required=True)
+
+
+@subcommand('add-user', add_group_add_member_args)
+def group_add_user(args: argparse.Namespace):
+    db = get_database(args.config.mongo)
+    console = Console()
+
+    for username in args.users:
+        for groupname in args.groups:
+            add_user_to_group(db, args.site, username, groupname)
+
+
+@subcommand('add-sponsor', add_group_add_member_args)
+def group_add_sponsor(args: argparse.Namespace):
+    db = get_database(args.config.mongo)
+    console = Console()
+
+    for username in args.users:
+        for groupname in args.groups:
+            add_sponsor_to_group(db, args.site, username, groupname)

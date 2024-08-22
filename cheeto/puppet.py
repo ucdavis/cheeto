@@ -76,7 +76,7 @@ class SlurmQOSTRES(BaseModel):
 
     @marshmallow.post_load
     def convert_mem(self, in_data, **kwargs):
-        if in_data['mem'] is not None:
+        if 'mem' in in_data and in_data['mem'] is not None:
             in_data['mem'] = f'{size_to_megs(in_data["mem"])}M'
         return in_data
 

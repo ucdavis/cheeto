@@ -59,7 +59,10 @@ USER_STATUSES = {
 
 ACCESS_TYPES = {
     'ssh',
-    'ondemand'
+    'ondemand',
+    'compute-ssh',
+    'root-ssh',
+    'sudo'
 }
 
 
@@ -146,6 +149,14 @@ class _BaseModel:
     def field_names(cls):
         return set(cls.Schema().fields.keys())
 
+    @classmethod
+    def field_deserializer(cls, field_name: str):
+        field = cls.Schema().fields[field_name]
+        if not hasattr(field, 'inner'):
+            return field.deserialize
+        else:
+            return field.inner.deserialize
+
 
 def _describe_schema(fields, level):
     for field in fields:
@@ -165,7 +176,6 @@ def _describe_schema(fields, level):
 
 def describe_schema(schema):
     _describe_schema(schema.fields.values(), 0)
-
 
 
 @dataclass(frozen=True)

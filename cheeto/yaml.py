@@ -19,6 +19,7 @@ import sys
 
 import marshmallow
 from mergedeep import merge, Strategy
+from rich.syntax import Syntax
 
 from ruamel import yaml as ryaml
 from ruamel.yaml.compat import StringIO
@@ -123,3 +124,8 @@ def validate_yaml_forest(yaml_forest: dict,
             yield source_root, puppet_data
 
 
+def highlight_yaml(dumped: str):
+    return Syntax(dumped,
+                  'yaml',
+                  theme='github-dark',
+                  background_color='default')
