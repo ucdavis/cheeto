@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 import re
 import sys
-from typing import List, Mapping, Optional, Set, Tuple, TypedDict, Union
+from typing import List, Mapping, Optional, Set, Tuple, Type, TypedDict, Union
 
 from marshmallow import post_load
 from marshmallow_dataclass import _field_for_union_type, dataclass
@@ -97,35 +97,21 @@ class GlobalUserRecord(MongoModel):
                          puppet_record: PuppetUserRecord,
                          ssh_key: Optional[str] = None):
         
-        tags = {} if puppet_record.tag is None else puppet_record.tag
-
-        if puppet_record.groups is not None and 'hpccfgrp' in puppet_record.groups: #type: ignore
-            usertype = 'admin'
-        elif puppet_record.uid > 3000000000 or 'system-tag' in tags or puppet_record.uid == 0:
-            usertype = 'system'
-        else:
-            usertype = 'user'
-
+        usertype = puppet_record.usertype
         shell = puppet_record.shell if puppet_record.shell else DEFAULT_SHELL
-
-        if shell in DISABLED_SHELLS and usertype in ('admin', 'user'):
-            userstatus = 'inactive'
-        else:
-            userstatus = 'active'
 
         if ssh_key is None and usertype != 'system':
             access = {'ondemand'}
         else:
-            access = {'ssh'}
+            access = {'login-ssh'}
 
-        if puppet_record.tag is not None:
-            tags = puppet_record.tag
-            if 'root-ssh-tag' in tags:
-                access.add('root-ssh')
-            if 'ssh-tag' in tags:
-                access.add('compute-ssh')
-            if 'sudo-tag' in tags:
-                access.add('sudo')
+        tags = {} if puppet_record.tag is None else puppet_record.tag
+        if 'root-ssh-tag' in tags:
+            access.add('root-ssh')
+        if 'ssh-tag' in tags:
+            access.add('compute-ssh')
+        if 'sudo-tag' in tags:
+            access.add('sudo')
 
         if usertype == 'admin':
             access.add('root-ssh')
@@ -141,7 +127,7 @@ class GlobalUserRecord(MongoModel):
             shell = shell,
             home_directory = f'/home/{username}',
             type = usertype,
-            status = userstatus,
+            status = puppet_record.status,
             ssh_key = ssh_key,
             access = access
         ))
@@ -152,6 +138,7 @@ class SiteUserRecord(MongoModel):
     username: KerberosID
     expiry: Optional[Date] = None
     slurm: Optional[SlurmRecord] = None
+    status: Optional[UserStatus] = 'active'
     access: Optional[Set[AccessType]] = field(default_factory=set)
 
     _id: Optional[str] = None
@@ -163,21 +150,23 @@ class SiteUserRecord(MongoModel):
 
     @classmethod
     def from_puppet(cls, username: str, puppet_record: PuppetUserRecord):
-        puppet_record = puppet_record.to_dict()
+        puppet_data = puppet_record.to_dict()
         access = set()
-        if 'tag' in puppet_record:
-            tags = puppet_record['tag']
+        if 'tag' in puppet_data:
+            tags = puppet_data['tag']
             if 'root-ssh-tag' in tags:
                 access.add('root-ssh')
             if 'ssh-tag' in tags:
                 access.add('compute-ssh')
             if 'sudo-tag' in tags:
                 access.add('sudo')
+        
         return cls.Schema().load(dict(
             username = username,
-            expiry = puppet_record.get('expiry', None),
-            slurm = puppet_record.get('slurm', None),
-            access = access
+            expiry = puppet_data.get('expiry', None),
+            slurm = puppet_data.get('slurm', None),
+            access = access,
+            status = puppet_record.status
         ))
 
 
@@ -346,6 +335,32 @@ def add_indices(db: Database):
     groups.create_index('groupname', unique=True)
 
 
+def build_update_record(updates: dict, record_type: Type[MongoModel]):
+    update_op = {}
+    for field, date in updates.items():
+        pass
+
+
+def update_site_document(db: Database,
+                         sitename: str,
+                         parent: str,
+                         document_id: str,
+                         updates: dict,
+                         merge_arrays: bool = True):
+
+    match_op = {'sitename': sitename,
+                parent: {'$elemMatch': {'_id': document_id}}}
+
+    update_op = defaultdict(dict)
+    for field, value in updates.items():
+        if is_listlike(value) and merge_arrays:
+            update_op['$addToSet'][f'{parent}.{field}'] = value
+        else:
+            update_op['$set'][f'{parent}.{field}'] = value
+
+    return db.sites.update_one(match_op, update_op)
+
+
 def add_site(db: Database, site: SiteRecord):
     sites = db['sites']
     sites.update_one({'sitename': site.sitename},
@@ -410,6 +425,7 @@ def update_global_user(db: Database, username: str, updates: dict, comment: str 
         return False
     else:
         return True
+
 
 def upsert_site_user(db: Database, sitename: str, user: SiteUserRecord):
     result = db.sites.update_one({'sitename': sitename, 'users': {'$elemMatch': {'username': user.username}}},

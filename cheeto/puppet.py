@@ -157,6 +157,23 @@ class PuppetUserRecord(BaseModel):
     storage: Optional[PuppetUserStorage] = None
     slurm: Optional[SlurmRecord] = None
 
+    @property
+    def usertype(self):
+        tags = set() if self.tag is None else self.tag
+        if self.groups is not None and 'hpccfgrp' in self.groups: #type: ignore
+            return 'admin'
+        elif self.uid > 3000000000 or 'system-tag' in tags or self.uid == 0:
+            return 'system'
+        else:
+            return 'user'
+
+    @property
+    def status(self):
+        if self.shell in DISABLED_SHELLS and self.usertype in ('admin', 'user'):
+            return 'inactive'
+        else:
+            return 'active'
+
 
 @require_kwargs
 @dataclass(frozen=True)

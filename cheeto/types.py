@@ -58,7 +58,7 @@ USER_STATUSES = {
 }
 
 ACCESS_TYPES = {
-    'ssh',
+    'login-ssh',
     'ondemand',
     'compute-ssh',
     'root-ssh',
