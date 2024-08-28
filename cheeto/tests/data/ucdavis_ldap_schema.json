@@ -2371,7 +2371,7 @@
             "cn=schema"
         ],
         "modifyTimestamp": [
-            "20231018215613.272Z"
+            "20231018215521.713Z"
         ],
         "nameForms": [
             "( 1.3.6.1.1.10.15.1 NAME 'uddiBusinessEntityNameForm' OC uddiBusinessEntity MUST ( uddiBusinessKey ) X-ORIGIN 'RFC 4403' )",

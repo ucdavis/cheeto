@@ -46,8 +46,23 @@ class MongoConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class HippoConfig(BaseModel):
+    api_key: str
+    site_aliases: Mapping[str, str]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class IAMConfig(BaseModel):
+    api_key: str
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class Config(BaseModel):
     ldap: Mapping[str, LDAPConfig]
+    hippo: HippoConfig
+    ucdiam: IAMConfig
     mongo: MongoConfig
 
 

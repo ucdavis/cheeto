@@ -12,7 +12,7 @@ import os
 from typing import List, Mapping, Optional, Set, Tuple, Union
 
 from ldap3 import (AttrDef, Connection, Entry, ObjectDef, Reader, Server, ServerPool,
-                   Writer)
+                   Writer, set_config_parameter, get_config_parameter)
 from ldap3 import ALL_ATTRIBUTES, FIRST, ROUND_ROBIN, SAFE_SYNC, MOCK_SYNC, SYNC
 from ldap3.utils.dn import safe_dn, escape_rdn
 from marshmallow import post_load
@@ -100,6 +100,10 @@ class LDAPManager:
                        auto_bind: bool = True,
                        **connection_kwargs):
 
+        #attrs = get_config_parameter('CLASSES_EXCLUDED_FROM_CHECK')
+        #attrs.extend(['ucdPerson', 'eduPerson'])
+        #set_config_parameter('CLASSES_EXCLUDED_FROM_CHECK', attrs)
+
         if servers is None:
             self.servers = [Server(uri, get_info='ALL') for uri in config.servers] #type: ignore
         else:
@@ -135,10 +139,13 @@ class LDAPManager:
 
     @property
     def user_def(self):
-        return ObjectDef(self.config.user_classes, self.connection)
+        odef = ObjectDef(self.config.user_classes, self.connection, auxiliary_class='ucdPerson')
+        #odef += ['ucdPersonUUID']
+        return odef
 
     def user_reader(self, *ous: str, query: str = '', object_def: Optional[ObjectDef] = None) -> Reader:
         searchbase = self.searchbase(*(('ou', escape_rdn(ou)) for ou in ous))
+        print(searchbase)
         return Reader(self.connection,
                       self.user_def if object_def is None else object_def,
                       searchbase,
@@ -149,7 +156,7 @@ class LDAPManager:
             safe = escape_rdn(uid) #type: ignore
         else:
             safe = '; '.join((escape_rdn(u) for u in uid))
-        return f'userId: {safe}'
+        return f'uid: {safe}'
 
     def verify_user(self, uid: str) -> bool:
         user_def = ObjectDef(self.config.user_classes)
@@ -159,6 +166,7 @@ class LDAPManager:
 
     def _query_user(self, uid: Union[List[str], str]) -> Reader:
         query = self._userid_query(uid)
+        print(query)
         reader = self.user_reader(query=query)
         reader.search()
         return reader

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Optional, Union
 import sys
 
-
+from bson.int64 import Int64
 import marshmallow
 from mergedeep import merge, Strategy
 from rich.syntax import Syntax
@@ -34,16 +34,17 @@ class OrderedDictRepresenter(RoundTripRepresenter):
 
 def str_representer(dumper, data):
     if len(data) > 80:
-        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
+        return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='"')
     else:
         return dumper.represent_scalar('tag:yaml.org,2002:str', data)
 
 
 def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
-    dumper.Representer.add_representer(OrderedDict,
-                                       OrderedDictRepresenter.represent_dict)
+    dumper.width = sys.maxsize
+    dumper.Representer.add_representer(OrderedDict, RoundTripRepresenter.represent_dict)
     dumper.Representer.add_representer(str, str_representer)
+    dumper.Representer.add_representer(Int64, RoundTripRepresenter.represent_int)
     stream = StringIO()
     dumper.dump(obj, stream, **kwargs)
     return stream.getvalue()

@@ -12,7 +12,7 @@ from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import datetime
 from pathlib import Path
-from typing import Annotated, ClassVar, Type, Union
+from typing import Annotated, ClassVar, Type, Union, List
 
 from marshmallow import validate as mv
 from marshmallow import fields as mf
@@ -239,6 +239,15 @@ UserType = Annotated[str, mf.String(validate=mv.OneOf(USER_TYPES))]
 UserStatus = Annotated[str, mf.String(validate=mv.OneOf(USER_STATUSES))]
 
 AccessType = Annotated[str, mf.String(validate=mv.OneOf(ACCESS_TYPES))]
+
+
+def hippo_to_cheeto_access(hippo_access_types: List[str]):
+    access = set()
+    if 'OpenOnDemand' in hippo_access_types: #type: ignore
+        access.add('ondemand')
+    if 'SshKey' in hippo_access_types: #type: ignore
+        access.add('login-ssh')
+    return access
 
 
 SEQUENCE_FIELDS = {
