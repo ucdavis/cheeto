@@ -8,6 +8,7 @@
 # Date   : 19.07.2024
 
 from dataclasses import field
+import logging
 import os
 from typing import List, Mapping, Optional, Set, Tuple, Union
 
@@ -118,6 +119,7 @@ class LDAPManager:
                                      client_strategy=strategy, #type: ignore
                                      auto_bind=auto_bind,
                                      **connection_kwargs)
+        self.logger = logging.getLogger(self.__class__.__name__)
 
     def searchbase(self, *prefixes: Tuple[str, str]) -> str:
         prefix = ','.join((f'{k}={escape_rdn(v)}' for k, v in prefixes))
@@ -139,13 +141,11 @@ class LDAPManager:
 
     @property
     def user_def(self):
-        odef = ObjectDef(self.config.user_classes, self.connection, auxiliary_class='ucdPerson')
-        #odef += ['ucdPersonUUID']
+        odef = ObjectDef(self.config.user_classes, self.connection)
         return odef
 
     def user_reader(self, *ous: str, query: str = '', object_def: Optional[ObjectDef] = None) -> Reader:
         searchbase = self.searchbase(*(('ou', escape_rdn(ou)) for ou in ous))
-        print(searchbase)
         return Reader(self.connection,
                       self.user_def if object_def is None else object_def,
                       searchbase,
@@ -166,7 +166,6 @@ class LDAPManager:
 
     def _query_user(self, uid: Union[List[str], str]) -> Reader:
         query = self._userid_query(uid)
-        print(query)
         reader = self.user_reader(query=query)
         reader.search()
         return reader
@@ -196,18 +195,26 @@ class LDAPManager:
             raise LDAPCommitFailed(f'Failed to add user {user.uid}.')
         return entry
 
+    def delete_user(self, uid: str):
+        dn = f'uid={escape_rdn(uid)},{self.config.user_base}'
+        self.logger.info(f'Delete: {dn}')
+        self.connection.delete(dn)
+
     @property
     def group_def(self):
         return ObjectDef(self.config.group_classes, self.connection)
 
-    def group_reader(self, *ous: str, query: str = '', ) -> Reader:
+    def group_reader(self, *ous: str, query: str = '',  object_def: Optional[ObjectDef] = None) -> Reader:
         searchbase = self.searchbase(*(('ou', escape_rdn(ou)) for ou in ous))
-        return Reader(self.connection, self.group_def, searchbase, query=query)
+        return Reader(self.connection,
+                      self.group_def if object_def is None else object_def,
+                      searchbase,
+                      query=query)
 
-    def _query_group(self, gid: str, *ous: str) -> Reader:
+    def _query_group(self, gid: str, *ous: str, object_def: Optional[ObjectDef] = None) -> Reader:
         safe_gid = escape_rdn(gid)
         query = f'cn: {safe_gid}'
-        reader = self.group_reader(query=query, *ous)
+        reader = self.group_reader(query=query, object_def=object_def, *ous)
         reader.search()
         return reader
 
@@ -217,6 +224,12 @@ class LDAPManager:
             return LDAPGroup.from_entry(cursor.entries[0], self.config.group_attrs) #type: ignore
         else:
             return None
+
+    def verify_group(self, gid: str, *ous: str) -> bool:
+        group_def = ObjectDef(self.config.group_classes)
+        group_def.add_attribute(AttrDef('cn'))
+        cursor = self._query_group(gid, *ous, object_def=group_def)
+        return len(cursor) > 0
 
     def add_user_to_group(self, uid: str, gid: str, *ous: str, verify_uid: bool = True):
         cursor = self._query_group(gid, *ous)
@@ -231,6 +244,22 @@ class LDAPManager:
         status = group_entry.entry_commit_changes()
         if status is False:
             raise LDAPCommitFailed(f'Could not add {uid} to group {gid}.')
+        return group_entry
+
+    def remove_users_from_group(self, uids: List[str], gid: str, *ous: str):
+        cursor = self._query_group(gid, *ous)
+        if len(cursor.entries) > 1:
+            raise LDAPExpectedSingleResult()
+        if not cursor.entries:
+            return None
+        group_entry = cursor.entries[0].entry_writable()
+        try:
+            group_entry.memberUid -= uids
+        except Exception as e:
+            self.logger.error(f'Failed to remove {uids} from {group_entry.dn}: {e}')
+        status = group_entry.entry_commit_changes()
+        if status is False:
+            raise LDAPCommitFailed(f'Could not remove {uids} from {group_entry.dn}.')
         return group_entry
 
     def add_group(self, group: LDAPGroup, cluster: str):
@@ -248,6 +277,7 @@ class LDAPManager:
                 entry[to_key] = value
         status = entry.entry_commit_changes()
         if status is False:
+            self.logger.error(f'Failed to commit changes: {entry}')
             raise LDAPCommitFailed(f'Failed to add group: {dn}.')
         return entry
 

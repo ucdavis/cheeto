@@ -9,6 +9,8 @@
 
 import argparse
 
+from cheeto import hippoapi
+
 from . import __version__
 from . import config
 from . import database
@@ -64,13 +66,20 @@ def main():
     database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
     database.load(database_commands)
-    database.hippoapi_sync(database_commands)
+
+    hippoapi_parser = database_commands.add_parser('hippoapi')
+    hippoapi_parser.set_defaults(func = lambda _: hippoapi_parser.print_help())
+    hippoapi_commands = hippoapi_parser.add_subparsers()
+    database.hippoapi_process(hippoapi_commands)
+    database.hippoapi_events(hippoapi_commands)
+
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())
     user_commands = user_parser.add_subparsers()
     database.query_users(user_commands)
     database.user_set_status(user_commands)
+    database.user_set_type(user_commands)
     database.user_groups(user_commands)
     database.user_show(user_commands)
 

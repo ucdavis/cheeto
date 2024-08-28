@@ -9,26 +9,30 @@
 
 import argparse
 from collections import defaultdict
+from collections.abc import Iterable
 from contextlib import contextmanager
 import logging
 from typing import List, Mapping, Optional, Set, Tuple, Type, TypedDict, Union
 
 from mongoengine import *
+from pymongo.common import CONNECT_TIMEOUT
 
 from cheeto import hippo
 
 from .args import subcommand
-from .config import HippoConfig, MongoConfig
+from .config import HippoConfig, LDAPConfig, MongoConfig, Config
 
 from .hippoapi.api.event_queue import (event_queue_pending_events,
                                        event_queue_update_status)
 from .hippoapi.client import AuthenticatedClient
 from .hippoapi.models import (QueuedEventAccountModel,
                               QueuedEventModel,
-                              QueuedEventDataModel)
+                              QueuedEventDataModel,
+                              QueuedEventUpdateModel)
+from .ldap import LDAPManager, LDAPUser, LDAPGroup
 from .log import Console
 from .puppet import MIN_PIGROUP_GID, PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_args, SiteData
-from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, hippo_to_cheeto_access,  
+from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
                     USER_STATUSES, ACCESS_TYPES)
 from .utils import TIMESTAMP_NOW, __pkg_dir__
@@ -83,9 +87,12 @@ class BaseDocument(Document):
 
 class HippoEvent(BaseDocument):
     hippo_id = LongField(required=True, unique=True)
-    action = StringField(required=True)
+    action = StringField(required=True,
+                         choices=HIPPO_EVENT_ACTIONS)
     n_tries = IntField(required=True, default=0)
-    status = StringField(required=True, default='Pending')
+    status = StringField(required=True,
+                         default='Pending',
+                         choices=HIPPO_EVENT_STATUSES)
 
 
 class GlobalUser(BaseDocument):
@@ -334,6 +341,11 @@ def set_user_status(username: str,
                          sitename=sitename).update_one(set__status=status)
 
 
+def set_user_type(username: str,
+                  usertype: str):
+    GlobalUser.objects(username=username).update_one(set__type=usertype)
+
+
 def create_group_from_sponsor(sponsor_user: SiteUser):
     logger = logging.getLogger(__name__)
 
@@ -391,6 +403,10 @@ def add_group_sudoer(sitename: str, username: str, groupname: str):
 
 def add_site_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None)
+
+
+def add_site_args_req(parser: argparse.ArgumentParser):
+    parser.add_argument('--site', '-s', default=None, required=True)
 
 
 @subcommand('load', add_repo_args, add_site_args)
@@ -693,15 +709,16 @@ def user_show(args: argparse.Namespace):
 
     try:
         if args.site is not None:
-            user = SiteUser.objects.get(username=args.username, sitename=args.site)
+            user = SiteUser.objects.get(username=args.username, sitename=args.site).to_dict()
         else:
-            user = GlobalUser.objects.get(username=args.username)
+            user = GlobalUser.objects.get(username=args.username).to_dict()
+            user['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
         logger.info(f'User {args.username} with scope {scope} does not exist.')
     else:
         console = Console()
-        output = dumps_yaml(user.to_dict())
+        output = dumps_yaml(user)
         console.print(highlight_yaml(output))
 
 
@@ -723,11 +740,27 @@ def user_set_status(args: argparse.Namespace):
         logger.info(f'User {args.username} with scope {scope} does not exist.')
 
 
+def add_user_type_args(parser: argparse.ArgumentParser):
+    parser.add_argument('username')
+    parser.add_argument('type', choices=list(USER_TYPES))
+
+
+@subcommand('set-type', add_user_type_args)
+def user_set_type(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    connect_to_database(args.config.mongo)
+
+    try:
+        set_user_type(args.username, args.type)
+    except GlobalUser.DoesNotExist:
+        logger.info(f'User {args.username} does not exist.')
+
+
 def add_user_membership_args(parser: argparse.ArgumentParser):
     parser.add_argument('users', nargs='+')
 
 
-@subcommand('groups', add_user_membership_args, add_site_args)
+@subcommand('groups', add_user_membership_args, add_site_args_req)
 def user_groups(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
@@ -829,15 +862,16 @@ def show_group(args: argparse.Namespace):
 
     try:
         if args.site is not None:
-            group = SiteGroup.objects.get(groupname=args.groupname, sitename=args.site)
+            group = SiteGroup.objects.get(groupname=args.groupname, sitename=args.site).to_dict()
         else:
-            group = GlobalGroup.objects.get(groupname=args.groupname)
+            group = GlobalGroup.objects.get(groupname=args.groupname).to_dict()
+            group['sites'] = [sg.sitename for sg in SiteGroup.objects(groupname=args.groupname)]
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
         logger.info(f'Group {args.groupname} with scope {scope} does not exist.')
     else:
         console = Console()
-        output = dumps_yaml(group.to_dict())
+        output = dumps_yaml(group)
         console.print(highlight_yaml(output))
 
 
@@ -866,11 +900,49 @@ def group_add_sponsor(args: argparse.Namespace):
             add_group_sponsor(args.site, username, groupname)
 
 
-@subcommand('hippo-sync')
-def hippoapi_sync(args: argparse.Namespace):
+def add_hippoapi_event_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--post-back', '-p', default=False, action='store_true')
+    parser.add_argument('--id', default=None, dest='event_id', type=int)
+    parser.add_argument('--type', choices=list(HIPPO_EVENT_ACTIONS))
+
+
+@subcommand('process', add_hippoapi_event_args)
+def hippoapi_process(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
-    process_hippoapi_events(args.config.hippo)
+    process_hippoapi_events(args.config.hippo,
+                            event_type=args.type,
+                            event_id=args.event_id,
+                            post_back=args.post_back)
+
+
+@subcommand('events', add_hippoapi_event_args)
+def hippoapi_events(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    connect_to_database(args.config.mongo)
+    with hippoapi_client(args.config.hippo) as client:
+        events = event_queue_pending_events.sync(client=client)
+   
+    if not events:
+        return
+
+    for event in filter_events(events, event_type=args.type, event_id=args.event_id):
+        console.print(event)
+
+
+def filter_events(events: List[QueuedEventModel],
+                  event_type: Optional[str] = None,
+                  event_id: Optional[str] = None):
+
+    if event_type is event_id is None:
+        yield from events
+    else:
+        for event in events:
+            if event.id == event_id:
+                yield event
+            elif event.action == event_type:
+                yield event
 
 
 def hippoapi_client(config: HippoConfig):
@@ -882,35 +954,78 @@ def hippoapi_client(config: HippoConfig):
                                prefix='')
 
 
-def process_hippoapi_events(config: HippoConfig):
+def process_hippoapi_events(config: HippoConfig,
+                            post_back: bool = False,
+                            event_type: Optional[str] = None,
+                            event_id: Optional[str] = None):
     logger = logging.getLogger(__name__)
     with hippoapi_client(config) as client:
         events = event_queue_pending_events.sync(client=client)
-        for event in events:
-            logger.info(f'Process hippoapi {event.action} id={event.id}')
-            if event.status != 'Pending':
-                logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
 
-            event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
-                                                                        set_on_insert__action=event.action, 
-                                                                        new=True)
-            try:
-                match event.action:
-                    case 'CreateAccount':
-                        process_createaccount_event(event.data, config)
-                    case 'AddAccountToGroup':
-                        process_addaccounttogroup_event(event.data, config)
-                    case 'UpdateSshKey':
-                        process_updatesshkey_event(event.data, config)
-            except Exception as e:
-                event_record.modify(inc__n_tries=True)
-                logger.error(f'Error processing {event.action} id={event.id}, n_tries={event_record.n_tries}: {e}')
-                if event_record.n_tries >= config.max_tries:
-                    event_record.modify(set__status='Failed')
-                    # DO API UPDATE
-            else:
-                event_record.modify(inc__n_tries=True, set__status='Complete')
-                # DO API UPDATE
+        if events:
+            _process_hippoapi_events(filter_events(events,
+                                                   event_type=event_type,
+                                                   event_id=event_id),
+                                     client,
+                                     config,
+                                     post_back=post_back)
+        else:
+            logger.warning(f'Got no events to process.')
+
+
+def _process_hippoapi_events(events: Iterable[QueuedEventModel],
+                             client: AuthenticatedClient,
+                             config: HippoConfig,
+                             post_back: bool = False):
+    logger = logging.getLogger(__name__)
+
+    for event in events:
+        logger.info(f'Process hippoapi {event.action} id={event.id}')
+        if event.status != 'Pending':
+            logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
+
+        event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
+                                                                    set_on_insert__action=event.action, 
+                                                                    new=True)
+        if post_back and event_record.status == 'Complete':
+            logger.info(f'Event id={event.id} already marked complete, attempting postback')
+            postback_event_complete(event.id, client)
+            continue
+
+        try:
+            match event.action:
+                case 'CreateAccount':
+                    process_createaccount_event(event.data, config)
+                case 'AddAccountToGroup':
+                    process_addaccounttogroup_event(event.data, config)
+                case 'UpdateSshKey':
+                    process_updatesshkey_event(event.data, config)
+        except Exception as e:
+            event_record.modify(inc__n_tries=True)
+            logger.error(f'Error processing event id={event.id}, n_tries={event_record.n_tries}: {e}')
+            if event_record.n_tries >= config.max_tries:
+                logger.warning(f'Event id={event.id} failed {event_record.n_tries}, postback Failed.')
+                event_record.modify(set__status='Failed')
+                postback_event_failed(event.id, client)
+                
+        else:
+            event_record.modify(inc__n_tries=True, set__status='Complete')
+            logger.info(f'Event id={event.id} completed.')
+            if post_back:
+                logger.info(f'Event id={event.id}: attempt postback')
+                postback_event_complete(event.id, client)
+
+
+def postback_event_complete(event_id: int,
+                            client: AuthenticatedClient):
+    update = QueuedEventUpdateModel(status='Complete', id=event_id)
+    response = event_queue_update_status.sync_detailed(client=client, body=update)
+
+
+def postback_event_failed(event_id: int,
+                         client: AuthenticatedClient):
+    update = QueuedEventUpdateModel(status='Failed', id=event_id)
+    response = event_queue_update_status.sync_detailed(client=client, body=update)
 
 
 def process_updatesshkey_event(event: QueuedEventDataModel,
@@ -963,7 +1078,7 @@ def process_createaccount_event(event: QueuedEventDataModel,
         site_user = SiteUser(username=username,
                              sitename=sitename,
                              parent=global_user,
-                             access=hippo_to_cheeto_access(hippo_account.access)) #type: ignore
+                             access=hippo_to_cheeto_access(hippo_account.access_types)) #type: ignore
         site_user.save()
 
     for group in event.groups:
@@ -986,3 +1101,38 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
     if any((group.name == 'sponsors' for group in event.groups)):
         site_user = SiteUser.objects.get(sitename=sitename, username=hippo_account.kerberos)
         create_group_from_sponsor(site_user)
+
+
+
+def ldap_sync(sitename: str, config: Config):
+    connect_to_database(config.mongo)
+    ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
+
+    for user in SiteUser.objects(sitename=sitename):
+        if user.parent.type == 'system' or user.status != 'active' \
+           or user.parent.status != 'active':
+            continue
+        if not ldap_mgr.verify_user(user.username):
+            print(user.to_dict())
+            ldap_user = LDAPUser.Schema().load(dict(uid=user.username,
+                                                    email=user.parent.email,
+                                                    uid_number=user.parent.uid,
+                                                    gid_number=user.parent.gid,
+                                                    fullname=user.parent.fullname,
+                                                    surname=user.parent.fullname.split()[-1]))
+            ldap_mgr.add_user(ldap_user)
+
+            access = (set(user.access) | set(user.parent.access))
+            if 'login-ssh' in access:
+                ldap_mgr.add_user_to_group(user.username, 'cluster-users', sitename)
+            if 'compute-ssh' in access or user.parent.type == 'admin':
+                ldap_mgr.add_user_to_group(user.username, 'compute-ssh-users', sitename)
+
+    for group in SiteGroup.objects(sitename=sitename):
+        if not ldap_mgr.verify_group(group.groupname, sitename):
+            print(group.to_dict())
+            ldap_group = LDAPGroup.load(dict(gid=group.groupname,
+                                             gid_number=group.parent.gid,
+                                             members=group.members))
+            ldap_mgr.add_group(ldap_group, sitename)
+                                             

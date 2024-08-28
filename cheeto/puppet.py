@@ -162,7 +162,8 @@ class PuppetUserRecord(BaseModel):
         tags = set() if self.tag is None else self.tag
         if self.groups is not None and 'hpccfgrp' in self.groups: #type: ignore
             return 'admin'
-        elif self.uid > 3000000000 or 'system-tag' in tags or self.uid == 0:
+        elif self.uid > 3000000000 or 'system-tag' in tags or self.uid == 0 \
+            or self.email in ('donotreply@ucdavis.edu', 'hpc-help@ucdavis.edu'):
             return 'system'
         else:
             return 'user'
