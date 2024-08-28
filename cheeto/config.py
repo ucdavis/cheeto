@@ -48,7 +48,9 @@ class MongoConfig(BaseModel):
 @dataclass(frozen=True)
 class HippoConfig(BaseModel):
     api_key: str
+    base_url: str
     site_aliases: Mapping[str, str]
+    max_tries: int
 
 
 @require_kwargs

@@ -66,6 +66,21 @@ ACCESS_TYPES = {
 }
 
 
+HIPPO_EVENT_ACTIONS = {
+    'CreateAccount',
+    'AddAccountToGroup',
+    'UpdateSshKey'
+}
+
+
+HIPPO_EVENT_STATUSES = {
+    'Pending',
+    'Complete',
+    'Failed',
+    'Canceled'
+}
+
+
 def is_listlike(obj):
     return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
 

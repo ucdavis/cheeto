@@ -28,7 +28,7 @@ def setup(log_file: TextIO,
                                     markup=True))
 
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format='%(message)s',
         #format='%(asctime)s %(levelname)10s [%(filename)s:%(lineno)s - %(funcName)20s()] %(message)s',
         datefmt="[%x %X]",

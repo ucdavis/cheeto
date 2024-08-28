@@ -9,14 +9,20 @@
 
 import argparse
 from collections import defaultdict
+from contextlib import contextmanager
 import logging
 from typing import List, Mapping, Optional, Set, Tuple, Type, TypedDict, Union
 
 from mongoengine import *
 
+from cheeto import hippo
+
 from .args import subcommand
 from .config import HippoConfig, MongoConfig
 
+from .hippoapi.api.event_queue import (event_queue_pending_events,
+                                       event_queue_update_status)
+from .hippoapi.client import AuthenticatedClient
 from .hippoapi.models import (QueuedEventAccountModel,
                               QueuedEventModel,
                               QueuedEventDataModel)
@@ -67,11 +73,19 @@ class BaseDocument(Document):
         'abstract': True
     }
 
-    def to_dict(self):
+    def to_dict(self, strip_id=True):
         data = self.to_mongo(use_db_field=False).to_dict()
-        data.pop('id', None)
-        data.pop('_id', None)
+        if strip_id:
+            data.pop('id', None)
+            data.pop('_id', None)
         return data
+
+
+class HippoEvent(BaseDocument):
+    hippo_id = LongField(required=True, unique=True)
+    action = StringField(required=True)
+    n_tries = IntField(required=True, default=0)
+    status = StringField(required=True, default='Pending')
 
 
 class GlobalUser(BaseDocument):
@@ -140,7 +154,7 @@ class GlobalUser(BaseDocument):
             home_directory = f'/home/{hippo_data.kerberos}',
             type = 'user',
             status = 'active',
-            ssh_ky = [hippo_data.key],
+            ssh_key = [hippo_data.key],
             access = hippo_to_cheeto_access(hippo_data.access_types) #type: ignore
         )
 
@@ -229,15 +243,16 @@ class SiteGroup(BaseDocument):
             #slurm = puppet_record.slurm.to_dict() if puppet_record.slurm is not None else None
         )
 
-    def to_dict(self):
+    def to_dict(self, raw=False):
         data = super().to_dict()
-        data['parent'] = self.parent.to_dict()
-        data.pop('_members')
-        data['members'] = self.members
-        data.pop('_sponsors')
-        data['sponsors'] = self.sponsors
-        data.pop('_sudoers')
-        data['sudoers'] = self.sudoers
+        if not raw:
+            data['parent'] = self.parent.to_dict()
+            data.pop('_members')
+            data['members'] = self.members
+            data.pop('_sponsors')
+            data['sponsors'] = self.sponsors
+            data.pop('_sudoers')
+            data['sudoers'] = self.sudoers
         return data
 
     @property
@@ -258,6 +273,13 @@ class Site(BaseDocument):
     sitename = StringField(required=True, primary_key=True)
     fqdn = StringField(required=True)
 
+
+#@contextmanager
+#def log_db_exceptions():
+#    logger = logging.getLogger(__name__)
+#    try:
+#        yield
+#    except GlobalUser.DoesNotExist
 
 
 def connect_to_database(config: MongoConfig):
@@ -346,14 +368,11 @@ def query_user_sponsor_of(sitename: str, username: str):
         yield group.groupname
 
 
-
 def add_group_member(sitename: str, username: str, groupname: str):
     logging.getLogger(__name__).info(f'Add user {username} to group {groupname} for site {sitename}')
     user = SiteUser.objects.get(sitename=sitename, username=username)
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___members=user)
-
-
 
 
 def add_group_sponsor(sitename: str, username: str, groupname: str):
@@ -387,11 +406,10 @@ def load(args: argparse.Namespace):
     with site_data.lock(args.timeout):
         site_data.load()
 
-        site = Site(sitename=args.sitename,
+        site = Site(sitename=args.site,
                     fqdn=args.site_dir.name)
         logger.info(f'Updating Site: {site}')
         site.save()
-
 
         for group_name, group_record in site_data.iter_groups():
             #logger.info(f'{group_name}, {group_record}')
@@ -399,12 +417,17 @@ def load(args: argparse.Namespace):
             global_record.save()
 
             site_record = SiteGroup.from_puppet(group_name,
-                                                args.sitename,
+                                                args.site,
                                                 global_record,
                                                 group_record)
-            site_record.save()
+            try:
+                site_record.save()
+            except:
+                logger.info(f'{group_name} in {args.site} already exists, skipping.')
+                site_record = SiteGroup.objects.get(groupname=group_name, sitename=args.site)
+   
             #logger.info(f'Added {group_name}: {group_record}')
-        logger.info(f'Added {len(site_data.data.group)} groups.') #type: ignore
+        logger.info(f'Processed {len(site_data.data.group)} groups.') #type: ignore
 
         group_memberships = defaultdict(set)
         group_sudoers = defaultdict(set)
@@ -417,17 +440,24 @@ def load(args: argparse.Namespace):
             global_record.save()
 
             site_record = SiteUser.from_puppet(user_name,
-                                               args.sitename,
+                                               args.site,
                                                global_record,
                                                user_record)
-            site_record.save()
+            try:
+                site_record.save()
+            except:
+                logger.info(f'{user_name} in {args.site} already exists, skipping.')
+                site_record = SiteUser.objects.get(username=user_name, sitename=args.site)
 
             if global_record.type == 'system':
                 global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
                 global_group.save()
                 
-                site_group = SiteGroup(groupname=user_name, sitename=args.sitename, parent=global_group)
-                site_group.save()
+                site_group = SiteGroup(groupname=user_name, sitename=args.site, parent=global_group)
+                try:
+                    site_group.save()
+                except:
+                    logger.info(f'System group {user_name} in {args.site} already exists, skipping.')
 
             if user_record.groups is not None:
                 for group_name in user_record.groups:
@@ -441,19 +471,19 @@ def load(args: argparse.Namespace):
         for groupname, group_record in site_data.iter_groups():
             if group_record.sponsors is not None:
                 for username in group_record.sponsors:
-                    add_group_sponsor(args.sitename, username, groupname)
+                    add_group_sponsor(args.site, username, groupname)
+                    add_group_member(args.site, username, 'sponsors')
 
         logger.info(f'Added {len(site_data.data.user)} users.') #type: ignore
 
         for groupname, members in group_memberships.items():
             try:
-                sitegroup = SiteGroup.objects.get(groupname=groupname, sitename=args.sitename) #type: ignore
-            except:
+                SiteGroup.objects(groupname=groupname,
+                                  sitename=args.site).update_one(add_to_set___members=list(members)) #type: ignore
+            except Exception as e:
+                logger.info(f'{e}')
                 logger.warning(f'Did not find group {groupname}, skip adding {[m.username for m in members]}')
                 continue
-            else:
-                sitegroup._members = list(members)
-                sitegroup.save()
 
         logger.info('Done.')
 
@@ -836,19 +866,68 @@ def group_add_sponsor(args: argparse.Namespace):
             add_group_sponsor(args.site, username, groupname)
 
 
-def process_hippoapi_events(events: List[QueuedEventModel],
-                            config: HippoConfig):
-    logger = logging.getLogger(__name__)
-    for event in events:
-        logger.info(f'Process hippoapi {event.action} id={event.id}')
+@subcommand('hippo-sync')
+def hippoapi_sync(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+    process_hippoapi_events(args.config.hippo)
 
-        match event.action:
-            case 'CreateAccount':
-                process_createaccount_event(event.data, config)
-            case 'AddAccountToGroup':
-                pass
-            case 'UpdateSshKey':
-                pass
+
+def hippoapi_client(config: HippoConfig):
+    return AuthenticatedClient(follow_redirects=True,
+                               base_url=config.base_url,
+                               token=config.api_key,
+                               #httpx_args={"event_hooks": {"request": [log_request]}},
+                               auth_header_name='X-API-Key',
+                               prefix='')
+
+
+def process_hippoapi_events(config: HippoConfig):
+    logger = logging.getLogger(__name__)
+    with hippoapi_client(config) as client:
+        events = event_queue_pending_events.sync(client=client)
+        for event in events:
+            logger.info(f'Process hippoapi {event.action} id={event.id}')
+            if event.status != 'Pending':
+                logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
+
+            event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
+                                                                        set_on_insert__action=event.action, 
+                                                                        new=True)
+            try:
+                match event.action:
+                    case 'CreateAccount':
+                        process_createaccount_event(event.data, config)
+                    case 'AddAccountToGroup':
+                        process_addaccounttogroup_event(event.data, config)
+                    case 'UpdateSshKey':
+                        process_updatesshkey_event(event.data, config)
+            except Exception as e:
+                event_record.modify(inc__n_tries=True)
+                logger.error(f'Error processing {event.action} id={event.id}, n_tries={event_record.n_tries}: {e}')
+                if event_record.n_tries >= config.max_tries:
+                    event_record.modify(set__status='Failed')
+                    # DO API UPDATE
+            else:
+                event_record.modify(inc__n_tries=True, set__status='Complete')
+                # DO API UPDATE
+
+
+def process_updatesshkey_event(event: QueuedEventDataModel,
+                               config: HippoConfig):
+    logger = logging.getLogger(__name__)
+    hippo_account = event.accounts[0]
+    sitename = config.site_aliases.get(event.cluster, event.cluster)
+    username = hippo_account.kerberos
+    ssh_key = hippo_account.key
+
+    logger.info(f'Process UpdateSshKey for user {username}')
+    global_user = GlobalUser.objects.get(username=username)
+    global_user.ssh_key = [ssh_key]
+    global_user.save()
+
+    logger.info(f'Add login-ssh access to user {username}, site {sitename}')
+    add_user_access(username, 'login-ssh', sitename=sitename)
 
 
 def process_createaccount_event(event: QueuedEventDataModel,
@@ -877,7 +956,7 @@ def process_createaccount_event(event: QueuedEventDataModel,
         site_user = SiteUser.objects.get(username=username, sitename=sitename) #type: ignore
         logger.info(f'SiteUser for {username} exists, checking status.')
         if site_user.status != 'active':
-            logger.info(f'SuteUser for {username}, site {sitename} has status {site_user.status}, setting to "active"')
+            logger.info(f'SiteUser for {username}, site {sitename} has status {site_user.status}, setting to "active"')
             set_user_status(username, 'active', 'Activated from HiPPO', sitename=sitename)
     else:
         logger.info(f'SiteUser for user {username}, site {sitename} does not exist, creating.')
@@ -899,6 +978,11 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
     logger = logging.getLogger(__name__)
     hippo_account = event.accounts[0]
     sitename = config.site_aliases.get(event.cluster, event.cluster)
+    logger.info(f'Process AddAccountToGroup for site {sitename}, event: {event}')
 
     for group in event.groups:
         add_group_member(sitename, hippo_account.kerberos, group.name)
+
+    if any((group.name == 'sponsors' for group in event.groups)):
+        site_user = SiteUser.objects.get(sitename=sitename, username=hippo_account.kerberos)
+        create_group_from_sponsor(site_user)
