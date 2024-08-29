@@ -31,7 +31,9 @@ from .hippoapi.models import (QueuedEventAccountModel,
                               QueuedEventUpdateModel)
 from .ldap import LDAPManager, LDAPUser, LDAPGroup
 from .log import Console
-from .puppet import MIN_PIGROUP_GID, PuppetGroupRecord, PuppetUserRecord, SlurmRecord, add_repo_args, SiteData
+from .puppet import (MIN_PIGROUP_GID, MIN_SYSTEM_UID, 
+                     PuppetGroupRecord, PuppetUserRecord, 
+                     add_repo_args, SiteData)
 from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
                     USER_STATUSES, ACCESS_TYPES)
@@ -50,6 +52,11 @@ def POSIXIDField(**kwargs):
                      max_value=UINT_MAX,
                      **kwargs)
 
+def UInt32Field(**kwargs) -> LongField:
+    return LongField(min_value=0,
+                     max_value=UINT_MAX,
+                     **kwargs)
+
 def UserTypeField(**kwargs): 
     return StringField(choices=USER_TYPES,
                        **kwargs)
@@ -58,13 +65,17 @@ def UserStatusField(**kwargs):
     return StringField(choices=USER_STATUSES,
                        **kwargs)
 
-def UserAccessField(**kwargs):
+def UserAccessField(**kwargs) -> StringField:
     return StringField(choices=ACCESS_TYPES,
                        **kwargs)
 
-def ShellField(**kwargs):
+def ShellField(**kwargs) -> StringField:
     return StringField(choices=ENABLED_SHELLS | DISABLED_SHELLS,
                        default=DEFAULT_SHELL,
+                       **kwargs)
+
+def DataQuotaField(**kwargs) -> StringField:
+    return StringField(regex=r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]',
                        **kwargs)
 
 
@@ -227,6 +238,14 @@ class GlobalGroup(BaseDocument):
             gid = puppet_record.gid
         )
 
+
+class SiteSlurmPartition(BaseDocument):
+    partitionname = POSIXNameField(required=True)
+    sitename = StringField(required=True, unique_with='partitionname')
+
+
+class SiteSlurmQOS(BaseDocument):
+    pass
 
 
 class SiteGroup(BaseDocument):
@@ -400,6 +419,29 @@ def add_group_sudoer(sitename: str, username: str, groupname: str):
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___sudoers=user)
 
+def get_next_system_id() -> int:
+    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_SYSTEM_UID, 
+                                                 uid__lt=MIN_SYSTEM_UID+100000000))) \
+        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_SYSTEM_UID, 
+                                                  gid__lt=MIN_SYSTEM_UID+100000000)))
+    return max(ids) + 1
+
+
+def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
+    logger = logging.getLogger(__name__)
+    global_group = GlobalGroup(groupname=groupname,
+                               gid=get_next_system_id())
+    global_group.save()
+    logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
+
+    if sitenames is not None:
+        for sitename in sitenames:
+            site_group = SiteGroup(groupname=groupname,
+                                   sitename=sitename,
+                                   parent=global_group)
+            site_group.save()
+            logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
+
 
 def add_site_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None)
@@ -409,7 +451,11 @@ def add_site_args_req(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None, required=True)
 
 
-@subcommand('load', add_repo_args, add_site_args)
+def add_database_load_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--system-groups', action='store_true', default=False)
+
+
+@subcommand('load', add_repo_args, add_site_args, add_database_load_args)
 def load(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     
@@ -465,7 +511,7 @@ def load(args: argparse.Namespace):
                 logger.info(f'{user_name} in {args.site} already exists, skipping.')
                 site_record = SiteUser.objects.get(username=user_name, sitename=args.site)
 
-            if global_record.type == 'system':
+            if global_record.type == 'system' and args.system_groups:
                 global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
                 global_group.save()
                 
@@ -898,6 +944,24 @@ def group_add_sponsor(args: argparse.Namespace):
     for username in args.users:
         for groupname in args.groups:
             add_group_sponsor(args.site, username, groupname)
+
+
+def add_group_new_system_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--sites', nargs='+', default='all')
+    parser.add_argument('groupname')
+
+
+@subcommand('new-system', add_group_new_system_args)
+def group_new_system(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+
+    if args.sites == 'all':
+        sites = [s.sitename for s in Site.objects()]
+    else:
+        sites = args.sites
+
+    create_system_group(args.groupname, sitenames=sites)
 
 
 def add_hippoapi_event_args(parser: argparse.ArgumentParser):

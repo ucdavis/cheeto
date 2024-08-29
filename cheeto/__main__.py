@@ -90,6 +90,7 @@ def main():
     database.query_groups(group_commands)
     database.group_add_user(group_commands)
     database.group_add_sponsor(group_commands)
+    database.group_new_system(group_commands)
 
     args = parser.parse_args()
     if not hasattr(args, 'log'):
