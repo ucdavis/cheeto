@@ -294,13 +294,26 @@ class SlurmTRES(EmbeddedDocument):
                    mem=puppet_tres.mem)
 
 
-class SlurmQOS(BaseDocument):
-    qosname = StringField(required=True, unique=True)
+class SiteSlurmQOS(BaseDocument):
+    sitename = StringField(required=True)
+    qosname = StringField(required=True, unique_with='sitename')
     group_limits = EmbeddedDocumentField(SlurmTRES)
     user_limits = EmbeddedDocumentField(SlurmTRES)
     job_limits = EmbeddedDocumentField(SlurmTRES)
     priority = IntField()
     flags = ListField(SlurmQOSFlagField)
+
+    @property
+    def group(self):
+        return self.group_limits
+
+    @property
+    def user(self):
+        return self.user_limits
+
+    @property
+    def job(self):
+        return self.job_limits
 
     @no_type_check
     def to_slurm(self) -> List[str]:
@@ -322,8 +335,9 @@ class SlurmQOS(BaseDocument):
         return tokens
 
     @classmethod
-    def from_puppet(cls, qosname: str, puppet_qos: PuppetSlurmQOS):
+    def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS):
         return cls(qosname=qosname,
+                   sitename=sitename,
                    group_limits=SlurmTRES.from_puppet(puppet_qos.group) \
                        if puppet_qos.group is not None else None,
                    user_limits=SlurmTRES.from_puppet(puppet_qos.user) \
@@ -388,7 +402,7 @@ class SiteGroup(BaseDocument):
 
 class SiteSlurmAssociation(BaseDocument):
     sitename = StringField(required=True)
-    qos = ReferenceField(SlurmQOS, required=True, reverse_delete_rule=CASCADE)
+    qos = ReferenceField(SiteSlurmQOS, required=True, reverse_delete_rule=CASCADE)
     partition = ReferenceField(SiteSlurmPartition, required=True, reverse_delete_rule=CASCADE)
     group = ReferenceField(SiteGroup, required=True, reverse_delete_rule=CASCADE)
 
@@ -596,6 +610,7 @@ def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
 
 def create_slurm_partition(partitionname: str, sitename: str):
     logger = logging.getLogger(__name__)
+    logger.info(f'Create partition {partitionname} on site {sitename}.')
     site_exists(sitename, raise_exc=True)
 
     try:
@@ -609,6 +624,7 @@ def create_slurm_partition(partitionname: str, sitename: str):
 
 
 def create_slurm_qos(qosname: str,
+                     sitename: str,
                      group_limits: Optional[SlurmTRES] = None,
                      user_limits: Optional[SlurmTRES] = None,
                      job_limits: Optional[SlurmTRES] = None,
@@ -616,28 +632,31 @@ def create_slurm_qos(qosname: str,
                      flags: Optional[set[str]] = None):
 
     logger = logging.getLogger(__name__)
+    logger.info(f'Create QOS {qosname} on site {sitename}.')
     try:
-        qos = SlurmQOS(qosname=qosname,
-                       group_limits=group_limits,
-                       user_limits=user_limits,
-                       job_limits=job_limits,
-                       priority=priority,
-                       flags=list(flags) if flags is not None else None)
+        qos = SiteSlurmQOS(qosname=qosname,
+                           sitename=sitename,
+                           group_limits=group_limits,
+                           user_limits=user_limits,
+                           job_limits=job_limits,
+                           priority=priority,
+                           flags=list(flags) if flags is not None else None)
         qos.save()
     except Exception as e:
         logger.error(f'Error creating QOS {qosname}: {e.__class__} {e}')
-        qos = SlurmQOS.objects.get(qosname=qosname)
+        qos = SiteSlurmQOS.objects.get(qosname=qosname, sitename=sitename)
 
     return qos
 
 
 def add_slurm_association(sitename: str, partitionname: str, groupname: str, qosname: str):
+    logger = logging.getLogger(__name__)
+    logger.info(f'Create Association ({groupname}, {partitionname}, {qosname}) on site {sitename}.')
     site_exists(sitename, raise_exc=True)
 
     partition = SiteSlurmPartition.objects.get(partitionname=partitionname, sitename=sitename)
     group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
-    qos = SlurmQOS.objects.get(qosname=qosname)
-
+    qos = SiteSlurmQOS.objects.get(qosname=qosname, sitename=sitename)
 
     try:
         assoc = SiteSlurmAssociation.objects.get(sitename=sitename,
@@ -682,7 +701,7 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
         create_slurm_partition(partitionname=partitionname, sitename=sitename)
 
     for qosname, (groupname, partitionname, puppet_qos) in qos_map.items():
-        qos = SlurmQOS.from_puppet(qosname, puppet_qos)
+        qos = SiteSlurmQOS.from_puppet(qosname, sitename, puppet_qos)
         try:
             qos.save()
         except:
@@ -699,16 +718,18 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
                 add_group_slurmer(sitename, username, groupname)
 
 
-def purge_database():
-    import fileinput
+def slurm_qos_state(sitename: str):
+    pass
 
+
+def purge_database():
     prompt = input('WARNING: YOU ARE ABOUT TO PURGE THE DATABASE. TYPE "PURGE" TO CONTINUE: ')
     if prompt != 'PURGE':
         print('Aborting!')
         return
 
     for collection in (GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
-                       SiteSlurmAssociation, SiteSlurmPartition, SlurmQOS):
+                       SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS):
         collection.drop_collection()
 
 
