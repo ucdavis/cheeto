@@ -38,6 +38,14 @@ def check_filter(d: dict, filter_on: dict):
     return False
 
 
+def removed(d: dict, key: Any):
+    try:
+        del d[key]
+    except KeyError:
+        pass
+    return d
+
+
 def get_relative_path(lower_path: Path, upper_path: Path):
     diff = lower_path.relative_to(upper_path)
     levels = len(diff.parents)

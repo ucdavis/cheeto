@@ -10,14 +10,16 @@
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable
-from contextlib import contextmanager
 import logging
-from typing import List, Mapping, Optional, Set, Tuple, Type, TypedDict, Union
+from typing import List, Optional, no_type_check
 
+from marshmallow.fields import String
 from mongoengine import *
-from pymongo.common import CONNECT_TIMEOUT
+from rich import print
 
-from cheeto import hippo
+from .slurm import (build_puppet_association_state,
+                    build_puppet_qos_state,
+                    get_qos_name)
 
 from .args import subcommand
 from .config import HippoConfig, LDAPConfig, MongoConfig, Config
@@ -31,13 +33,23 @@ from .hippoapi.models import (QueuedEventAccountModel,
                               QueuedEventUpdateModel)
 from .ldap import LDAPManager, LDAPUser, LDAPGroup
 from .log import Console
-from .puppet import (MIN_PIGROUP_GID, MIN_SYSTEM_UID, 
-                     PuppetGroupRecord, PuppetUserRecord, 
-                     add_repo_args, SiteData)
-from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, hippo_to_cheeto_access,  
+from .puppet import (MIN_PIGROUP_GID,
+                     MIN_SYSTEM_UID,
+                     PuppetAccountMap, 
+                     PuppetGroupRecord,
+                     PuppetUserRecord,
+                     SlurmQOS as PuppetSlurmQOS,
+                     SlurmQOSTRES as PuppetSlurmQOSTRES,
+                     add_repo_args,
+                     SiteData)
+from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS,
+                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
-                    USER_STATUSES, ACCESS_TYPES)
-from .utils import TIMESTAMP_NOW, __pkg_dir__
+                    USER_STATUSES, ACCESS_TYPES, SlurmQOSValidFlags)
+from .utils import (TIMESTAMP_NOW,
+                    __pkg_dir__,
+                    size_to_megs,
+                    removed)
 from .yaml import dumps as dumps_yaml, highlight_yaml, puppet_merge
 
 
@@ -78,6 +90,9 @@ def DataQuotaField(**kwargs) -> StringField:
     return StringField(regex=r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]',
                        **kwargs)
 
+def SlurmQOSFlagField(**kwargs) -> StringField:
+    return StringField(choices=SlurmQOSValidFlags,
+                       **kwargs)
 
 class InvalidUser(RuntimeError):
     pass
@@ -88,11 +103,15 @@ class BaseDocument(Document):
         'abstract': True
     }
 
-    def to_dict(self, strip_id=True):
+    def to_dict(self, strip_id=True, strip_empty=False):
         data = self.to_mongo(use_db_field=False).to_dict()
         if strip_id:
             data.pop('id', None)
             data.pop('_id', None)
+        if strip_empty:
+            for key in list(data.keys()):
+                if not data[key] and data[key] != 0:
+                    del data[key]
         return data
 
 
@@ -244,8 +263,71 @@ class SiteSlurmPartition(BaseDocument):
     sitename = StringField(required=True, unique_with='partitionname')
 
 
-class SiteSlurmQOS(BaseDocument):
-    pass
+class SlurmTRES(EmbeddedDocument):
+    cpus = UInt32Field()
+    gpus = UInt32Field()
+    mem = DataQuotaField()
+
+    def to_slurm(self) -> str:
+        tokens = [f'cpu={self.cpus if self.cpus is not None else -1}',
+                  f'mem={size_to_megs(self.mem) if self.mem is not None else -1}', #type: ignore
+                  f'gres/gpu={self.gpus if self.gpus is not None else -1}']
+        return ','.join(tokens)
+
+    @staticmethod
+    def negate() -> str:
+        return 'cpu=-1,mem=-1,gres/gpu=-1'
+
+    def clean(self):
+        if self.mem:
+            self.mem = f'{size_to_megs(self.mem)}M' #type: ignore
+
+    @classmethod
+    def from_puppet(cls, puppet_tres: PuppetSlurmQOSTRES):
+        return cls(cpus=puppet_tres.cpus,
+                   gpus=puppet_tres.gpus,
+                   mem=puppet_tres.mem)
+
+
+class SlurmQOS(BaseDocument):
+    qosname = StringField(required=True, unique=True)
+    group_limits = EmbeddedDocumentField(SlurmTRES)
+    user_limits = EmbeddedDocumentField(SlurmTRES)
+    job_limits = EmbeddedDocumentField(SlurmTRES)
+    priority = IntField()
+    flags = ListField(SlurmQOSFlagField)
+
+    @no_type_check
+    def to_slurm(self) -> List[str]:
+        tokens = []
+        grptres = self.group_limits.to_slurm() \
+            if self.group_limits is not None else SlurmTRES.negate() 
+        usertres = self.user_limits.to_slurm() \
+            if self.user_limits is not None else SlurmTRES.negate()
+        jobtres = self.job_limits.to_slurm() \
+            if self.job_limits is not None else SlurmTRES.negate()
+        flags = ','.join(self.flags) if self.flags is not None else '-1'
+        
+        tokens.append(f'GrpTres={grptres}')
+        tokens.append(f'MaxTRESPerUser={usertres}')
+        tokens.append(f'MaxTresPerJob={jobtres}')
+        tokens.append(f'Flags={flags}')
+        tokens.append(f'Priority={self.priority}')
+
+        return tokens
+
+    @classmethod
+    def from_puppet(cls, qosname: str, puppet_qos: PuppetSlurmQOS):
+        return cls(qosname=qosname,
+                   group_limits=SlurmTRES.from_puppet(puppet_qos.group) \
+                       if puppet_qos.group is not None else None,
+                   user_limits=SlurmTRES.from_puppet(puppet_qos.user) \
+                       if puppet_qos.user is not None else None,
+                   job_limits=SlurmTRES.from_puppet(puppet_qos.job) \
+                       if puppet_qos.job is not None else None,
+                   priority = puppet_qos.priority,
+                   flags = list(puppet_qos.flags) \
+                       if puppet_qos.flags is not None else None)
 
 
 class SiteGroup(BaseDocument):
@@ -269,10 +351,10 @@ class SiteGroup(BaseDocument):
             #slurm = puppet_record.slurm.to_dict() if puppet_record.slurm is not None else None
         )
 
-    def to_dict(self, raw=False):
-        data = super().to_dict()
+    def to_dict(self, strip_id=True, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, **kwargs)
         if not raw:
-            data['parent'] = self.parent.to_dict()
+            data['parent'] = self.parent.to_dict() #type: ignore
             data.pop('_members')
             data['members'] = self.members
             data.pop('_sponsors')
@@ -283,16 +365,30 @@ class SiteGroup(BaseDocument):
 
     @property
     def members(self):
-        return [m.username for m in self._members]
+        return [m.username for m in self._members] #type: ignore
 
     @property
     def sponsors(self):
-        return [s.username for s in self._sponsors]
+        return [s.username for s in self._sponsors] #type: ignore
 
     @property
     def sudoers(self):
-        return [s.username for s in self._sudoers]
+        return [s.username for s in self._sudoers] #type: ignore
 
+
+class SiteSlurmAssociation(BaseDocument):
+    sitename = StringField(required=True)
+    qos = ReferenceField(SlurmQOS, required=True, reverse_delete_rule=CASCADE)
+    partition = ReferenceField(SiteSlurmPartition, required=True, reverse_delete_rule=CASCADE)
+    group = ReferenceField(SiteGroup, required=True, reverse_delete_rule=CASCADE)
+
+    def to_dict(self, strip_id=True, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, **kwargs)
+        if not raw:
+            data['qos'] = self.qos.to_dict(strip_id=strip_id)
+            data['partition'] = self.partition.partitionname
+            data['group'] = self.group.groupname
+        return data
 
 
 class Site(BaseDocument):
@@ -315,17 +411,35 @@ def connect_to_database(config: MongoConfig):
             password=config.password)
 
 
-def user_exists(username: str, sitename: Optional[str] = None) -> bool:
+def user_exists(username: str,
+                sitename: Optional[str] = None,
+                raise_exc: bool = False) -> bool:
+    logger = logging.getLogger(__name__)
     try:
         if sitename is None:
             _ = GlobalUser.objects.get(username=username)
         else:
             _ = SiteUser.objects.get(username=username, sitename=sitename)
     except DoesNotExist:
+        logger.error(f'User {username} at site {sitename} does not exist.')
+        if raise_exc:
+            raise
         return False
     else:
         return True
 
+
+def site_exists(sitename: str, raise_exc: bool = False) -> bool:
+    logger = logging.getLogger(__name__)
+    try:
+        Site.objects.get(sitename=sitename) #type: ignore
+    except DoesNotExist:
+        logger.error(f'Site {sitename} does not exist.')
+        if raise_exc:
+            raise
+        return False
+    else:
+        return True
 
 def tag_comment(comment: str):
     return f'[{TIMESTAMP_NOW}]: {comment}'
@@ -392,6 +506,24 @@ def query_user_groups(sitename: str, username: str):
         yield group.groupname
 
 
+def query_user_slurm(sitename: str, username: str):
+    user = SiteUser.objects.get(sitename=sitename, username=username)
+    groups = SiteGroup.objects(_members=user, sitename=sitename)
+
+    associations = SiteSlurmAssociation.objects(sitename=sitename,
+                                                group__in=groups)
+    for assoc in associations:
+        yield assoc
+
+
+def query_user_partitions(sitename: str, username: str):
+    partitions = defaultdict(dict)
+    for assoc in query_user_slurm(sitename, username):
+        qos = removed(assoc.qos.to_dict(strip_empty=True), 'qosname')
+        partitions[assoc.partition.partitionname][assoc.group.groupname] = qos
+    return dict(partitions)
+
+
 def query_user_sponsor_of(sitename: str, username: str):
     user = SiteUser.objects.get(sitename=sitename, username=username)
     qs = SiteGroup.objects(_sponsors=user, sitename=sitename).only('groupname')
@@ -419,6 +551,7 @@ def add_group_sudoer(sitename: str, username: str, groupname: str):
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___sudoers=user)
 
+
 def get_next_system_id() -> int:
     ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_SYSTEM_UID, 
                                                  uid__lt=MIN_SYSTEM_UID+100000000))) \
@@ -441,6 +574,106 @@ def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
                                    parent=global_group)
             site_group.save()
             logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
+
+
+def create_slurm_partition(partitionname: str, sitename: str):
+    logger = logging.getLogger(__name__)
+    site_exists(sitename, raise_exc=True)
+
+    try:
+        partition = SiteSlurmPartition(sitename=sitename, partitionname=partitionname)
+        partition.save()
+    except Exception as e:
+        logger.error(f'Error creating partition {partitionname} on site {sitename}: {e.__class__} {e}')
+        partition = SiteSlurmPartition.objects.get(sitename=sitename, partitionname=partitionname)
+
+    return partition
+
+
+def create_slurm_qos(qosname: str,
+                     group_limits: Optional[SlurmTRES] = None,
+                     user_limits: Optional[SlurmTRES] = None,
+                     job_limits: Optional[SlurmTRES] = None,
+                     priority: int = 0,
+                     flags: Optional[set[str]] = None):
+
+    logger = logging.getLogger(__name__)
+    try:
+        qos = SlurmQOS(qosname=qosname,
+                       group_limits=group_limits,
+                       user_limits=user_limits,
+                       job_limits=job_limits,
+                       priority=priority,
+                       flags=list(flags) if flags is not None else None)
+        qos.save()
+    except Exception as e:
+        logger.error(f'Error creating QOS {qosname}: {e.__class__} {e}')
+        qos = SlurmQOS.objects.get(qosname=qosname)
+
+    return qos
+
+
+def add_slurm_association(sitename: str, partitionname: str, groupname: str, qosname: str):
+    site_exists(sitename, raise_exc=True)
+
+    partition = SiteSlurmPartition.objects.get(partitionname=partitionname, sitename=sitename)
+    group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+    qos = SlurmQOS.objects.get(qosname=qosname)
+
+
+    try:
+        assoc = SiteSlurmAssociation.objects.get(sitename=sitename,
+                                                 qos=qos,
+                                                 group=group,
+                                                 partition=partition)
+    except DoesNotExist:
+        assoc = SiteSlurmAssociation(sitename=sitename,
+                                     qos=qos,
+                                     group=group,
+                                     partition=partition)
+        assoc.save()
+
+    return assoc
+
+
+def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
+    logger = logging.getLogger(__name__)
+
+    partitions = set()
+    qos_map = {}
+    qos_references = []
+    for group_name, group in data.group.items():
+        if group.slurm is None or group.slurm.partitions is None:
+            continue
+        for partition_name, partition in group.slurm.partitions.items():
+            partitions.add(partition_name)
+            # If it is a reference to another QOS, it will be put in the map
+            # where it is defined
+            if type(partition.qos) is str:
+                qos_references.append((group_name, partition_name, partition.qos))
+                continue
+            qos_name = get_qos_name(group_name, partition_name)
+            qos_map[qos_name] = (group_name, partition_name, partition.qos)
+
+    # Validate that all QOS references actually exist
+    for group_name, partition_name, qos_name in qos_references:
+        if qos_name not in qos_map:
+            raise ValueError(f'{group_name} has invalid QoS for {partition_name}: {qos_name}')
+
+    for partitionname in partitions:
+        create_slurm_partition(partitionname=partitionname, sitename=sitename)
+
+    for qosname, (groupname, partitionname, puppet_qos) in qos_map.items():
+        qos = SlurmQOS.from_puppet(qosname, puppet_qos)
+        try:
+            qos.save()
+        except:
+            logger.info(f'QOS {qosname} already exists')
+
+        add_slurm_association(sitename, partitionname, groupname, qosname)
+
+    for groupname, partitionname, qosname in qos_references:
+        add_slurm_association(sitename, partitionname, groupname, qosname)
 
 
 def add_site_args(parser: argparse.ArgumentParser):
@@ -546,6 +779,9 @@ def load(args: argparse.Namespace):
                 logger.info(f'{e}')
                 logger.warning(f'Did not find group {groupname}, skip adding {[m.username for m in members]}')
                 continue
+
+        logger.info(f'Do slurm associations...')
+        slurm_from_puppet(args.site, site_data.data)
 
         logger.info('Done.')
 
@@ -746,6 +982,7 @@ def query_users(args: argparse.Namespace):
 
 def add_show_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('username')
+    parser.add_argument('--verbose', action='store_true', default=False)
 
 
 @subcommand('show', add_show_user_args, add_site_args)
@@ -756,6 +993,11 @@ def user_show(args: argparse.Namespace):
     try:
         if args.site is not None:
             user = SiteUser.objects.get(username=args.username, sitename=args.site).to_dict()
+            if args.verbose:
+                user['slurm'] = list(map(lambda s: removed(s, 'sitename'),
+                                         (s.to_dict() for s in query_user_slurm(args.site, args.username))))
+            else:
+                user['slurm'] = query_user_partitions(args.site, args.username)
         else:
             user = GlobalUser.objects.get(username=args.username).to_dict()
             user['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
