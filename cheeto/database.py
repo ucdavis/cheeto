@@ -18,10 +18,6 @@ from mongoengine import *
 from mongoengine.queryset.visitor import Q as Qv
 from rich import print
 
-from .slurm import (build_puppet_association_state,
-                    build_puppet_qos_state,
-                    get_qos_name)
-
 from .args import subcommand
 from .config import HippoConfig, LDAPConfig, MongoConfig, Config
 
@@ -269,14 +265,14 @@ class SiteSlurmPartition(BaseDocument):
 
 
 class SlurmTRES(EmbeddedDocument):
-    cpus = UInt32Field()
-    gpus = UInt32Field()
+    cpus = IntField(default=-1)
+    gpus = IntField(default=-1)
     mem = DataQuotaField()
 
     def to_slurm(self) -> str:
-        tokens = [f'cpu={self.cpus if self.cpus is not None else -1}',
+        tokens = [f'cpu={self.cpus}',
                   f'mem={size_to_megs(self.mem) if self.mem is not None else -1}', #type: ignore
-                  f'gres/gpu={self.gpus if self.gpus is not None else -1}']
+                  f'gres/gpu={self.gpus}']
         return ','.join(tokens)
 
     @staticmethod
@@ -324,7 +320,7 @@ class SiteSlurmQOS(BaseDocument):
             if self.user_limits is not None else SlurmTRES.negate()
         jobtres = self.job_limits.to_slurm() \
             if self.job_limits is not None else SlurmTRES.negate()
-        flags = ','.join(self.flags) if self.flags is not None else '-1'
+        flags = ','.join(self.flags) if self.flags else '-1'
         
         tokens.append(f'GrpTres={grptres}')
         tokens.append(f'MaxTRESPerUser={usertres}')
@@ -349,6 +345,11 @@ class SiteSlurmQOS(BaseDocument):
                        if puppet_qos.flags is not None else None)
 
 
+class SiteSlurmAccount(EmbeddedDocument):
+    max_user_jobs = IntField(default=-1)
+    max_group_jobs = IntField(default=-1)
+
+
 class SiteGroup(BaseDocument):
     groupname = POSIXNameField(required=True)
     sitename = StringField(required=True, unique_with='groupname')
@@ -357,16 +358,19 @@ class SiteGroup(BaseDocument):
     _sponsors = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _sudoers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _slurmers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
+    slurm = EmbeddedDocumentField(SiteSlurmAccount)
 
     @classmethod
     def from_puppet(cls, groupname: str,
                          sitename: str,
                          parent: GlobalGroup,
                          puppet_record: PuppetGroupRecord):
+        max_jobs = puppet_record.slurm.max_jobs if puppet_record.slurm else -1
         return cls(
             groupname = groupname,
             sitename = sitename,
-            parent = parent
+            parent = parent,
+            slurm = SiteSlurmAccount(max_user_jobs=max_jobs)
         )
 
     def to_dict(self, strip_id=True, raw=False, **kwargs):
@@ -675,6 +679,7 @@ def add_slurm_association(sitename: str, partitionname: str, groupname: str, qos
 
 def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
     logger = logging.getLogger(__name__)
+    from .slurm import get_qos_name
 
     partitions = set()
     qos_map = {}
@@ -718,8 +723,22 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
                 add_group_slurmer(sitename, username, groupname)
 
 
-def slurm_qos_state(sitename: str):
-    pass
+def slurm_qos_state(sitename: str) -> dict[str, SiteSlurmQOS]:
+    return {s.qosname: s for s in SiteSlurmQOS.objects(sitename=sitename)}
+
+
+def slurm_association_state(sitename: str):
+    state = dict(users={}, accounts={})
+
+    for user in SiteUser.objects(sitename=sitename):
+        for assoc in query_user_slurm(sitename, user.username):
+            assoc_tuple = (user.username, assoc.group.groupname, assoc.partition.partitionname)
+            state['users'][assoc_tuple] = assoc.qos.qosname
+
+    state['accounts'] = {g.groupname: (g.slurm.max_user_jobs, g.slurm.max_group_jobs) \
+                         for g in SiteGroup.objects(sitename=sitename)}
+
+    return state
 
 
 def purge_database():
@@ -917,44 +936,6 @@ def build_filter_condition(args: argparse.Namespace,
                            params: List[str]):
     pass
 
-'''
-def build_nested_filter_projection(args: argparse.Namespace,
-                                   nested_name: str,
-                                   record_type: MongoModel):
-
-    logger = logging.getLogger(__name__)
-    
-    conditions = []
-    if args.val_in:
-        for field, values in validate_query_groups(args.val_in, record_type):
-            deserialize = record_type.field_deserializer(field)
-            conditions.append({'$in': [f'$$item.{field}', values]})
-    if args.val_not_in:
-        for field, values in validate_query_groups(args.val_not_in, record_type):
-            conditions.append({'$nin': [f'$$item.{field}', values]})
-    if args.lt:
-        for field, value in validate_query_groups(args.lt, record_type, single=True):
-            conditions.append({'$lt': [f'$$item.{field}', value]})
-    if args.gt:
-        for field, value in validate_query_groups(args.gt, record_type, single=True):
-            conditions.append({'$gt': [f'$$item.{field}', value]})
-
-    if args.contains:
-        for field, values in validate_query_groups(args.contains, record_type):
-            conditions.append({'$ne': [{'$type': f'$$item.{field}'}, 'missing']})
-            conditions.append({'$setIsSubset': [values, f'$$item.{field}']})
-
-    if len(conditions) == 1:
-        condexpr = conditions[0]
-    else:
-        condexpr = {'$and': conditions}
-
-    projection = {nested_name: {'$filter': {'input': f'${nested_name}',
-                                            'as': 'item',
-                                            'cond': condexpr}}}
-    logger.debug(f'Filter projection: \n{projection}')
-    return projection
-'''
 
 def add_query_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--fields', nargs='+')

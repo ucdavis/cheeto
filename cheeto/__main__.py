@@ -8,6 +8,7 @@
 # Date   : 17.02.2023
 
 import argparse
+import sys
 
 from cheeto import hippoapi
 
@@ -98,8 +99,8 @@ def main():
     else:
         with args.log.open('a') as log_fp:
             log.setup(log_fp, quiet=args.quiet)
-            args.func(args)
+            return args.func(args) or 0
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())

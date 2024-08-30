@@ -15,13 +15,15 @@ import os
 from functools import wraps
 from pathlib import Path
 from typing import Callable
-from typing_extensions import Concatenate, ParamSpec
+from typing_extensions import Concatenate, ParamSpec, Union
+
+from .errors import ExitCode
 
 
 P = ParamSpec('P')
 Subparsers = _SubParsersAction
 NS = Namespace
-NamespaceFunc = Callable[Concatenate[NS, P], None]
+NamespaceFunc = Callable[Concatenate[NS, P], Union[int, ExitCode, None]]
 SubCommandFunc = Callable[Concatenate[Subparsers, P], None]
 
 

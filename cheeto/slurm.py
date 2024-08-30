@@ -20,8 +20,14 @@ from rich.console import Console
 from rich.progress import track
 import sh
 
+from cheeto.errors import ExitCode
+
 from .args import subcommand
 from .types import *
+from .database import (connect_to_database,
+                       add_site_args,
+                       slurm_association_state as build_db_association_state,
+                       slurm_qos_state as build_db_qos_state)
 from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
@@ -82,20 +88,21 @@ class SAcctMgr:
         self.show = self.cmd.bake('show', '-P')
 
     def add_account(self, account_name: str,
-                          max_jobs: Optional[int] = None) -> sh.Command:
+                          max_user_jobs: int = -1,
+                          max_group_jobs: int = -1) -> sh.Command:
         args = ['account', account_name]
-        if max_jobs is not None:
-            args.append(f'MaxJobs={max_jobs}')
+        args.append(f'MaxJobs={max_user_jobs}')
+        args.append(f'MaxSubmit={max_group_jobs}')
         return self.add.bake(*args)
 
     def modify_account(self, account_name: str,
-                             max_jobs: int) -> sh.Command:
-        if max_jobs is None:
-            max_jobs = -1
+                             max_user_jobs: int = -1,
+                             max_group_jobs: int = -1) -> sh.Command:
         return self.modify.bake('account',
                                 account_name,
                                 'set',
-                                f'MaxJobs={max_jobs}')
+                                f'MaxJobs={max_user_jobs}',
+                                f'MaxSubmit={max_group_jobs}')
 
     def remove_account(self, account_name: str) -> sh.Command:
         return self.remove.bake('account', account_name)
@@ -251,7 +258,8 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
             # Set partitions empty and fill in as we encounter them.
             filter_row = check_filter(row, filter_accounts_on)
             if not filter_row:
-                extras = int(row['MaxJobs']) if 'MaxJobs' in row else None
+                extras = (int(row['MaxJobs']) if 'MaxJobs' in row else -1,
+                          int(row['MaxSubmit']) if 'MaxSubmit' in row else -1)
                 associations['accounts'][row['Account']] = extras
         elif 'User' in row:
             filter_row = check_filter(row, filter_users_on)
@@ -303,7 +311,8 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
 
     for group_name, group in puppet_mapping.group.items():
         if group.slurm is not None:
-            puppet_associations['accounts'][group_name] = group.slurm.max_jobs
+            max_user_jobs = group.slurm.max_jobs if group.slurm.max_jobs is not None else -1
+            puppet_associations['accounts'][group_name] = (max_user_jobs, -1)
 
     for user_name, user in puppet_mapping.user.items():
 
@@ -386,11 +395,11 @@ def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, li
             deletions.append(account_name)
         else:
             if old_extra != new_accounts[account_name]:
-                updates.append((account_name, new_accounts[account_name]))
+                updates.append((account_name, *new_accounts[account_name]))
 
     for account_name, new_extra in new_accounts.items():
         if account_name not in old_accounts:
-            additions.append((account_name, new_extra))
+            additions.append((account_name, *new_extra))
     
     return deletions, updates, additions
 
@@ -459,8 +468,10 @@ def add_sync_args(parser):
     parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
                         help='Read slurm QoSes from the specified file '
                              'instead of parsing from a `sacctmgr show -P qos` call.')
-    parser.add_argument('yaml_files', nargs='+',
-                        help='Source YAML files.')
+    parser.add_argument('--source', choices=['db', 'yaml'], default='yaml')
+    parser.add_argument('-i', dest='yaml_files', nargs='+',
+                        help='YAML inputs for when source is yaml')
+    parser.add_argument('--dump-commands', type=Path, default=None)
 
 
 @subcommand('show-qos')
@@ -468,23 +479,36 @@ def show_qos(args: argparse.Namespace):
     pass
 
 
-@subcommand('sync', add_sync_args)
+@subcommand('sync', add_sync_args, add_site_args)
 def sync(args: argparse.Namespace):
     console = Console(stderr=True)
 
-    console.rule('Load association data.')
-    console.print('Loading Puppet YAML data...')
-    yaml_forest = parse_yaml_forest(args.yaml_files,
-                                    merge_on=MergeStrategy.ALL)
-    # Generator only yields one item with MergeStrategy.ALL
-    _, puppet_data = next(validate_yaml_forest(yaml_forest,
-                                               PuppetAccountMap,
-                                               strict=True))
+    if args.source == 'yaml':
+        if args.yaml_files is None:
+            console.print('Must provide YAML files (-i) when source is yaml!')
+            return ExitCode.BAD_CMDLINE_ARGS
+        console.rule('Load association data.')
+        console.print('Loading Puppet YAML data...')
+        yaml_forest = parse_yaml_forest(args.yaml_files,
+                                        merge_on=MergeStrategy.ALL)
+        # Generator only yields one item with MergeStrategy.ALL
+        _, puppet_data = next(validate_yaml_forest(yaml_forest,
+                                                   PuppetAccountMap,
+                                                   strict=True))
 
-    console.print('Building Puppet associations table...')
-    puppet_associations = build_puppet_association_state(puppet_data)
-    console.print('Building Puppet QoSes...')
-    puppet_qos_map = build_puppet_qos_state(puppet_data)
+        console.print('Building Puppet associations table...')
+        cheeto_associations = build_puppet_association_state(puppet_data)
+        console.print('Building Puppet QoSes...')
+        cheeto_qos_map = build_puppet_qos_state(puppet_data)
+    else:
+        if args.site is None:
+            console.print('Must provide --site when source is db!')
+            return ExitCode.BAD_CMDLINE_ARGS
+        console.rule('Load association data')
+        console.print('Load from mongodb...')
+        connect_to_database(args.config.mongo)
+        cheeto_associations = build_db_association_state(args.site)
+        cheeto_qos_map = build_db_qos_state(args.site)
 
     sacctmgr = SAcctMgr(sudo=args.sudo)
     console.print('Getting current associations...')
@@ -502,10 +526,12 @@ def sync(args: argparse.Namespace):
     console.print('Generating reconciliation commands...')
     command_queue = generate_commands(slurm_associations,
                                       slurm_qos_map,
-                                      puppet_associations,
-                                      puppet_qos_map,
+                                      cheeto_associations,
+                                      cheeto_qos_map,
                                       sacctmgr=sacctmgr)
 
+    if args.dump_commands and args.dump_commands.exists():
+        args.dump_commands.unlink()
     report = {}
     for command_group_name, slurm_op, command_group in command_queue:
         group_report = {'successes': 0, 'failures': 0, 'commands': len(command_group)}
@@ -527,7 +553,12 @@ def sync(args: argparse.Namespace):
                     group_report['successes'] += 1
         else:
             for command in command_group:
-                console.out(str(command), highlight=False)
+                if args.dump_commands:
+                    with args.dump_commands.open('a') as f:
+                        print(str(command), file=f)
+                else:
+                    console.out(str(command), highlight=False)
+
 
     print(json.dumps(report, indent=2)) 
 
