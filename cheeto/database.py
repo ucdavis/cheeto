@@ -15,6 +15,7 @@ from typing import List, Optional, no_type_check
 
 from marshmallow.fields import String
 from mongoengine import *
+from mongoengine.queryset.visitor import Q as Qv
 from rich import print
 
 from .slurm import (build_puppet_association_state,
@@ -113,6 +114,10 @@ class BaseDocument(Document):
                 if not data[key] and data[key] != 0:
                     del data[key]
         return data
+
+    def clean(self):
+        if 'sitename' in self._fields:
+            site_exists(self.sitename)
 
 
 class HippoEvent(BaseDocument):
@@ -240,9 +245,9 @@ class SiteUser(BaseDocument):
             parent = parent
         )
 
-    def to_dict(self):
-        data = super().to_dict()
-        data['parent'] = self.parent.to_dict()
+    def to_dict(self, **kwargs):
+        data = super().to_dict(**kwargs)
+        data['parent'] = self.parent.to_dict(**kwargs)
         return data
 
 
@@ -337,7 +342,7 @@ class SiteGroup(BaseDocument):
     _members = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _sponsors = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _sudoers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
-    #slurm: Optional[SlurmRecord] = None
+    _slurmers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
 
     @classmethod
     def from_puppet(cls, groupname: str,
@@ -348,7 +353,6 @@ class SiteGroup(BaseDocument):
             groupname = groupname,
             sitename = sitename,
             parent = parent
-            #slurm = puppet_record.slurm.to_dict() if puppet_record.slurm is not None else None
         )
 
     def to_dict(self, strip_id=True, raw=False, **kwargs):
@@ -361,6 +365,8 @@ class SiteGroup(BaseDocument):
             data['sponsors'] = self.sponsors
             data.pop('_sudoers')
             data['sudoers'] = self.sudoers
+            data.pop('_slurmers')
+            data['slurmers'] = self.slurmers
         return data
 
     @property
@@ -374,6 +380,10 @@ class SiteGroup(BaseDocument):
     @property
     def sudoers(self):
         return [s.username for s in self._sudoers] #type: ignore
+
+    @property
+    def slurmers(self):
+        return [s.username for s in self._slurmers] #type: ignore
 
 
 class SiteSlurmAssociation(BaseDocument):
@@ -508,7 +518,8 @@ def query_user_groups(sitename: str, username: str):
 
 def query_user_slurm(sitename: str, username: str):
     user = SiteUser.objects.get(sitename=sitename, username=username)
-    groups = SiteGroup.objects(_members=user, sitename=sitename)
+    groups = SiteGroup.objects(Qv(_members=user, sitename=sitename)
+                               | Qv(_slurmers=user, sitename=sitename))
 
     associations = SiteSlurmAssociation.objects(sitename=sitename,
                                                 group__in=groups)
@@ -550,6 +561,13 @@ def add_group_sudoer(sitename: str, username: str, groupname: str):
     user = SiteUser.objects.get(sitename=sitename, username=username)
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___sudoers=user)
+
+
+def add_group_slurmer(sitename: str, username: str, groupname: str):
+    logging.getLogger(__name__).info(f'Add slurmer {username} to group {groupname} for site {sitename}')
+    user = SiteUser.objects.get(sitename=sitename, username=username)
+    SiteGroup.objects(sitename=sitename,
+                      groupname=groupname).update_one(add_to_set___slurmers=user)
 
 
 def get_next_system_id() -> int:
@@ -674,6 +692,11 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
 
     for groupname, partitionname, qosname in qos_references:
         add_slurm_association(sitename, partitionname, groupname, qosname)
+
+    for username, user in data.user.items():
+        if user.slurm is not None and user.slurm.account is not None:
+            for groupname in user.slurm.account:
+                add_group_slurmer(sitename, username, groupname)
 
 
 def add_site_args(parser: argparse.ArgumentParser):
@@ -992,12 +1015,20 @@ def user_show(args: argparse.Namespace):
 
     try:
         if args.site is not None:
-            user = SiteUser.objects.get(username=args.username, sitename=args.site).to_dict()
+            user = SiteUser.objects.get(username=args.username,
+                                        sitename=args.site).to_dict(strip_empty=True)
+            if not args.verbose:
+                user['parent'] = removed(user['parent'], 'ssh_key')
+                del user['sitename']
+                del user['parent']['gid']
+            user['groups'] = list(query_user_groups(args.site, args.username))
             if args.verbose:
                 user['slurm'] = list(map(lambda s: removed(s, 'sitename'),
                                          (s.to_dict() for s in query_user_slurm(args.site, args.username))))
             else:
                 user['slurm'] = query_user_partitions(args.site, args.username)
+
+
         else:
             user = GlobalUser.objects.get(username=args.username).to_dict()
             user['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
