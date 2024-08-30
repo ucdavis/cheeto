@@ -15,6 +15,7 @@ from typing import List, Optional, no_type_check
 
 from marshmallow.fields import String
 from mongoengine import *
+from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 from rich import print
 
@@ -93,6 +94,20 @@ def SlurmQOSFlagField(**kwargs) -> StringField:
 
 class InvalidUser(RuntimeError):
     pass
+
+
+def handler(event):
+    """Signal decorator to allow use of callback functions as class decorators."""
+
+    def decorator(fn):
+        def apply(cls):
+            event.connect(fn, sender=cls)
+            return cls
+
+        fn.apply = apply
+        return fn
+
+    return decorator
 
 
 class BaseDocument(Document):
@@ -197,6 +212,21 @@ class GlobalUser(BaseDocument):
         )
 
 
+@handler(signals.post_save)
+def user_apply_globals(sender, document, **kwargs):
+    logger = logging.getLogger(__name__)
+    site = Site.objects().get(sitename=document.sitename)
+    if site.global_groups:
+        for site_group in site.global_groups:
+            logger.info(f'Splat {site.sitename}: Add member {document.username} to group {site_group.groupname}')
+            site_group.update(add_to_set___members=document)
+    if site.global_slurmers:
+        for site_group in site.global_slurmers:
+            logger.info(f'Splat {site.sitename}: Add slurmer {document.username} to group {site_group.groupname}')
+            site_group.update(add_to_set___slurmers=document)
+
+
+@user_apply_globals.apply #type: ignore
 class SiteUser(BaseDocument):
     username = POSIXNameField(required=True)
     sitename = StringField(required=True, unique_with='username')
@@ -419,17 +449,27 @@ class SiteSlurmAssociation(BaseDocument):
         return data
 
 
+@handler(signals.post_save)
+def site_apply_globals(sender, document, **kwargs):
+    logger = logging.getLogger(__name__)
+    logger.info(f'Site {document.sitename} modified, syncing globals')
+    if document.global_groups or document.global_slurmers:
+        site_users = SiteUser.objects(sitename=document.sitename)
+        logger.info(f'Update globals with {len(site_users)} users')
+        for site_group in document.global_groups:
+            for site_user in site_users:
+                site_group.update(add_to_set___groups=site_user)
+        for site_group in document.global_slurmers:
+            for site_user in site_users:
+                site_group.update(add_to_set___slurmers=site_user)
+
+
+@site_apply_globals.apply #type: ignore
 class Site(BaseDocument):
     sitename = StringField(required=True, primary_key=True)
     fqdn = StringField(required=True)
-
-
-#@contextmanager
-#def log_db_exceptions():
-#    logger = logging.getLogger(__name__)
-#    try:
-#        yield
-#    except GlobalUser.DoesNotExist
+    global_groups = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
+    global_slurmers = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
 
 
 def connect_to_database(config: MongoConfig):
@@ -586,6 +626,18 @@ def add_group_slurmer(sitename: str, username: str, groupname: str):
     user = SiteUser.objects.get(sitename=sitename, username=username)
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___slurmers=user)
+
+
+def add_site_slurmer(sitename: str, groupname: str):
+    group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+    Site.objects(sitename=sitename).update_one(add_to_set__global_slurmers=group)
+    Site.objects.get(sitename=sitename).save()
+
+
+def add_site_group(sitename: str, groupname: str):
+    group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+    Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group)
+    Site.objects.get(sitename=sitename).save()
 
 
 def get_next_system_id() -> int:
@@ -747,13 +799,29 @@ def purge_database():
         print('Aborting!')
         return
 
-    for collection in (GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
+    for collection in (Site, GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
                        SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS):
         collection.drop_collection()
 
 
 def add_site_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None)
+
+
+@subcommand('add', add_site_args)
+def site_add(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+
+
+@subcommand('add-global-slurm',
+            add_site_args,
+            lambda parser: parser.add_argument('groups', nargs='+')) #type: ignore
+def site_add_global_slurm(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    connect_to_database(args.config.mongo)
+
+    for group in args.groups:
+        add_site_slurmer(args.site, group)
 
 
 def add_site_args_req(parser: argparse.ArgumentParser):

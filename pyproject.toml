@@ -44,6 +44,7 @@ mongoengine = "^0.28.2"
 attrs = "^24.2.0"
 httpx = "^0.27.0"
 python-dateutil = "^2.9.0.post0"
+blinker = "^1.8.2"
 
 [build-system]
 requires = ["poetry-core"]
