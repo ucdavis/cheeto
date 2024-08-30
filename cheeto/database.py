@@ -699,6 +699,19 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
                 add_group_slurmer(sitename, username, groupname)
 
 
+def purge_database():
+    import fileinput
+
+    prompt = input('WARNING: YOU ARE ABOUT TO PURGE THE DATABASE. TYPE "PURGE" TO CONTINUE: ')
+    if prompt != 'PURGE':
+        print('Aborting!')
+        return
+
+    for collection in (GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
+                       SiteSlurmAssociation, SiteSlurmPartition, SlurmQOS):
+        collection.drop_collection()
+
+
 def add_site_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None)
 
