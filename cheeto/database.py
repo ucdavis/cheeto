@@ -11,7 +11,7 @@ import argparse
 from collections import defaultdict
 from collections.abc import Iterable
 import logging
-from typing import List, Optional, no_type_check
+from typing import List, Optional, no_type_check, Union
 
 from marshmallow.fields import String
 from mongoengine import *
@@ -212,6 +212,9 @@ class GlobalUser(BaseDocument):
         )
 
 
+global_user_t = Union[GlobalUser, str]
+
+
 @handler(signals.post_save)
 def user_apply_globals(sender, document, **kwargs):
     logger = logging.getLogger(__name__)
@@ -245,6 +248,53 @@ class SiteUser(BaseDocument):
         ]
     }
 
+    @property
+    def email(self):
+        return self.parent.email
+
+    @property
+    def uid(self):
+        return self.parent.uid
+
+    @property
+    def gid(self):
+        return self.parent.gid
+
+    @property
+    def fullname(self):
+        return self.parent.fullname
+
+    @property
+    def shell(self):
+        return self.parent.shell
+
+    @property
+    def home_directory(self):
+        return self.parent.home_directory
+
+    @property
+    def type(self):
+        return self.parent.type
+
+    @property
+    def status(self):
+        if self.parent.status != 'active':
+            return self.parent.status
+        else:
+            return self.status
+
+    @property
+    def ssh_key(self):
+        return self.parent.ssh_key
+
+    @property
+    def access(self):
+        return set(self.access) | set(self.parent.access)
+
+    @property
+    def comments(self):
+        return self.parent.comments
+
     @classmethod
     def from_puppet(cls, username: str,
                          sitename: str,
@@ -276,6 +326,8 @@ class SiteUser(BaseDocument):
         data['parent'] = self.parent.to_dict(**kwargs)
         return data
 
+site_user_t = Union[SiteUser, str]
+
 
 class GlobalGroup(BaseDocument):
     groupname = POSIXNameField(required=True, primary_key=True)
@@ -287,6 +339,9 @@ class GlobalGroup(BaseDocument):
             groupname = groupname,
             gid = puppet_record.gid
         )
+
+
+global_group_t = Union[GlobalGroup, str]
 
 
 class SiteSlurmPartition(BaseDocument):
@@ -390,6 +445,26 @@ class SiteGroup(BaseDocument):
     _slurmers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     slurm = EmbeddedDocumentField(SiteSlurmAccount)
 
+    @property
+    def gid(self):
+        return self.parent.gid
+
+    @property
+    def members(self):
+        return [m.username for m in self._members] #type: ignore
+
+    @property
+    def sponsors(self):
+        return [s.username for s in self._sponsors] #type: ignore
+
+    @property
+    def sudoers(self):
+        return [s.username for s in self._sudoers] #type: ignore
+
+    @property
+    def slurmers(self):
+        return [s.username for s in self._slurmers] #type: ignore
+
     @classmethod
     def from_puppet(cls, groupname: str,
                          sitename: str,
@@ -417,21 +492,8 @@ class SiteGroup(BaseDocument):
             data['slurmers'] = self.slurmers
         return data
 
-    @property
-    def members(self):
-        return [m.username for m in self._members] #type: ignore
 
-    @property
-    def sponsors(self):
-        return [s.username for s in self._sponsors] #type: ignore
-
-    @property
-    def sudoers(self):
-        return [s.username for s in self._sudoers] #type: ignore
-
-    @property
-    def slurmers(self):
-        return [s.username for s in self._slurmers] #type: ignore
+site_group_t = Union[SiteGroup, str]
 
 
 class SiteSlurmAssociation(BaseDocument):
@@ -471,6 +533,8 @@ class Site(BaseDocument):
     global_groups = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
     global_slurmers = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
 
+
+site_t = Union[Site, str]
 
 def connect_to_database(config: MongoConfig):
     connect(config.database,
@@ -567,15 +631,25 @@ def create_group_from_sponsor(sponsor_user: SiteUser):
     logger.info(f'Created SiteGroup from sponsor {sponsor_user.username}: {site_group.to_dict()}')
 
 
-def query_user_groups(sitename: str, username: str):
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def query_user_groups(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
     qs = SiteGroup.objects(_members=user, sitename=sitename).only('groupname')
     for group in qs:
         yield group.groupname
 
 
-def query_user_slurm(sitename: str, username: str):
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def query_user_slurmership(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    qs = SiteGroup.objects(_slurmers=user, sitename=sitename).only('groupname')
+    for group in qs:
+        yield group.groupname
+
+
+def query_user_slurm(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
     groups = SiteGroup.objects(Qv(_members=user, sitename=sitename)
                                | Qv(_slurmers=user, sitename=sitename))
 
@@ -585,57 +659,65 @@ def query_user_slurm(sitename: str, username: str):
         yield assoc
 
 
-def query_user_partitions(sitename: str, username: str):
+def query_user_partitions(sitename: str, user: site_user_t):
     partitions = defaultdict(dict)
-    for assoc in query_user_slurm(sitename, username):
+    for assoc in query_user_slurm(sitename, user):
         qos = removed(assoc.qos.to_dict(strip_empty=True), 'qosname')
         partitions[assoc.partition.partitionname][assoc.group.groupname] = qos
     return dict(partitions)
 
 
-def query_user_sponsor_of(sitename: str, username: str):
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def query_user_sponsor_of(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
     qs = SiteGroup.objects(_sponsors=user, sitename=sitename).only('groupname')
     for group in qs:
         yield group.groupname
 
 
-def add_group_member(sitename: str, username: str, groupname: str):
-    logging.getLogger(__name__).info(f'Add user {username} to group {groupname} for site {sitename}')
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def add_group_member(sitename: str, user: site_user_t, groupname: str):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    logging.getLogger(__name__).info(f'Add user {user.username} to group {groupname} for site {sitename}')
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___members=user)
 
 
-def add_group_sponsor(sitename: str, username: str, groupname: str):
-    logging.getLogger(__name__).info(f'Add sponsor {username} to group {groupname} for site {sitename}')
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def add_group_sponsor(sitename: str, user: site_user_t, groupname: str):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    logging.getLogger(__name__).info(f'Add sponsor {user.username} to group {groupname} for site {sitename}')
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___sponsors=user)
 
 
-def add_group_sudoer(sitename: str, username: str, groupname: str):
-    logging.getLogger(__name__).info(f'Add sudoer {username} to group {groupname} for site {sitename}')
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def add_group_sudoer(sitename: str, user: site_user_t, groupname: str):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    logging.getLogger(__name__).info(f'Add sudoer {user.username} to group {groupname} for site {sitename}')
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___sudoers=user)
 
 
-def add_group_slurmer(sitename: str, username: str, groupname: str):
-    logging.getLogger(__name__).info(f'Add slurmer {username} to group {groupname} for site {sitename}')
-    user = SiteUser.objects.get(sitename=sitename, username=username)
+def add_group_slurmer(sitename: str, user: site_user_t, groupname: str):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    logging.getLogger(__name__).info(f'Add slurmer {user.username} to group {groupname} for site {sitename}')
+
     SiteGroup.objects(sitename=sitename,
                       groupname=groupname).update_one(add_to_set___slurmers=user)
 
 
-def add_site_slurmer(sitename: str, groupname: str):
-    group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+def add_site_slurmer(sitename: str, group: site_group_t):
+    if type(group) is str:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=group)
     Site.objects(sitename=sitename).update_one(add_to_set__global_slurmers=group)
     Site.objects.get(sitename=sitename).save()
 
 
-def add_site_group(sitename: str, groupname: str):
-    group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+def add_site_group(sitename: str, group: site_group_t):
+    if type(group) is str:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=group)
     Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group)
     Site.objects.get(sitename=sitename).save()
 
@@ -792,6 +874,41 @@ def slurm_association_state(sitename: str):
 
     return state
 
+
+def site_to_puppet(sitename: str):
+    users = {}
+    for user in SiteUser.objects(sitename=sitename):
+        memberships = query_user_groups(sitename, user)
+        slurmerships = query_user_slurmership(sitename, user)
+        
+        tags = set()
+        if 'compute-ssh' in user.access:
+            tags.add('ssh-tag')
+        if 'root-ssh' in user.access:
+            tags.add('root-ssh-tag')
+        if 'sudo' in user.access:
+            tags.add('sudo-tag')
+        if user.type == 'system':
+            tags.add('system-tag')
+       
+        pu = PuppetUserRecord.load(dict(fullname=user.fullname,
+                                        email=user.email,
+                                        uid=user.uid,
+                                        gid=user.gid,
+                                        groups=memberships,
+                                        shell=user.shell,
+                                        tag=tags,
+                                        home=user.home_directory,
+                                        expiry=user.expiry,
+                                        slurm=slurmerships))
+        users[user.username] = pu
+
+    groups = {}
+    for group in SiteGroup.objects(sitename=sitename):
+        pg = PuppetGroupRecord.load(dict(gid=group.gid,
+                                         sponsors=group.sponsors))
+        groups[group.groupname] = pg
+        
 
 def purge_database():
     prompt = input('WARNING: YOU ARE ABOUT TO PURGE THE DATABASE. TYPE "PURGE" TO CONTINUE: ')
