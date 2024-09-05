@@ -11,8 +11,10 @@ from collections import OrderedDict
 from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import datetime
+import logging
 from pathlib import Path
-from typing import Annotated, ClassVar, Type, Union, List
+from typing import Annotated, ClassVar, Type, Union, List, Self, Generator, Optional
+import sys
 
 from marshmallow import validate as mv
 from marshmallow import fields as mf
@@ -23,6 +25,7 @@ import marshmallow_dataclass.collection_field
 from marshmallow_dataclass.union_field import Union as mdUnion
 
 from . import yaml
+from .errors import ExitCode
 from .yaml import parse_yaml, puppet_merge
 
 
@@ -88,6 +91,7 @@ def is_listlike(obj):
 class _BaseModel:
 
     SKIP_VALUES = [None, {}, []]
+    Schema: ClassVar[Type[_Schema]] = _Schema # For the type checker
 
     def items(self):
         return dataclasses.asdict(self).items() #type: ignore
@@ -136,8 +140,8 @@ class _BaseModel:
         render_module = yaml
 
     @classmethod
-    def load(cls, data: dict):
-        return cls.Schema().load(data)
+    def load(cls, data: dict, **kwargs) -> Self:
+        return cls.Schema().load(data, **kwargs)
 
     def dumps(self):
         return type(self).Schema().dumps(self) #type: ignore
@@ -197,6 +201,28 @@ def describe_schema(schema):
 class BaseModel(_BaseModel):
 
     Schema: ClassVar[Type[_Schema]] = _Schema # For the type checker
+
+
+def validate_yaml_forest(yaml_forest: dict,
+                         MapSchema: Type[BaseModel], 
+                         strict: Optional[bool] = False,
+                         partial: Optional[bool] = False) -> Generator[tuple[str, BaseModel], None, None]: 
+
+    logger = logging.getLogger(__name__)
+
+    for source_root, yaml_obj in yaml_forest.items():
+
+        try:
+            puppet_data = MapSchema.load(yaml_obj,
+                                         partial=partial)
+        except marshmallow.exceptions.ValidationError as e: #type: ignore
+            logger.error(f'[red]ValidationError: {source_root}[/]')
+            logger.error(e.messages)
+            if strict:
+                sys.exit(ExitCode.VALIDATION_ERROR)
+            continue
+        else:
+            yield source_root, puppet_data
 
 
 KerberosID = Annotated[str, mf.String(validate=mv.Regexp(r'[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)'))]

@@ -11,9 +11,9 @@ import argparse
 from collections import defaultdict
 from collections.abc import Iterable
 import logging
-from typing import List, Optional, no_type_check, Union
+from pathlib import Path
+from typing import List, Optional, no_type_check, Self, Union
 
-from marshmallow.fields import String
 from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
@@ -34,7 +34,7 @@ from .log import Console
 from .puppet import (MIN_PIGROUP_GID,
                      MIN_SYSTEM_UID,
                      PuppetAccountMap, 
-                     PuppetGroupRecord,
+                     PuppetGroupRecord, PuppetGroupStorage,
                      PuppetUserRecord,
                      SlurmQOS as PuppetSlurmQOS,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
@@ -48,7 +48,9 @@ from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
                     size_to_megs,
                     removed)
-from .yaml import dumps as dumps_yaml, highlight_yaml, puppet_merge
+from .yaml import dumps as dumps_yaml
+from .yaml import (highlight_yaml,
+                   parse_yaml, puppet_merge)
 
 
 def POSIXNameField(**kwargs):
@@ -127,8 +129,8 @@ class BaseDocument(Document):
         return data
 
     def clean(self):
-        if 'sitename' in self._fields:
-            site_exists(self.sitename)
+        if 'sitename' in self._fields: #type: ignore
+            site_exists(self.sitename) #type: ignore
 
 
 class HippoEvent(BaseDocument):
@@ -151,6 +153,7 @@ class GlobalUser(BaseDocument):
     home_directory = StringField(required=True)
     type = UserTypeField(required=True)
     status = UserStatusField(required=True, default='active')
+    password = StringField()
     ssh_key = ListField(StringField())
     access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
     comments = ListField(StringField())
@@ -158,7 +161,7 @@ class GlobalUser(BaseDocument):
     @classmethod
     def from_puppet(cls, username: str, 
                          puppet_record: PuppetUserRecord,
-                         ssh_key: Optional[str] = None):
+                         ssh_key: Optional[str] = None) -> Self:
         
         usertype = puppet_record.usertype
         shell = puppet_record.shell if puppet_record.shell else DEFAULT_SHELL
@@ -192,11 +195,12 @@ class GlobalUser(BaseDocument):
             type = usertype,
             status = puppet_record.status,
             ssh_key = [] if ssh_key is None else ssh_key.split('\n'),
-            access = access
+            access = access,
+            password = puppet_record.password
         )
 
     @classmethod
-    def from_hippo(cls, hippo_data: QueuedEventAccountModel):
+    def from_hippo(cls, hippo_data: QueuedEventAccountModel) -> Self:
         return cls(
             username = hippo_data.kerberos,
             email = hippo_data.email,
@@ -235,9 +239,9 @@ class SiteUser(BaseDocument):
     sitename = StringField(required=True, unique_with='username')
     parent = ReferenceField(GlobalUser, required=True, reverse_delete_rule=CASCADE)
     expiry = DateField()
-    status = UserStatusField(default='active')
+    _status = UserStatusField(default='active')
     #slurm: Optional[SlurmRecord] = None
-    access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
+    _access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
 
     meta = {
         'indexes': [
@@ -281,7 +285,7 @@ class SiteUser(BaseDocument):
         if self.parent.status != 'active':
             return self.parent.status
         else:
-            return self.status
+            return self._status
 
     @property
     def ssh_key(self):
@@ -289,7 +293,7 @@ class SiteUser(BaseDocument):
 
     @property
     def access(self):
-        return set(self.access) | set(self.parent.access)
+        return set(self._access) | set(self.parent.access)
 
     @property
     def comments(self):
@@ -299,7 +303,7 @@ class SiteUser(BaseDocument):
     def from_puppet(cls, username: str,
                          sitename: str,
                          parent: GlobalUser,
-                         puppet_record: PuppetUserRecord):
+                         puppet_record: PuppetUserRecord) -> Self:
 
         puppet_data = puppet_record.to_dict()
         access = set()
@@ -316,14 +320,14 @@ class SiteUser(BaseDocument):
             username = username,
             sitename = sitename,
             expiry = puppet_data.get('expiry', None),
-            access = access,
-            status = puppet_record.status,
+            _access = access,
+            _status = puppet_record.status,
             parent = parent
         )
 
-    def to_dict(self, **kwargs):
+    def to_dict(self, strip_id=True, strip_empty=False, **kwargs):
         data = super().to_dict(**kwargs)
-        data['parent'] = self.parent.to_dict(**kwargs)
+        data['parent'] = self.parent.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs) #type: ignore
         return data
 
 site_user_t = Union[SiteUser, str]
@@ -334,7 +338,7 @@ class GlobalGroup(BaseDocument):
     gid = POSIXIDField(required=True)
     
     @classmethod
-    def from_puppet(cls, groupname: str, puppet_record: PuppetGroupRecord):
+    def from_puppet(cls, groupname: str, puppet_record: PuppetGroupRecord) -> Self:
         return cls(
             groupname = groupname,
             gid = puppet_record.gid
@@ -369,7 +373,7 @@ class SlurmTRES(EmbeddedDocument):
             self.mem = f'{size_to_megs(self.mem)}M' #type: ignore
 
     @classmethod
-    def from_puppet(cls, puppet_tres: PuppetSlurmQOSTRES):
+    def from_puppet(cls, puppet_tres: PuppetSlurmQOSTRES) -> Self:
         return cls(cpus=puppet_tres.cpus,
                    gpus=puppet_tres.gpus,
                    mem=puppet_tres.mem)
@@ -416,7 +420,7 @@ class SiteSlurmQOS(BaseDocument):
         return tokens
 
     @classmethod
-    def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS):
+    def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS) -> Self:
         return cls(qosname=qosname,
                    sitename=sitename,
                    group_limits=SlurmTRES.from_puppet(puppet_qos.group) \
@@ -469,7 +473,7 @@ class SiteGroup(BaseDocument):
     def from_puppet(cls, groupname: str,
                          sitename: str,
                          parent: GlobalGroup,
-                         puppet_record: PuppetGroupRecord):
+                         puppet_record: PuppetGroupRecord) -> Self:
         max_jobs = puppet_record.slurm.max_jobs if puppet_record.slurm else -1
         return cls(
             groupname = groupname,
@@ -478,8 +482,8 @@ class SiteGroup(BaseDocument):
             slurm = SiteSlurmAccount(max_user_jobs=max_jobs)
         )
 
-    def to_dict(self, strip_id=True, raw=False, **kwargs):
-        data = super().to_dict(strip_id=strip_id, **kwargs)
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
         if not raw:
             data['parent'] = self.parent.to_dict() #type: ignore
             data.pop('_members')
@@ -502,12 +506,86 @@ class SiteSlurmAssociation(BaseDocument):
     partition = ReferenceField(SiteSlurmPartition, required=True, reverse_delete_rule=CASCADE)
     group = ReferenceField(SiteGroup, required=True, reverse_delete_rule=CASCADE)
 
-    def to_dict(self, strip_id=True, raw=False, **kwargs):
-        data = super().to_dict(strip_id=strip_id, **kwargs)
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
         if not raw:
-            data['qos'] = self.qos.to_dict(strip_id=strip_id)
-            data['partition'] = self.partition.partitionname
-            data['group'] = self.group.groupname
+            data['qos'] = self.qos.to_dict(strip_id=strip_id) #type: ignore
+            data['partition'] = self.partition.partitionname #type: ignore
+            data['group'] = self.group.groupname #type: ignore
+        return data
+
+
+class StorageMountSource(BaseDocument):
+    sitename = StringField(required=True)
+    host  = StringField(required=True)
+    owner = ReferenceField(GlobalUser, required=True, reverse_delete_rule=CASCADE)
+    group = ReferenceField(GlobalGroup, required=True, reverse_delete_rule=CASCADE)
+
+    meta = {'allow_inheritance': True}
+
+
+class NFSSourceCollection(BaseDocument):
+    sitename = StringField(required=True)
+    name = StringField(required=True, unique_with='sitename')
+    host = StringField()
+    prefix = StringField()
+    export_options = StringField()
+    export_ranges = ListField(StringField())
+
+    meta = {'allow_inheritance': True}
+
+
+class ZFSSourceCollection(NFSSourceCollection):
+    quota = DataQuotaField()
+
+
+class NFSMountSource(StorageMountSource):
+    host_path = StringField(required=True, unique_with=['sitename', 'host'])
+    export_options = StringField()
+    export_ranges = ListField(StringField())
+    collection = GenericReferenceField(choices=[NFSSourceCollection,
+                                                ZFSSourceCollection])
+
+
+class ZFSMountSource(NFSMountSource):
+    quota = DataQuotaField()
+
+
+class StorageMount(BaseDocument):
+    sitename = StringField(required=True)
+    meta = {'allow_inheritance': True}
+
+
+class AutoFSMount(StorageMount):
+    prefix = StringField(required=True)
+    tablename = StringField(required=True, unique_with=['sitename', 'prefix'])
+    nfs_options = StringField()
+
+
+class QuobyteMount(StorageMount):
+    pass
+
+
+class BeeGFSMount(StorageMount):
+    pass
+
+
+class Storage(BaseDocument):
+    storagename = StringField(required=True, unique_with='mount')
+    source = GenericReferenceField(required=True,
+                                   choices=[NFSMountSource,
+                                            ZFSMountSource])
+    mount = GenericReferenceField(required=True,
+                                  choices=[AutoFSMount,
+                                           QuobyteMount,
+                                           BeeGFSMount])
+    globus = BooleanField()
+
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
+        if not raw:
+            data['source'] = self.source.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
+            data['mount'] = self.mount.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
         return data
 
 
@@ -587,7 +665,7 @@ def add_user_access(username: str, access_type: str, sitename: Optional[str] = N
         GlobalUser.objects(username=username).update_one(add_to_set__access=access_type) #type: ignore
     else:
         SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(add_to_set__access=access_type)
+                         sitename=sitename).update_one(add_to_set___access=access_type)
 
 
 def set_user_status(username: str,
@@ -603,7 +681,7 @@ def set_user_status(username: str,
         GlobalUser.objects(username=username).update_one(set__status=status) #type: ignore
     else:
         SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(set__status=status)
+                         sitename=sitename).update_one(set___status=status)
 
 
 def set_user_type(username: str,
@@ -947,6 +1025,61 @@ def add_site_args_req(parser: argparse.ArgumentParser):
 
 def add_database_load_args(parser: argparse.ArgumentParser):
     parser.add_argument('--system-groups', action='store_true', default=False)
+    parser.add_argument('--nfs-yamls', nargs='+', type=Path)
+
+
+def load_group_storages(storages: List[PuppetGroupStorage],
+                        groupname: str,
+                        sitename: str):
+    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+                                                 name='group')
+
+    for storage in storages:
+        mount = AutoFSMount.objects.get(sitename=sitename,
+                                        tablename='group')
+        owner = GlobalUser.objects.get(username=storage.owner)
+        if storage.group:
+            group = GlobalGroup.objects.get(groupname=storage.group)
+        else:
+            group = GlobalGroup.objects.get(groupname=groupname)
+        if not storage.zfs:
+            source = NFSMountSource(sitename=sitename,
+                                    host_path=storage.autofs.path,
+                                    host=storage.autofs.nas,
+                                    owner=owner,
+                                    group=group,
+                                    collection=collection)
+            try:
+                source.save()
+            except NotUniqueError:
+                source = NFSMountSource.objects.get(sitename=sitename,
+                                                    host=storage.autofs.nas,
+                                                    host_path=storage.autofs.path)
+                                                   
+        else:
+            source = ZFSMountSource(sitename=sitename,
+                                    host=storage.autofs.nas,
+                                    host_path=storage.autofs.path,
+                                    owner=owner,
+                                    group=group,
+                                    quota=storage.zfs.quota,
+                                    collection=collection)
+            try:
+                source.save()
+            except NotUniqueError:
+                source = ZFSMountSource.objects.get(sitename=sitename,
+                                                    host=storage.autofs.nas,
+                                                    host_path=storage.autofs.path)
+                                                    
+        
+        record = Storage(storagename=storage.name,
+                         source=source,
+                         mount=mount,
+                         globus=storage.globus)
+        try:
+            record.save()
+        except NotUniqueError:
+            pass
 
 
 @subcommand('load', add_repo_args, add_site_args, add_database_load_args)
@@ -957,6 +1090,7 @@ def load(args: argparse.Namespace):
                          common_root=args.global_dir,
                          key_dir=args.key_dir,
                          load=False)
+    nfs_data = puppet_merge(*(parse_yaml(f) for f in args.nfs_yamls)).get('nfs', None)
     connect_to_database(args.config.mongo)
 
     with site_data.lock(args.timeout):
@@ -966,6 +1100,34 @@ def load(args: argparse.Namespace):
                     fqdn=args.site_dir.name)
         logger.info(f'Updating Site: {site}')
         site.save()
+
+        # Do automount tables
+        if nfs_data:
+            export_options = nfs_data['exports'].get('options', None)
+            export_ranges = nfs_data['exports'].get('clients', None)
+            for tablename, config in nfs_data['storage'].items():
+                autofs = config['autofs']
+                col_args = dict(sitename=args.site,
+                                name=tablename,
+                                host=autofs.get('nas', None),
+                                prefix=autofs.get('path', None),
+                                export_options=export_options,
+                                export_ranges=export_ranges,
+                                quota=config.get('zfs', {}).get('quota', None))
+                collection = ZFSSourceCollection(**{k:v for k, v in col_args.items() if v is not None})
+                try:
+                    collection.save()
+                except NotUniqueError:
+                    pass
+                mount_args = dict(sitename=args.site,
+                                  prefix=f'/tablename',
+                                  tablename=tablename,
+                                  nfs_options=config.get('options', None))
+                mount = AutoFSMount(**{k:v for k, v in mount_args.items() if v is not None})
+                try:
+                    mount.save()
+                except NotUniqueError:
+                    pass
 
         for group_name, group_record in site_data.iter_groups():
             #logger.info(f'{group_name}, {group_record}')
@@ -1023,8 +1185,12 @@ def load(args: argparse.Namespace):
                 for group_name in user_record.group_sudo:
                     group_sudoers[group_name].add(site_record)
 
-        # Now do sponsors
+        # Now do sponsors and storages
         for groupname, group_record in site_data.iter_groups():
+            if group_record.storage is not None:
+                load_group_storages(group_record.storage,
+                                    groupname,
+                                    args.site)
             if group_record.sponsors is not None:
                 for username in group_record.sponsors:
                     add_group_sponsor(args.site, username, groupname)
@@ -1615,7 +1781,7 @@ def process_createaccount_event(event: QueuedEventDataModel,
         site_user = SiteUser(username=username,
                              sitename=sitename,
                              parent=global_user,
-                             access=hippo_to_cheeto_access(hippo_account.access_types)) #type: ignore
+                             _access=hippo_to_cheeto_access(hippo_account.access_types)) #type: ignore
         site_user.save()
 
     for group in event.groups:
@@ -1640,7 +1806,6 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
         create_group_from_sponsor(site_user)
 
 
-
 def ldap_sync(sitename: str, config: Config):
     connect_to_database(config.mongo)
     ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
@@ -1649,21 +1814,35 @@ def ldap_sync(sitename: str, config: Config):
         if user.parent.type == 'system' or user.status != 'active' \
            or user.parent.status != 'active':
             continue
-        if not ldap_mgr.verify_user(user.username):
-            print(user.to_dict())
-            ldap_user = LDAPUser.Schema().load(dict(uid=user.username,
-                                                    email=user.parent.email,
-                                                    uid_number=user.parent.uid,
-                                                    gid_number=user.parent.gid,
-                                                    fullname=user.parent.fullname,
-                                                    surname=user.parent.fullname.split()[-1]))
-            ldap_mgr.add_user(ldap_user)
 
-            access = (set(user.access) | set(user.parent.access))
-            if 'login-ssh' in access:
+            print(user.to_dict())
+        ldap_user = LDAPUser.Schema().load(dict(uid=user.username,
+                                                email=user.parent.email,
+                                                uid_number=user.parent.uid,
+                                                gid_number=user.parent.gid,
+                                                fullname=user.parent.fullname,
+                                                surname=user.parent.fullname.split()[-1]))
+        user_group = LDAPGroup.load(dict(gid=user.username,
+                                         gid_number=user.gid,
+                                         members=[user.username]))
+        if ldap_mgr.verify_user(user.username):
+            ldap_mgr.delete_user(user.username)
+        ldap_mgr.add_user(ldap_user)
+        try:
+            ldap_mgr.add_group(user_group, sitename)
+        except:
+            pass
+
+        if 'login-ssh' in user.access:
+            try:
                 ldap_mgr.add_user_to_group(user.username, 'cluster-users', sitename)
-            if 'compute-ssh' in access or user.parent.type == 'admin':
+            except:
+                pass
+        if 'compute-ssh' in user.access or user.parent.type == 'admin':
+            try:
                 ldap_mgr.add_user_to_group(user.username, 'compute-ssh-users', sitename)
+            except:
+                pass
 
     for group in SiteGroup.objects(sitename=sitename):
         if not ldap_mgr.verify_group(group.groupname, sitename):

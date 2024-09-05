@@ -32,9 +32,8 @@ from .errors import ExitCode
 from .git import Gh, Git, branch_name_title
 from .ldap import LDAPManager
 from .yaml import (MergeStrategy,
-                      parse_yaml_forest,
-                      puppet_merge,
-                      validate_yaml_forest)
+                   parse_yaml_forest,
+                   puppet_merge)
 from .types import *
 from .utils import (require_kwargs,
                     EnumAction,

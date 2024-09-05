@@ -30,8 +30,7 @@ from .errors import ExitCode
 from .git import Git, Gh, CIStatus, branch_name_title
 from .mail import Mail
 from .yaml import (parse_yaml,
-                      parse_yaml_forest,
-                      validate_yaml_forest)
+                   parse_yaml_forest)
 from .puppet import (PuppetAccountMap, 
                      SiteData,
                      PuppetUserRecord,

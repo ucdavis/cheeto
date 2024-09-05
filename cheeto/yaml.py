@@ -8,16 +8,14 @@
 # Date   : 12.04.2023
 
 from collections import OrderedDict
-from typing import Any
+from typing import Any, Type
 from enum import Enum
-import logging
 import os
 from pathlib import Path
-from typing import Optional, Union
+from typing import Generator, Optional, Union
 import sys
 
 from bson.int64 import Int64
-import marshmallow
 from mergedeep import merge, Strategy
 from rich.syntax import Syntax
 
@@ -101,28 +99,6 @@ def parse_yaml_forest(yaml_files: list,
         yaml_forest = {prefix: puppet_merge(*yamls) for prefix, yamls in file_groups.items()}
 
     return yaml_forest
-
-
-def validate_yaml_forest(yaml_forest: dict,
-                         MapSchema, 
-                         strict: Optional[bool] = False,
-                         partial: Optional[bool] = False): 
-
-    logger = logging.getLogger(__name__)
-
-    for source_root, yaml_obj in yaml_forest.items():
-
-        try:
-            puppet_data = MapSchema.Schema().load(yaml_obj,
-                                                  partial=partial)
-        except marshmallow.exceptions.ValidationError as e: #type: ignore
-            logger.error(f'[red]ValidationError: {source_root}[/]')
-            logger.error(e.messages)
-            if strict:
-                sys.exit(ExitCode.VALIDATION_ERROR)
-            continue
-        else:
-            yield source_root, puppet_data
 
 
 def highlight_yaml(dumped: str):
