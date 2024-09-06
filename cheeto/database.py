@@ -117,15 +117,18 @@ class BaseDocument(Document):
         'abstract': True
     }
 
-    def to_dict(self, strip_id=True, strip_empty=False):
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
         data = self.to_mongo(use_db_field=False).to_dict()
         if strip_id:
             data.pop('id', None)
             data.pop('_id', None)
-        if strip_empty:
-            for key in list(data.keys()):
+        for key in list(data.keys()):
+            if strip_empty:
                 if not data[key] and data[key] != 0:
                     del data[key]
+            if not raw and key in data \
+               and isinstance(self._fields[key], (ReferenceField, GenericReferenceField)):
+                data[key] = getattr(self, key).to_dict()
         return data
 
     def clean(self):
@@ -581,13 +584,6 @@ class Storage(BaseDocument):
                                            BeeGFSMount])
     globus = BooleanField()
 
-    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
-        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
-        if not raw:
-            data['source'] = self.source.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
-            data['mount'] = self.mount.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
-        return data
-
 
 @handler(signals.post_save)
 def site_apply_globals(sender, document, **kwargs):
@@ -1031,6 +1027,10 @@ def add_database_load_args(parser: argparse.ArgumentParser):
 def load_group_storages(storages: List[PuppetGroupStorage],
                         groupname: str,
                         sitename: str):
+
+    logger = logging.getLogger(__name__)
+    logger.info(f'Load storages for group {groupname} on site {sitename}')
+
     collection = ZFSSourceCollection.objects.get(sitename=sitename,
                                                  name='group')
 
@@ -1156,16 +1156,29 @@ def load(args: argparse.Namespace):
 
             global_record = GlobalUser.from_puppet(user_name, user_record, ssh_key=ssh_key)
             global_record.save()
+            global_group = GlobalGroup(groupname=user_name,
+                                       gid=user_record.gid)
+            global_group.save()
 
             site_record = SiteUser.from_puppet(user_name,
                                                args.site,
                                                global_record,
                                                user_record)
+
             try:
                 site_record.save()
             except:
                 logger.info(f'{user_name} in {args.site} already exists, skipping.')
                 site_record = SiteUser.objects.get(username=user_name, sitename=args.site)
+
+            site_group = SiteGroup(sitename=args.site,
+                                   groupname=user_name,
+                                   parent=global_group,
+                                   _members=[site_record])
+            try:
+                site_group.save()
+            except:
+                pass
 
             if global_record.type == 'system' and args.system_groups:
                 global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
