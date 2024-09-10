@@ -59,6 +59,7 @@ class LDAPUser(LDAPRecord):
     home_directory: str = field(default='')
     shell: str = field(default=DEFAULT_SHELL)
 
+    password: Optional[str] = None
     dn: Optional[str] = None
 
     @post_load

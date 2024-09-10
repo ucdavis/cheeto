@@ -78,6 +78,7 @@ def main():
     site_parser.set_defaults(func = lambda _: site_parser.print_help())
     site_commands = site_parser.add_subparsers()
     database.site_add_global_slurm(site_commands)
+    database.site_write_to_puppet(site_commands)
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())

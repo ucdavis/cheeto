@@ -15,8 +15,10 @@ from pathlib import Path
 from typing import Generator, Optional, Union
 import sys
 
+from bson import ObjectId, objectid
 from bson.int64 import Int64
 from mergedeep import merge, Strategy
+from mongoengine.dereference import DBRef
 from rich.syntax import Syntax
 
 from ruamel import yaml as ryaml
@@ -37,12 +39,22 @@ def str_representer(dumper, data):
         return dumper.represent_scalar('tag:yaml.org,2002:str', data)
 
 
+def objectid_representer(dumper, data):
+    return dumper.represent_scalar('tag:yaml.org,2002:str', repr(data))
+
+
+def dbref_representer(dumper, data):
+    return dumper.represent_scalar('tag:yaml.org,2002:str', repr(data))
+
+
 def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
     dumper.width = sys.maxsize
     dumper.Representer.add_representer(OrderedDict, RoundTripRepresenter.represent_dict)
     dumper.Representer.add_representer(str, str_representer)
     dumper.Representer.add_representer(Int64, RoundTripRepresenter.represent_int)
+    dumper.Representer.add_representer(ObjectId, objectid_representer)
+    dumper.Representer.add_representer(DBRef, dbref_representer)
     stream = StringIO()
     dumper.dump(obj, stream, **kwargs)
     return stream.getvalue()

@@ -31,6 +31,12 @@ def filter_nulls(d: dict) -> dict:
     return {key: val for key, val in d.items() if val}
 
 
+def remove_nones(d: dict):
+    for key in list(d.keys()):
+        if d[key] is None:
+            del d[key]
+
+
 def check_filter(d: dict, filter_on: dict):
     for key, val in d.items():
         if val in filter_on.get(key, []):

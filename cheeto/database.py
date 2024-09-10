@@ -34,8 +34,10 @@ from .log import Console
 from .puppet import (MIN_PIGROUP_GID,
                      MIN_SYSTEM_UID,
                      PuppetAccountMap, 
-                     PuppetGroupRecord, PuppetGroupStorage,
+                     PuppetGroupRecord,
+                     PuppetGroupStorage, PuppetShareMap, PuppetShareRecord, PuppetShareStorage,
                      PuppetUserRecord,
+                     PuppetUserStorage,
                      SlurmQOS as PuppetSlurmQOS,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
                      add_repo_args,
@@ -47,7 +49,8 @@ from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS,
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
                     size_to_megs,
-                    removed)
+                    removed,
+                    remove_nones)
 from .yaml import dumps as dumps_yaml
 from .yaml import (highlight_yaml,
                    parse_yaml, puppet_merge)
@@ -133,7 +136,10 @@ class BaseDocument(Document):
 
     def clean(self):
         if 'sitename' in self._fields: #type: ignore
-            site_exists(self.sitename) #type: ignore
+            query_site_exists(self.sitename) #type: ignore
+
+    def __repr__(self):
+        return dumps_yaml(self.to_dict(raw=True, strip_id=False, strip_empty=False))
 
 
 class HippoEvent(BaseDocument):
@@ -153,7 +159,7 @@ class GlobalUser(BaseDocument):
     gid = POSIXIDField(required=True)
     fullname = StringField(required=True)
     shell = ShellField(required=True)
-    home_directory = StringField(required=True)
+    #home_directory = StringField(required=True)
     type = UserTypeField(required=True)
     status = UserStatusField(required=True, default='active')
     password = StringField()
@@ -187,6 +193,10 @@ class GlobalUser(BaseDocument):
             access.add('compute-ssh')
             access.add('sudo')
 
+        pw = puppet_record.password
+        if pw == 'x':
+            pw = None
+
         return cls(
             username = username,
             email = puppet_record.email,
@@ -194,12 +204,11 @@ class GlobalUser(BaseDocument):
             gid = puppet_record.gid,
             fullname = puppet_record.fullname,
             shell = shell,
-            home_directory = f'/home/{username}',
             type = usertype,
             status = puppet_record.status,
             ssh_key = [] if ssh_key is None else ssh_key.split('\n'),
             access = access,
-            password = puppet_record.password
+            password = pw
         )
 
     @classmethod
@@ -211,12 +220,15 @@ class GlobalUser(BaseDocument):
             gid = hippo_data.mothra,
             fullname = hippo_data.name,
             shell = DEFAULT_SHELL,
-            home_directory = f'/home/{hippo_data.kerberos}',
             type = 'user',
             status = 'active',
             ssh_key = [hippo_data.key],
             access = hippo_to_cheeto_access(hippo_data.access_types) #type: ignore
         )
+
+    @property
+    def home_directory(self):
+        return f'/home/{self.username}'
 
 
 global_user_t = Union[GlobalUser, str]
@@ -280,6 +292,10 @@ class SiteUser(BaseDocument):
         return self.parent.home_directory
 
     @property
+    def password(self):
+        return self.parent.password
+
+    @property
     def type(self):
         return self.parent.type
 
@@ -328,9 +344,10 @@ class SiteUser(BaseDocument):
             parent = parent
         )
 
-    def to_dict(self, strip_id=True, strip_empty=False, **kwargs):
-        data = super().to_dict(**kwargs)
-        data['parent'] = self.parent.to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs) #type: ignore
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, raw=raw, **kwargs)
+        if not raw:
+            data['parent'] = self.parent.to_dict(strip_id=strip_id, raw=raw, strip_empty=strip_empty, **kwargs) #type: ignore
         return data
 
 site_user_t = Union[SiteUser, str]
@@ -486,7 +503,7 @@ class SiteGroup(BaseDocument):
         )
 
     def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
-        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, raw=raw, **kwargs)
         if not raw:
             data['parent'] = self.parent.to_dict() #type: ignore
             data.pop('_members')
@@ -510,7 +527,7 @@ class SiteSlurmAssociation(BaseDocument):
     group = ReferenceField(SiteGroup, required=True, reverse_delete_rule=CASCADE)
 
     def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
-        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, **kwargs)
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, raw=raw, **kwargs)
         if not raw:
             data['qos'] = self.qos.to_dict(strip_id=strip_id) #type: ignore
             data['partition'] = self.partition.partitionname #type: ignore
@@ -519,23 +536,49 @@ class SiteSlurmAssociation(BaseDocument):
 
 
 class StorageMountSource(BaseDocument):
+    name = StringField(required=True)
     sitename = StringField(required=True)
-    host  = StringField(required=True)
+    host  = StringField()
     owner = ReferenceField(GlobalUser, required=True, reverse_delete_rule=CASCADE)
     group = ReferenceField(GlobalGroup, required=True, reverse_delete_rule=CASCADE)
 
-    meta = {'allow_inheritance': True}
+    meta = {
+        'allow_inheritance': True,
+        'indexes': [
+            {
+                'fields': ['sitename', 'name', '_cls'],
+                'name': 'primary',
+                'unique': True
+            }
+        ]
+    }
+
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+        data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, raw=raw, **kwargs)
+        if not raw:
+            data['owner'] = data['owner']['username']
+            data['group'] = data['group']['groupname']
+        return data
 
 
 class NFSSourceCollection(BaseDocument):
     sitename = StringField(required=True)
-    name = StringField(required=True, unique_with='sitename')
+    name = StringField(required=True)
     host = StringField()
     prefix = StringField()
     export_options = StringField()
     export_ranges = ListField(StringField())
 
-    meta = {'allow_inheritance': True}
+    meta = {
+        'allow_inheritance': True,
+        'indexes': [
+            {
+                'fields': ['sitename', 'name', '_cls'],
+                'name': 'primary',
+                'unique': True
+            }
+        ]
+    }
 
 
 class ZFSSourceCollection(NFSSourceCollection):
@@ -543,7 +586,7 @@ class ZFSSourceCollection(NFSSourceCollection):
 
 
 class NFSMountSource(StorageMountSource):
-    host_path = StringField(required=True, unique_with=['sitename', 'host'])
+    host_path = StringField()
     export_options = StringField()
     export_ranges = ListField(StringField())
     collection = GenericReferenceField(choices=[NFSSourceCollection,
@@ -574,7 +617,7 @@ class BeeGFSMount(StorageMount):
 
 
 class Storage(BaseDocument):
-    storagename = StringField(required=True, unique_with='mount')
+    name = StringField(required=True, unique_with='mount')
     source = GenericReferenceField(required=True,
                                    choices=[NFSMountSource,
                                             ZFSMountSource])
@@ -583,6 +626,39 @@ class Storage(BaseDocument):
                                            QuobyteMount,
                                            BeeGFSMount])
     globus = BooleanField()
+
+    @property
+    def host_path(self):
+        if self.source.host_path:
+            return Path(self.source.host_path)
+        elif self.source.collection.prefix:
+            return Path(self.source.collection.prefix) / self.source.name
+        else:
+            raise ValueError(f'Storage {self.name} source has neither host_path nor collection prefix')
+
+    @property
+    def host(self):
+        if self.source.host:
+            return self.source.host
+        elif self.source.collection.host:
+            return self.source.collection.host
+        else:
+            raise ValueError(f'Storage {self.name} source has not host specified')
+
+    @property
+    def mount_path(self):
+        return Path(self.mount.prefix) / self.name
+
+    @property
+    def quota(self):
+        if not isinstance(self.source, ZFSMountSource):
+            return None
+        elif self.source.quota:
+            return self.source.quota
+        elif self.source.collection and self.source.collection.quota:
+            return self.source.collection.quota
+        else:
+            return None
 
 
 @handler(signals.post_save)
@@ -606,9 +682,11 @@ class Site(BaseDocument):
     fqdn = StringField(required=True)
     global_groups = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
     global_slurmers = ListField(ReferenceField(SiteGroup, reverse_delete_rule=PULL))
+    default_home = GenericReferenceField()
 
 
 site_t = Union[Site, str]
+
 
 def connect_to_database(config: MongoConfig):
     connect(config.database,
@@ -617,7 +695,7 @@ def connect_to_database(config: MongoConfig):
             password=config.password)
 
 
-def user_exists(username: str,
+def query_user_exists(username: str,
                 sitename: Optional[str] = None,
                 raise_exc: bool = False) -> bool:
     logger = logging.getLogger(__name__)
@@ -635,7 +713,7 @@ def user_exists(username: str,
         return True
 
 
-def site_exists(sitename: str, raise_exc: bool = False) -> bool:
+def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
     logger = logging.getLogger(__name__)
     try:
         Site.objects.get(sitename=sitename) #type: ignore
@@ -749,6 +827,35 @@ def query_user_sponsor_of(sitename: str, user: site_user_t):
         yield group.groupname
 
 
+def query_user_home_storage(sitename: str, user: site_user_t):
+    if type(user) is SiteUser:
+        user = user.username
+    home_collection = NFSSourceCollection.objects.get(name='home', sitename=sitename)
+    return Storage.objects.get(source__in=StorageMountSource.objects(collection=home_collection,
+                                                                     name=user))
+ 
+
+def query_user_storages(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = GlobalUser.objects.get(sitename=sitename, username=user)
+    else:
+        user = user.parent
+
+    return Storage.objects(source__in=StorageMountSource.objects(sitename=sitename,
+                                                                 owner=user))
+
+
+def query_group_storages(sitename: str, group: global_group_t, tablename: Optional[str] = None):
+    if type(group) is str:
+        group = GlobalGroup.objects.get(groupname=group)
+    if tablename:
+        mount = AutoFSMount.objects.get(tablename=tablename, sitename=sitename)
+        return Storage.objects(source__in=StorageMountSource.objects(sitename=sitename, group=group),
+                               mount=mount)
+    else:
+        return Storage.objects(source__in=StorageMountSource.objects(sitename=sitename, group=group))
+
+
 def add_group_member(sitename: str, user: site_user_t, groupname: str):
     if type(user) is str:
         user = SiteUser.objects.get(sitename=sitename, username=user)
@@ -820,10 +927,114 @@ def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
             logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
 
 
+def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
+                           sitename: str):
+    logger = logging.getLogger(__name__)
+    logger.info(f'Load share storages on site {sitename}')
+
+    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+                                                 name='share')
+    mount = AutoFSMount.objects.get(sitename=sitename,
+                                    tablename='share')
+
+    for share_name, share in shares.items():
+        owner = GlobalUser.objects.get(username=share.storage.owner)
+        group = GlobalGroup.objects.get(groupname=share.storage.group)
+
+        source_args = dict(name=share_name,
+                           sitename=sitename,
+                           host_path=share.storage.autofs.path,
+                           host=share.storage.autofs.nas,
+                           owner=owner,
+                           group=group,
+                           collection=collection)
+        source_type = NFSMountSource
+
+        if share.storage.zfs:
+            source_type = ZFSMountSource
+            source_args['quota'] = share.storage.zfs.quota
+
+        source = source_type(**source_args)
+
+        try:
+            source.save()
+        except NotUniqueError:
+            source = source_type.objects.get(sitename=sitename,
+                                             name=share.storage.autofs.path)
+
+        storage = Storage(name=share_name,
+                          source=source,
+                          mount=mount)
+
+        try:
+            storage.save()
+        except NotUniqueError:
+            pass
+
+
+def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
+                                    groupname: str,
+                                    sitename: str):
+
+    logger = logging.getLogger(__name__)
+    logger.info(f'Load storages for group {groupname} on site {sitename}')
+
+    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+                                                 name='group')
+
+    for storage in storages:
+        mount = AutoFSMount.objects.get(sitename=sitename,
+                                        tablename='group')
+        owner = GlobalUser.objects.get(username=storage.owner)
+        if storage.group:
+            group = GlobalGroup.objects.get(groupname=storage.group)
+        else:
+            group = GlobalGroup.objects.get(groupname=groupname)
+        if not storage.zfs:
+            source = NFSMountSource(name=storage.autofs.path,
+                                    sitename=sitename,
+                                    host_path=storage.autofs.path,
+                                    host=storage.autofs.nas,
+                                    owner=owner,
+                                    group=group,
+                                    collection=collection)
+            try:
+                source.save()
+            except NotUniqueError:
+                source = NFSMountSource.objects.get(sitename=sitename,
+                                                    host=storage.autofs.nas,
+                                                    host_path=storage.autofs.path)
+                                                    
+        else:
+            source = ZFSMountSource(name=storage.autofs.path,
+                                    sitename=sitename,
+                                    host=storage.autofs.nas,
+                                    host_path=storage.autofs.path,
+                                    owner=owner,
+                                    group=group,
+                                    quota=storage.zfs.quota,
+                                    collection=collection)
+            try:
+                source.save()
+            except NotUniqueError:
+                source = ZFSMountSource.objects.get(sitename=sitename,
+                                                    host=storage.autofs.nas,
+                                                    host_path=storage.autofs.path)
+        
+        record = Storage(name=storage.name,
+                         source=source,
+                         mount=mount,
+                         globus=storage.globus)
+        try:
+            record.save()
+        except NotUniqueError:
+            pass
+
+
 def create_slurm_partition(partitionname: str, sitename: str):
     logger = logging.getLogger(__name__)
     logger.info(f'Create partition {partitionname} on site {sitename}.')
-    site_exists(sitename, raise_exc=True)
+    query_site_exists(sitename, raise_exc=True)
 
     try:
         partition = SiteSlurmPartition(sitename=sitename, partitionname=partitionname)
@@ -861,10 +1072,10 @@ def create_slurm_qos(qosname: str,
     return qos
 
 
-def add_slurm_association(sitename: str, partitionname: str, groupname: str, qosname: str):
+def create_slurm_association(sitename: str, partitionname: str, groupname: str, qosname: str):
     logger = logging.getLogger(__name__)
     logger.info(f'Create Association ({groupname}, {partitionname}, {qosname}) on site {sitename}.')
-    site_exists(sitename, raise_exc=True)
+    query_site_exists(sitename, raise_exc=True)
 
     partition = SiteSlurmPartition.objects.get(partitionname=partitionname, sitename=sitename)
     group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
@@ -885,7 +1096,7 @@ def add_slurm_association(sitename: str, partitionname: str, groupname: str, qos
     return assoc
 
 
-def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
+def load_slurm_from_puppet(sitename: str, data: PuppetAccountMap):
     logger = logging.getLogger(__name__)
     from .slurm import get_qos_name
 
@@ -920,10 +1131,10 @@ def slurm_from_puppet(sitename: str, data: PuppetAccountMap):
         except:
             logger.info(f'QOS {qosname} already exists')
 
-        add_slurm_association(sitename, partitionname, groupname, qosname)
+        create_slurm_association(sitename, partitionname, groupname, qosname)
 
     for groupname, partitionname, qosname in qos_references:
-        add_slurm_association(sitename, partitionname, groupname, qosname)
+        create_slurm_association(sitename, partitionname, groupname, qosname)
 
     for username, user in data.user.items():
         if user.slurm is not None and user.slurm.account is not None:
@@ -949,39 +1160,105 @@ def slurm_association_state(sitename: str):
     return state
 
 
+def user_to_puppet(user: SiteUser):
+    memberships = set(query_user_groups(user.sitename, user))
+    memberships.remove(user.username)
+    slurmerships = list(query_user_slurmership(user.sitename, user))
+    slurm = {'account': slurmerships} if slurmerships else None
+    
+    tags = set()
+    if 'compute-ssh' in user.access:
+        tags.add('ssh-tag')
+    if 'root-ssh' in user.access:
+        tags.add('root-ssh-tag')
+    if 'sudo' in user.access:
+        tags.add('sudo-tag')
+    if user.type == 'system':
+        tags.add('system-tag')
+
+    home_collection = NFSSourceCollection.objects.get(name='home', sitename=user.sitename)
+    home_storage = Storage.objects.get(source__in=StorageMountSource.objects(collection=home_collection, 
+                                                                             name=user.username))
+    
+    storage = dict(autofs={'nas': home_storage.host,
+                           'path': str(home_storage.host_path.parent)},
+                   zfs={'quota': home_storage.quota} if home_storage.quota else False)
+    user_data = dict(fullname=user.fullname,
+                     email=user.email,
+                     uid=user.uid,
+                     gid=user.gid,
+                     groups=memberships,
+                     shell=user.shell,
+                     tag=tags,
+                     home=user.home_directory,
+                     password=user.password,
+                     expiry=user.expiry,
+                     slurm=slurm,
+                     storage=storage)
+    remove_nones(user_data)
+    return PuppetUserRecord.load(user_data)
+
+
+def get_puppet_zfs(storage: Storage):
+    if type(storage.source) is ZFSMountSource and storage.source.quota:
+        return {'quota': storage.source.quota}
+    else:
+        return False
+
+
+def group_to_puppet(group: SiteGroup):
+    storages = query_group_storages(group.sitename, group.parent, tablename='group')
+    
+    storages_data = [
+        {'name': s.name,
+         'owner': s.source.owner.username,
+         'group': group.groupname,
+         'autofs': {
+            'nas': s.host,
+            'path': str(s.host_path)},
+         'zfs': get_puppet_zfs(s),
+         'globus': s.globus
+        } for s in storages
+    ]
+
+    return PuppetGroupRecord.load(dict(gid=group.gid,
+                                       sponsors=group.sponsors,
+                                       storage=storages_data))
+
+
+def share_to_puppet(share: Storage):
+    storage_data = {
+        'owner': share.source.owner.username,
+        'group': share.source.group.groupname,
+        'autofs': {
+            'nas': share.host,
+            'path': str(share.host_path)},
+        'zfs': get_puppet_zfs(share)
+    }
+
+    return PuppetShareRecord.load(dict(storage=storage_data))
+
+
 def site_to_puppet(sitename: str):
     users = {}
-    for user in SiteUser.objects(sitename=sitename):
-        memberships = query_user_groups(sitename, user)
-        slurmerships = query_user_slurmership(sitename, user)
-        
-        tags = set()
-        if 'compute-ssh' in user.access:
-            tags.add('ssh-tag')
-        if 'root-ssh' in user.access:
-            tags.add('root-ssh-tag')
-        if 'sudo' in user.access:
-            tags.add('sudo-tag')
-        if user.type == 'system':
-            tags.add('system-tag')
-       
-        pu = PuppetUserRecord.load(dict(fullname=user.fullname,
-                                        email=user.email,
-                                        uid=user.uid,
-                                        gid=user.gid,
-                                        groups=memberships,
-                                        shell=user.shell,
-                                        tag=tags,
-                                        home=user.home_directory,
-                                        expiry=user.expiry,
-                                        slurm=slurmerships))
-        users[user.username] = pu
+    for user in SiteUser.objects(sitename=sitename).order_by('username'):
+        users[user.username] = user_to_puppet(user)
 
     groups = {}
-    for group in SiteGroup.objects(sitename=sitename):
-        pg = PuppetGroupRecord.load(dict(gid=group.gid,
-                                         sponsors=group.sponsors))
-        groups[group.groupname] = pg
+    for group in SiteGroup.objects(sitename=sitename).order_by('groupname'):
+        if query_user_exists(group.groupname, sitename):
+            continue
+        groups[group.groupname] = group_to_puppet(group)
+
+    shares = {}
+    storages = Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
+                                                             tablename='share'))
+    for share in storages.order_by('name'):
+        shares[share.name] = share_to_puppet(share)
+
+    return PuppetAccountMap(user=users,
+                            group=groups,
+                            share=shares)
         
 
 def purge_database():
@@ -991,12 +1268,25 @@ def purge_database():
         return
 
     for collection in (Site, GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
-                       SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS):
+                       SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS,
+                       StorageMountSource, NFSMountSource, ZFSMountSource,
+                       StorageMount, Storage, NFSSourceCollection):
         collection.drop_collection()
+
+
+#########################################
+#
+# Site commands: cheeto database site ...
+#
+#########################################
 
 
 def add_site_args(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None)
+
+
+def add_site_args_req(parser: argparse.ArgumentParser):
+    parser.add_argument('--site', '-s', default=None, required=True)
 
 
 @subcommand('add', add_site_args)
@@ -1015,71 +1305,27 @@ def site_add_global_slurm(args: argparse.Namespace):
         add_site_slurmer(args.site, group)
 
 
-def add_site_args_req(parser: argparse.ArgumentParser):
-    parser.add_argument('--site', '-s', default=None, required=True)
+@subcommand('to-puppet',
+            add_site_args_req,
+            lambda parser: parser.add_argument('puppet_yaml', type=Path))
+def site_write_to_puppet(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    connect_to_database(args.config.mongo)
+
+    puppet_map = site_to_puppet(args.site)
+    puppet_map.save_yaml(args.puppet_yaml)
+
+
+#########################################
+#
+# load commands: cheeto database load ...
+#
+#########################################
 
 
 def add_database_load_args(parser: argparse.ArgumentParser):
     parser.add_argument('--system-groups', action='store_true', default=False)
     parser.add_argument('--nfs-yamls', nargs='+', type=Path)
-
-
-def load_group_storages(storages: List[PuppetGroupStorage],
-                        groupname: str,
-                        sitename: str):
-
-    logger = logging.getLogger(__name__)
-    logger.info(f'Load storages for group {groupname} on site {sitename}')
-
-    collection = ZFSSourceCollection.objects.get(sitename=sitename,
-                                                 name='group')
-
-    for storage in storages:
-        mount = AutoFSMount.objects.get(sitename=sitename,
-                                        tablename='group')
-        owner = GlobalUser.objects.get(username=storage.owner)
-        if storage.group:
-            group = GlobalGroup.objects.get(groupname=storage.group)
-        else:
-            group = GlobalGroup.objects.get(groupname=groupname)
-        if not storage.zfs:
-            source = NFSMountSource(sitename=sitename,
-                                    host_path=storage.autofs.path,
-                                    host=storage.autofs.nas,
-                                    owner=owner,
-                                    group=group,
-                                    collection=collection)
-            try:
-                source.save()
-            except NotUniqueError:
-                source = NFSMountSource.objects.get(sitename=sitename,
-                                                    host=storage.autofs.nas,
-                                                    host_path=storage.autofs.path)
-                                                   
-        else:
-            source = ZFSMountSource(sitename=sitename,
-                                    host=storage.autofs.nas,
-                                    host_path=storage.autofs.path,
-                                    owner=owner,
-                                    group=group,
-                                    quota=storage.zfs.quota,
-                                    collection=collection)
-            try:
-                source.save()
-            except NotUniqueError:
-                source = ZFSMountSource.objects.get(sitename=sitename,
-                                                    host=storage.autofs.nas,
-                                                    host_path=storage.autofs.path)
-                                                    
-        
-        record = Storage(storagename=storage.name,
-                         source=source,
-                         mount=mount,
-                         globus=storage.globus)
-        try:
-            record.save()
-        except NotUniqueError:
-            pass
 
 
 @subcommand('load', add_repo_args, add_site_args, add_database_load_args)
@@ -1120,9 +1366,9 @@ def load(args: argparse.Namespace):
                 except NotUniqueError:
                     pass
                 mount_args = dict(sitename=args.site,
-                                  prefix=f'/tablename',
+                                  prefix=f'/{tablename}',
                                   tablename=tablename,
-                                  nfs_options=config.get('options', None))
+                                  nfs_options=config['autofs'].get('options', None))
                 mount = AutoFSMount(**{k:v for k, v in mount_args.items() if v is not None})
                 try:
                     mount.save()
@@ -1131,6 +1377,8 @@ def load(args: argparse.Namespace):
 
         for group_name, group_record in site_data.iter_groups():
             #logger.info(f'{group_name}, {group_record}')
+            if group_record.ensure == 'absent':
+                continue
             global_record = GlobalGroup.from_puppet(group_name, group_record)
             global_record.save()
 
@@ -1149,7 +1397,13 @@ def load(args: argparse.Namespace):
 
         group_memberships = defaultdict(set)
         group_sudoers = defaultdict(set)
+        home_collection = ZFSSourceCollection.objects.get(sitename=args.site,
+                                                          name='home')
+        home_mount = AutoFSMount.objects.get(sitename=args.site,
+                                             tablename='home')
         for user_name, user_record in site_data.iter_users():
+            if user_record.ensure == 'absent':
+                continue
             ssh_key_path, ssh_key = args.key_dir / f'{user_name}.pub', None
             if ssh_key_path.exists():
                 ssh_key = ssh_key_path.read_text().strip()
@@ -1198,10 +1452,47 @@ def load(args: argparse.Namespace):
                 for group_name in user_record.group_sudo:
                     group_sudoers[group_name].add(site_record)
 
+            us = user_record.storage
+            if us and us.autofs:
+                source = NFSMountSource(name=user_name,
+                                        sitename=args.site,
+                                        host=us.autofs.nas,
+                                        host_path=str(Path(us.autofs.path) / user_name),
+                                        owner=global_record,
+                                        group=global_group,
+                                        collection=home_collection)
+            elif us and not us.autofs and us.zfs and us.zfs.quota:
+                source = ZFSMountSource(name=user_name,
+                                        sitename=args.site,
+                                        owner=global_record,
+                                        group=global_group,
+                                        quota=us.zfs.quota,
+                                        collection=home_collection)
+            else:
+                source = ZFSMountSource(name=user_name,
+                                        sitename=args.site,
+                                        owner=global_record,
+                                        group=global_group,
+                                        collection=home_collection)
+            try:
+                source.save()
+            except NotUniqueError:
+                source = StorageMountSource.objects.get(sitename=args.site,
+                                                        name=user_name)
+            storage_record = Storage(name=user_name,
+                                     source=source,
+                                     mount=home_mount)
+            try:
+                storage_record.save()
+            except NotUniqueError:
+                pass
+
         # Now do sponsors and storages
         for groupname, group_record in site_data.iter_groups():
+            if group_record.ensure == 'absent':
+                continue
             if group_record.storage is not None:
-                load_group_storages(group_record.storage,
+                load_group_storages_from_puppet(group_record.storage,
                                     groupname,
                                     args.site)
             if group_record.sponsors is not None:
@@ -1220,8 +1511,10 @@ def load(args: argparse.Namespace):
                 logger.warning(f'Did not find group {groupname}, skip adding {[m.username for m in members]}')
                 continue
 
+        load_share_from_puppet(site_data.data.share, args.site)
+
         logger.info(f'Do slurm associations...')
-        slurm_from_puppet(args.site, site_data.data)
+        load_slurm_from_puppet(args.site, site_data.data)
 
         logger.info('Done.')
 
@@ -1382,6 +1675,13 @@ def query_users(args: argparse.Namespace):
         console.print(output_txt)
 
 
+#########################################
+#
+# user commands: cheeto database user ...
+#
+#########################################
+
+
 def add_show_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('username')
     parser.add_argument('--verbose', action='store_true', default=False)
@@ -1468,6 +1768,13 @@ def user_groups(args: argparse.Namespace):
         output[username] = list(query_user_groups(args.site, username))
     dumped = dumps_yaml(output)
     console.print(highlight_yaml(dumped))
+
+
+#########################################
+#
+# group commands: cheeto database group ...
+#
+#########################################
 
 
 def add_query_group_args(parser: argparse.ArgumentParser):
@@ -1614,6 +1921,13 @@ def group_new_system(args: argparse.Namespace):
         sites = args.sites
 
     create_system_group(args.groupname, sitenames=sites)
+
+
+#########################################
+#
+# hippoapi commands: cheeto database hippoapi ...
+#
+#########################################
 
 
 def add_hippoapi_event_args(parser: argparse.ArgumentParser):
@@ -1772,18 +2086,22 @@ def process_createaccount_event(event: QueuedEventDataModel,
 
     logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
 
-    if not user_exists(username):
+    if not query_user_exists(username):
         logger.info(f'GlobalUser for {username} does not exist, creating.')
         global_user = GlobalUser.from_hippo(hippo_account)
         global_user.save()
+        global_group = GlobalGroup(groupname=username,
+                                   gid=global_user.gid)
+        global_group.save()
     else:
         logger.info(f'GlobalUser for {username} exists, checking status.')
         global_user = GlobalUser.objects.get(username=username) #type: ignore
+        global_group = GlobalGroup.objects.get(groupname=username)
         if global_user.status != 'active':
             logger.info(f'GlobalUser for {username} has status {global_user.status}, setting to "active"')
             set_user_status(username, 'active', 'Activated from HiPPO')
 
-    if user_exists(username, sitename=sitename):
+    if query_user_exists(username, sitename=sitename):
         site_user = SiteUser.objects.get(username=username, sitename=sitename) #type: ignore
         logger.info(f'SiteUser for {username} exists, checking status.')
         if site_user.status != 'active':
@@ -1796,6 +2114,11 @@ def process_createaccount_event(event: QueuedEventDataModel,
                              parent=global_user,
                              _access=hippo_to_cheeto_access(hippo_account.access_types)) #type: ignore
         site_user.save()
+        site_group = SiteGroup(groupname=username,
+                               sitename=sitename,
+                               parent=global_group,
+                               _members=[site_user])
+        site_group.save()
 
     for group in event.groups:
         add_group_member(sitename, username, group.name)
@@ -1835,16 +2158,10 @@ def ldap_sync(sitename: str, config: Config):
                                                 gid_number=user.parent.gid,
                                                 fullname=user.parent.fullname,
                                                 surname=user.parent.fullname.split()[-1]))
-        user_group = LDAPGroup.load(dict(gid=user.username,
-                                         gid_number=user.gid,
-                                         members=[user.username]))
+
         if ldap_mgr.verify_user(user.username):
             ldap_mgr.delete_user(user.username)
         ldap_mgr.add_user(ldap_user)
-        try:
-            ldap_mgr.add_group(user_group, sitename)
-        except:
-            pass
 
         if 'login-ssh' in user.access:
             try:
@@ -1864,4 +2181,4 @@ def ldap_sync(sitename: str, config: Config):
                                              gid_number=group.parent.gid,
                                              members=group.members))
             ldap_mgr.add_group(ldap_group, sitename)
-                                             
+

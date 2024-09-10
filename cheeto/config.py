@@ -23,6 +23,8 @@ class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
 
+    user_status_groups: Mapping[str, str]
+
     user_classes: List[str]
     user_attrs: Mapping[str, str]
     user_base: Optional[str] = None
@@ -32,6 +34,7 @@ class LDAPConfig(BaseModel):
 
     group_classes: Optional[List[str]] = None
     group_attrs: Optional[Mapping[str, str]] = None
+
 
 
 @require_kwargs
