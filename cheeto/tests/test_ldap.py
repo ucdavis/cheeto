@@ -39,7 +39,7 @@ def mock_ldap(testdata, mock_config):
 @pytest.fixture
 def testuser():
     return LDAPUser.Schema().load(dict(dn='uid=test-user,ou=users,dc=hpc,dc=ucdavis,dc=edu',
-                                       uid='test-user',
+                                       username='test-user',
                                        email='test@test.edu',
                                        uid_number=11111111,
                                        gid_number=11111111,
@@ -71,14 +71,14 @@ class TestLDAPManager:
         assert result.failed == False
         assert len(result) == 1
         user = result.entries[0]
-        assert user.uid == 'omen'
+        assert user.username == 'omen'
         assert user.cn == 'Omen Wild'
         assert user.uidNumber == 457597
 
     def test_query_user(self, mock_ldap):
         user = mock_ldap.query_user('omen')[0]
         assert user is not None
-        assert user.uid == 'omen'
+        assert user.username == 'omen'
         assert user.fullname == 'Omen Wild'
         assert user.uid_number == 457597
 
@@ -86,21 +86,21 @@ class TestLDAPManager:
         result = mock_ldap._query_user(['omen', 'janca'])
         assert len(result) == 2
         users = result.entries
-        sort_on_attr(users, attr='uid')
-        assert users[0].uid == 'janca'
-        assert users[1].uid == 'omen'
+        sort_on_attr(users, attr='username')
+        assert users[0].username == 'janca'
+        assert users[1].username == 'omen'
 
     def test_query_users(self, mock_ldap):
         users = mock_ldap.query_user(['omen', 'janca'])
         assert len(users) == 2
         print(users)
-        users.sort(key=lambda u: u.uid)
-        assert users[0].uid == 'janca'
-        assert users[1].uid == 'omen'
+        users.sort(key=lambda u: u.username)
+        assert users[0].username == 'janca'
+        assert users[1].username == 'omen'
 
     def test_add_user(self, mock_ldap, testuser):
         entry = mock_ldap.add_user(testuser)
-        newuser = mock_ldap.query_user(testuser.uid)[0]
+        newuser = mock_ldap.query_user(testuser.username)[0]
         assert newuser == testuser
 
     def test_private_query_group(self, mock_ldap):

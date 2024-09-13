@@ -14,7 +14,9 @@ from typing import List, Mapping, Optional, Set, Tuple, Union
 
 from ldap3 import (AttrDef, Connection, Entry, ObjectDef, Reader, Server, ServerPool,
                    Writer, set_config_parameter, get_config_parameter)
-from ldap3 import ALL_ATTRIBUTES, FIRST, ROUND_ROBIN, SAFE_SYNC, MOCK_SYNC, SYNC
+from ldap3 import ALL_ATTRIBUTES, BASE, FIRST, SYNC
+from ldap3.abstract import STATUS_PENDING_CHANGES
+from ldap3.abstract.entry import Entry
 from ldap3.utils.dn import safe_dn, escape_rdn
 from marshmallow import post_load
 from marshmallow_dataclass import dataclass
@@ -50,10 +52,10 @@ class LDAPRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class LDAPUser(LDAPRecord):
-    uid: KerberosID
+    username: KerberosID
     email: str
-    uid_number: LinuxUID
-    gid_number: LinuxGID
+    uid: LinuxUID
+    gid: LinuxGID
     fullname: str
     surname: str
     home_directory: str = field(default='')
@@ -65,15 +67,15 @@ class LDAPUser(LDAPRecord):
     @post_load
     def default_home_directory(self, in_data, **kwargs):
         if not in_data['home_directory']:
-            in_data['home_directory'] = os.path.join('/home', in_data['uid'])
+            in_data['home_directory'] = os.path.join('/home', in_data['username'])
         return in_data
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class LDAPGroup(LDAPRecord):
-    gid: KerberosID
-    gid_number: LinuxGID
+    groupname: KerberosID
+    gid: LinuxGID
     members: Optional[Set[KerberosID]] = field(default_factory=set)
 
     dn: Optional[str] = None
@@ -96,15 +98,12 @@ class LDAPInvalidUser(Exception):
 
 class LDAPManager:
 
-    def __init__(self, config: LDAPConfig,
-                       servers: Optional[List[Server]] = None,  
-                       strategy: Optional[str] = SYNC,
-                       auto_bind: bool = True,
-                       **connection_kwargs):
-
-        #attrs = get_config_parameter('CLASSES_EXCLUDED_FROM_CHECK')
-        #attrs.extend(['ucdPerson', 'eduPerson'])
-        #set_config_parameter('CLASSES_EXCLUDED_FROM_CHECK', attrs)
+    def __init__(self, 
+                 config: LDAPConfig,
+                 servers: Optional[List[Server]] = None,  
+                 strategy: Optional[str] = SYNC,
+                 auto_bind: bool = True,
+                 **connection_kwargs):
 
         if servers is None:
             self.servers = [Server(uri, get_info='ALL') for uri in config.servers] #type: ignore
@@ -122,21 +121,53 @@ class LDAPManager:
                                      **connection_kwargs)
         self.logger = logging.getLogger(self.__class__.__name__)
 
-    def searchbase(self, *prefixes: Tuple[str, str]) -> str:
+    def get_user_dn(self, username: str):
+        return f'uid={escape_rdn(username)},{self.config.user_base}'
+
+    def get_group_dn(self, groupname: str, sitename: str):
+        return self.searchbase(('cn', groupname),
+                               ('ou', 'groups'),
+                               ('ou', sitename))
+
+    def get_automount_dn(self, mountname: str, mapname: str, sitename: str) -> str:
+        return self.searchbase(('automountKey', mountname),
+                               ('automountMapName', f'auto.{mapname}'),
+                               ('ou', 'automount'),
+                               ('ou', sitename))
+
+    def dn_reader(self,
+                  dn: str,
+                  object_def: ObjectDef):
+    
+        return Reader(self.connection,
+                      object_def,
+                      dn)
+
+    def dn_exists(self,
+                  dn: str) -> bool:
+        return self.connection.search(dn, '(objectClass=*)', BASE)
+
+    def searchbase(self,
+                   *prefixes: Tuple[str, str]) -> str:
+
         prefix = ','.join((f'{k}={escape_rdn(v)}' for k, v in prefixes))
         if prefix:
             return f'{prefix},{self.config.searchbase}'
         else:
             return self.config.searchbase
 
-    def _search_user(self, uids: List[str], attributes: List = [ALL_ATTRIBUTES]):
+    def _search_user(self,
+                     uids: List[str],
+                     attributes: List = [ALL_ATTRIBUTES]):
+
         safe_uids = [escape_rdn(uid) for uid in uids]
         if len(safe_uids) == 1:
             query = f'(uid={safe_uids[0]})'
         else:
             uids_query = ''.join((f'(uid={uid})' for uid in safe_uids))
             query = f'(|{uids_query})'
-        status = self.connection.search(self.config.searchbase, query,
+        status = self.connection.search(self.config.searchbase,
+                                        query,
                                         attributes=attributes)
         return status, self.connection.response
 
@@ -145,46 +176,55 @@ class LDAPManager:
         odef = ObjectDef(self.config.user_classes, self.connection)
         return odef
 
-    def user_reader(self, *ous: str, query: str = '', object_def: Optional[ObjectDef] = None) -> Reader:
-        searchbase = self.searchbase(*(('ou', escape_rdn(ou)) for ou in ous))
+    def user_reader(self,
+                    query: str = '',
+                    object_def: Optional[ObjectDef] = None) -> Reader:
+
         return Reader(self.connection,
                       self.user_def if object_def is None else object_def,
-                      searchbase,
+                      self.config.user_base,
                       query=query)
 
-    def _userid_query(self, uid: Union[List[str], str]) -> str:
-        if not is_listlike(uid):
-            safe = escape_rdn(uid) #type: ignore
+    def _userid_query(self,
+                      username: Union[List[str], str]) -> str:
+
+        if not is_listlike(username):
+            safe = escape_rdn(username) #type: ignore
         else:
-            safe = '; '.join((escape_rdn(u) for u in uid))
+            safe = '; '.join((escape_rdn(u) for u in username))
         return f'uid: {safe}'
 
-    def verify_user(self, uid: str) -> bool:
-        user_def = ObjectDef(self.config.user_classes)
-        user_def.add_attribute(AttrDef('uid'))
-        found, _ = self._search_user([uid], attributes=[])
-        return found
+    def user_exists(self,
+                    username: str) -> bool:
 
-    def _query_user(self, uid: Union[List[str], str]) -> Reader:
-        query = self._userid_query(uid)
+        return self.dn_exists(self.get_user_dn(username))
+
+    def _query_user(self, 
+                    username: Union[List[str], str]) -> Reader:
+
+        query = self._userid_query(username)
         reader = self.user_reader(query=query)
         reader.search()
         return reader
 
-    def query_user(self, uid: Union[List[str], str]) -> List[LDAPUser]:
-        cursor = self._query_user(uid)
+    def query_user(self, 
+                   username: Union[List[str], str]) -> List[LDAPUser]:
+
+        cursor = self._query_user(username)
         if cursor.entries:
             return [LDAPUser.from_entry(entry, self.config.user_attrs) for entry in cursor.entries] #type: ignore
         else:
             return []
 
-    def add_user(self, user: LDAPUser):
-        reader = self._query_user(user.uid)
+    def add_user(self, 
+                 user: LDAPUser):
+
+        reader = self._query_user(user.username)
         writer = Writer.from_cursor(reader)
         
-        dn = f'uid={escape_rdn(user.uid)},{self.config.user_base}' \
-            if user.dn is None \
-            else user.dn
+        dn = self.get_user_dn(user.username) \
+             if user.dn is None \
+             else user.dn
         entry = writer.new(dn)
         entry.cn = user.fullname
         for from_key, to_key in self.config.user_attrs.items():
@@ -193,92 +233,257 @@ class LDAPManager:
                 entry[to_key] = value
         status = entry.entry_commit_changes()
         if status is False:
-            raise LDAPCommitFailed(f'Failed to add user {user.uid}.')
+            raise LDAPCommitFailed(f'Failed to add user {user.username}.')
+        self.logger.info(f'add_user: {entry}')
         return entry
 
-    def delete_user(self, uid: str):
-        dn = f'uid={escape_rdn(uid)},{self.config.user_base}'
-        self.logger.info(f'Delete: {dn}')
+    def update_user(self,
+                    username: str,
+                    **attrs):
+        reader = self._query_user(username)
+        cursor = reader.search()
+        if len(cursor) != 1:
+            raise LDAPCommitFailed(f'Should have gotten a single cursor result, got {len(cursor)}')
+        entry = cursor[0].entry_writable()
+
+        for from_key, value in attrs.items():
+            to_key = self.config.user_attrs[from_key]
+            entry[to_key] = value
+
+        status = entry.entry_commit_changes()
+        if status is False and entry.entry_status == STATUS_PENDING_CHANGES:
+            raise LDAPCommitFailed(f'Failed to update user {username}')
+        self.logger.info(f'update_user: {entry}')
+        return entry
+        
+    def delete_user(self, 
+                    username: str):
+
+        dn = self.get_user_dn(username)
+        self.logger.info(f'delete_user: {dn}')
         self.connection.delete(dn)
 
     @property
     def group_def(self):
         return ObjectDef(self.config.group_classes, self.connection)
 
-    def group_reader(self, *ous: str, query: str = '',  object_def: Optional[ObjectDef] = None) -> Reader:
-        searchbase = self.searchbase(*(('ou', escape_rdn(ou)) for ou in ous))
+    def group_reader(self, 
+                     sitename: str,
+                     query: str = '',  
+                     object_def: Optional[ObjectDef] = None) -> Reader:
+
+        searchbase = self.searchbase(('ou', escape_rdn(sitename)))
         return Reader(self.connection,
                       self.group_def if object_def is None else object_def,
                       searchbase,
                       query=query)
 
-    def _query_group(self, gid: str, *ous: str, object_def: Optional[ObjectDef] = None) -> Reader:
-        safe_gid = escape_rdn(gid)
+    def _query_group(self, 
+                     groupname: str, 
+                     sitename: str,
+                     object_def: Optional[ObjectDef] = None) -> Reader:
+
+        safe_gid = escape_rdn(groupname)
         query = f'cn: {safe_gid}'
-        reader = self.group_reader(query=query, object_def=object_def, *ous)
+        reader = self.group_reader(sitename, query=query, object_def=object_def)
         reader.search()
         return reader
 
-    def query_group(self, gid: str, *ous: str) -> Optional[LDAPGroup]:
-        cursor = self._query_group(gid, *ous)
+    def query_group(self,
+                    groupname: str,
+                    sitename: str) -> Optional[LDAPGroup]:
+
+        cursor = self._query_group(groupname, sitename)
         if cursor.entries:
             return LDAPGroup.from_entry(cursor.entries[0], self.config.group_attrs) #type: ignore
         else:
             return None
 
-    def verify_group(self, gid: str, *ous: str) -> bool:
-        group_def = ObjectDef(self.config.group_classes)
-        group_def.add_attribute(AttrDef('cn'))
-        cursor = self._query_group(gid, *ous, object_def=group_def)
-        return len(cursor) > 0
+    def query_user_memberships(self,
+                               username: str,
+                               sitename: str) -> set[str]:
 
-    def add_user_to_group(self, uid: str, gid: str, *ous: str, verify_uid: bool = True):
-        cursor = self._query_group(gid, *ous)
+        safe_username = escape_rdn(username)
+        query = f'memberUid: {safe_username}'
+        group_def = ObjectDef(self.config.group_classes)
+        group_def += AttrDef('cn')
+        group_def += AttrDef('memberUid')
+        reader = self.group_reader(sitename, query=query, object_def=group_def)
+
+        return {g.cn.value for g in reader.search()}
+
+    def group_exists(self, 
+                     groupname: str,
+                     sitename: str) -> bool:
+
+        return self.dn_exists(self.get_group_dn(groupname, sitename))
+
+    def add_user_to_group(self, 
+                          username: Union[List[str], str], 
+                          groupname: str,
+                          sitename: str, 
+                          verify_user: bool = True):
+
+        cursor = self._query_group(groupname, sitename)
         if len(cursor.entries) > 1:
             raise LDAPExpectedSingleResult()
+        usernames = [username] if not is_listlike(username) else username
+        if not len(usernames):
+            return None
         if not cursor.entries:
             return None
-        if verify_uid and not self.verify_user(uid):
-            raise LDAPInvalidUser(f'User {uid} does not exist in LDAP tree.')
-        group_entry = cursor.entries[0].entry_writable()
-        group_entry.memberUid += escape_rdn(uid)
+        if verify_user:
+            for username in usernames:
+                if not self.user_exists(username):
+                    raise LDAPInvalidUser(f'User {username} does not exist in LDAP tree.')
+
+        group_entry = cursor.entries[0]
+        group_entry = group_entry.entry_writable()
+        
+        for username in usernames:
+            if username in group_entry.memberUid:
+                self.logger.info(f'add_user_to_group: {username} already in {groupname} on {sitename}')
+            else:
+                group_entry.memberUid += escape_rdn(username)
         status = group_entry.entry_commit_changes()
-        if status is False:
-            raise LDAPCommitFailed(f'Could not add {uid} to group {gid}.')
+        if status is False and group_entry.entry_status == STATUS_PENDING_CHANGES:
+            raise LDAPCommitFailed(f'Could not add {usernames} to group {groupname}: {group_entry}')
+        self.logger.info(f'add_user_to_group: {usernames} in {groupname} on {sitename}')
         return group_entry
 
-    def remove_users_from_group(self, uids: List[str], gid: str, *ous: str):
-        cursor = self._query_group(gid, *ous)
+    def remove_users_from_group(self, 
+                                usernames: List[str], 
+                                groupname: str,
+                                sitename: str):
+
+        if not len(usernames):
+            return None
+        cursor = self._query_group(groupname, sitename)
         if len(cursor.entries) > 1:
             raise LDAPExpectedSingleResult()
         if not cursor.entries:
             return None
         group_entry = cursor.entries[0].entry_writable()
         try:
-            group_entry.memberUid -= uids
+            group_entry.memberUid -= usernames
         except Exception as e:
-            self.logger.error(f'Failed to remove {uids} from {group_entry.dn}: {e}')
+            self.logger.error(f'Failed to remove {usernames} from {group_entry.dn}: {e}')
         status = group_entry.entry_commit_changes()
-        if status is False:
-            raise LDAPCommitFailed(f'Could not remove {uids} from {group_entry.dn}.')
+        if status is False and group_entry.entry_status == STATUS_PENDING_CHANGES:
+            raise LDAPCommitFailed(f'Could not remove {usernames} from {group_entry.entry_dn}: {group_entry}')
+        self.logger.info(f'remove_users_from_group: {usernames} from {groupname} on {sitename}')
         return group_entry
 
-    def add_group(self, group: LDAPGroup, cluster: str):
-        reader = self._query_group(group.gid, cluster)
+    def add_group(self, 
+                  group: LDAPGroup, 
+                  sitename: str):
+
+        reader = self._query_group(group.groupname, sitename)
         writer = Writer.from_cursor(reader)
 
-        dn = self.searchbase(('cn', group.gid), ('ou', 'groups'), ('ou', cluster)) \
-            if group.dn is None \
-            else group.dn
+        dn = self.get_group_dn(group.groupname, sitename) \
+             if group.dn is None \
+             else group.dn
         entry = writer.new(dn)
-        entry.cn = group.gid
+        entry.cn = group.groupname
         for from_key, to_key in self.config.group_attrs.items():
             value = getattr(group, from_key)
-            if value is not None:
+            if value is not None and not (is_listlike(value) and len(value) == 0):
                 entry[to_key] = value
         status = entry.entry_commit_changes()
-        if status is False:
+        if status is False and entry.entry_status == STATUS_PENDING_CHANGES:
             self.logger.error(f'Failed to commit changes: {entry}')
             raise LDAPCommitFailed(f'Failed to add group: {dn}.')
+        self.logger.info(f'add_group: {entry}')
         return entry
+
+    @property
+    def automount_def(self):
+        return ObjectDef(['autoMount'], self.connection)
+
+    def automount_reader(self,
+                         sitename: str,
+                         query: str = '',
+                         object_def: Optional[ObjectDef] = None):
+
+        searchbase = self.searchbase(('ou', 'automount'), ('ou', escape_rdn(sitename)))
+
+        return Reader(self.connection,
+                      self.automount_def if object_def is None else object_def,
+                      searchbase,
+                      query=query)
+
+    def automount_exists(self,
+                         mountname: str,
+                         mapname: str,
+                         sitename: str) -> bool:
+        return self.dn_exists(self.get_automount_dn(mountname, mapname, sitename))
+
+    def add_automount(self,
+                      mountname: str,
+                      mapname: str,
+                      sitename: str,
+                      mount_host: str,
+                      mount_path: str,
+                      mount_options: str) -> bool:
+
+        dn = self.get_automount_dn(mountname, mapname, sitename)
+        reader = self.dn_reader(dn, self.automount_def)
+        if reader.search():
+            return False
+
+        writer = Writer.from_cursor(reader)
+        entry = writer.new(dn)
+        entry.automountKey = mountname
+        entry.automountInformation = f'{mount_options} {mount_host}:{mount_path}'
+        #entry.automountInformation = f'in_network(192.168.0.0/16);type:=nfs;rhost:={mount_host}-ib;rfs:={mount_path} in_network(10.0.0.0/8);type:=nfs;rhost:={mount_host};rfs:={mount_path}'
+        
+        status = entry.entry_commit_changes()
+        if status is False and entry.entry_status == STATUS_PENDING_CHANGES:
+            self.logger.error(f'add_automount: failed to commit {entry}')
+            raise LDAPCommitFailed(f'failed to commit {dn}')
+
+        self.logger.info(f'add_automount: {entry}')
+        return True
+
+    def add_home_automount(self,
+                           username: str,
+                           sitename: str,
+                           mount_host: str,
+                           mount_path: str,
+                           mount_options: str) -> bool:
+
+        return self.add_automount(username,
+                                  'home', 
+                                  sitename, 
+                                  mount_host, 
+                                  mount_path, 
+                                  mount_options)
+
+    def add_group_automount(self,
+                            storagename: str,
+                            sitename: str,
+                            mount_host: str,
+                            mount_path: str,
+                            mount_options: str) -> bool:
+
+        return self.add_automount(storagename,
+                                  'group',
+                                  sitename,
+                                  mount_host,
+                                  mount_path,
+                                  mount_options)
+
+        
+    def update_home_automount(self,
+                              username: str,
+                              sitename: str,
+                              mount_host: str,
+                              mount_path: str,
+                              mount_options: str) -> bool:
+
+        dn = self.get_automount_dn(username, 'home', sitename) 
+        reader = self.dn_reader(dn, self.automount_def)
+        if not reader.search():
+            return False
 

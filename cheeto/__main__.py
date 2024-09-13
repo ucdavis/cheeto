@@ -98,6 +98,11 @@ def main():
     database.group_add_sponsor(group_commands)
     database.group_new_system(group_commands)
 
+    storage_parser = database_commands.add_parser('storage')
+    storage_parser.set_defaults(func = lambda _: storage_parser.print_help())
+    storage_commands = storage_parser.add_subparsers()
+    database.storage_add(storage_commands)
+
     args = parser.parse_args()
     if not hasattr(args, 'log'):
         args.func(args)

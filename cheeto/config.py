@@ -24,6 +24,7 @@ class LDAPConfig(BaseModel):
     searchbase: str
 
     user_status_groups: Mapping[str, str]
+    user_access_groups: Mapping[str, str]
 
     user_classes: List[str]
     user_attrs: Mapping[str, str]

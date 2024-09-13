@@ -21,7 +21,7 @@ from rich import print
 
 from .args import subcommand
 from .config import HippoConfig, LDAPConfig, MongoConfig, Config
-
+from .errors import ExitCode
 from .hippoapi.api.event_queue import (event_queue_pending_events,
                                        event_queue_update_status)
 from .hippoapi.client import AuthenticatedClient
@@ -29,7 +29,7 @@ from .hippoapi.models import (QueuedEventAccountModel,
                               QueuedEventModel,
                               QueuedEventDataModel,
                               QueuedEventUpdateModel)
-from .ldap import LDAPManager, LDAPUser, LDAPGroup
+from .ldap import LDAPCommitFailed, LDAPManager, LDAPUser, LDAPGroup
 from .log import Console
 from .puppet import (MIN_PIGROUP_GID,
                      MIN_SYSTEM_UID,
@@ -167,6 +167,9 @@ class GlobalUser(BaseDocument):
     access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
     comments = ListField(StringField())
 
+    ldap_synced = BooleanField(default=False)
+    iam_synced = BooleanField(default=False)
+
     @classmethod
     def from_puppet(cls, username: str, 
                          puppet_record: PuppetUserRecord,
@@ -241,11 +244,13 @@ def user_apply_globals(sender, document, **kwargs):
     if site.global_groups:
         for site_group in site.global_groups:
             logger.info(f'Splat {site.sitename}: Add member {document.username} to group {site_group.groupname}')
-            site_group.update(add_to_set___members=document)
+            site_group.update(add_to_set___members=document,
+                              ldap_synced=False)
     if site.global_slurmers:
         for site_group in site.global_slurmers:
             logger.info(f'Splat {site.sitename}: Add slurmer {document.username} to group {site_group.groupname}')
-            site_group.update(add_to_set___slurmers=document)
+            site_group.update(add_to_set___slurmers=document,
+                              ldap_synced=False)
 
 
 @user_apply_globals.apply #type: ignore
@@ -257,6 +262,9 @@ class SiteUser(BaseDocument):
     _status = UserStatusField(default='active')
     #slurm: Optional[SlurmRecord] = None
     _access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
+
+    ldap_synced = BooleanField(default=False)
+    iam_synced = BooleanField(default=False)
 
     meta = {
         'indexes': [
@@ -356,6 +364,9 @@ site_user_t = Union[SiteUser, str]
 class GlobalGroup(BaseDocument):
     groupname = POSIXNameField(required=True, primary_key=True)
     gid = POSIXIDField(required=True)
+
+    ldap_synced = BooleanField(default=False)
+    iam_synced = BooleanField(default=False)
     
     @classmethod
     def from_puppet(cls, groupname: str, puppet_record: PuppetGroupRecord) -> Self:
@@ -469,25 +480,28 @@ class SiteGroup(BaseDocument):
     _slurmers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     slurm = EmbeddedDocumentField(SiteSlurmAccount)
 
+    ldap_synced = BooleanField(default=False)
+    iam_synced = BooleanField(default=False)
+
     @property
     def gid(self):
         return self.parent.gid
 
     @property
     def members(self):
-        return [m.username for m in self._members] #type: ignore
+        return {m.username for m in self._members} #type: ignore
 
     @property
     def sponsors(self):
-        return [s.username for s in self._sponsors] #type: ignore
+        return {s.username for s in self._sponsors} #type: ignore
 
     @property
     def sudoers(self):
-        return [s.username for s in self._sudoers] #type: ignore
+        return {s.username for s in self._sudoers} #type: ignore
 
     @property
     def slurmers(self):
-        return [s.username for s in self._slurmers] #type: ignore
+        return {s.username for s in self._slurmers} #type: ignore
 
     @classmethod
     def from_puppet(cls, groupname: str,
@@ -670,10 +684,12 @@ def site_apply_globals(sender, document, **kwargs):
         logger.info(f'Update globals with {len(site_users)} users')
         for site_group in document.global_groups:
             for site_user in site_users:
-                site_group.update(add_to_set___groups=site_user)
+                site_group.update(add_to_set___groups=site_user,
+                                  ldap_synced=False)
         for site_group in document.global_slurmers:
             for site_user in site_users:
-                site_group.update(add_to_set___slurmers=site_user)
+                site_group.update(add_to_set___slurmers=site_user,
+                                  ldap_synced=False)
 
 
 @site_apply_globals.apply #type: ignore
@@ -718,9 +734,10 @@ def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
     try:
         Site.objects.get(sitename=sitename) #type: ignore
     except DoesNotExist:
-        logger.error(f'Site {sitename} does not exist.')
         if raise_exc:
+            logger.error(f'Site {sitename} does not exist.')
             raise
+        logger.info(f'Site {sitename} does not exist.')
         return False
     else:
         return True
@@ -736,10 +753,12 @@ def add_user_comment(username: str, comment: str):
 
 def add_user_access(username: str, access_type: str, sitename: Optional[str] = None):
     if sitename is None:
-        GlobalUser.objects(username=username).update_one(add_to_set__access=access_type) #type: ignore
+        GlobalUser.objects(username=username).update_one(add_to_set__access=access_type,
+                                                         ldap_synced=False) #type: ignore
     else:
         SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(add_to_set___access=access_type)
+                         sitename=sitename).update_one(add_to_set___access=access_type,
+                                                       ldap_synced=False)
 
 
 def set_user_status(username: str,
@@ -752,15 +771,18 @@ def set_user_status(username: str,
     add_user_comment(username, comment)
 
     if sitename is None:
-        GlobalUser.objects(username=username).update_one(set__status=status) #type: ignore
+        GlobalUser.objects(username=username).update_one(set__status=status,
+                                                         ldap_synced=False) #type: ignore
     else:
         SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(set___status=status)
+                         sitename=sitename).update_one(set___status=status,
+                                                       ldap_synced=False)
 
 
 def set_user_type(username: str,
                   usertype: str):
-    GlobalUser.objects(username=username).update_one(set__type=usertype)
+    GlobalUser.objects(username=username).update_one(set__type=usertype,
+                                                     ldap_synced=False)
 
 
 def create_group_from_sponsor(sponsor_user: SiteUser):
@@ -861,7 +883,8 @@ def add_group_member(sitename: str, user: site_user_t, groupname: str):
         user = SiteUser.objects.get(sitename=sitename, username=user)
     logging.getLogger(__name__).info(f'Add user {user.username} to group {groupname} for site {sitename}')
     SiteGroup.objects(sitename=sitename,
-                      groupname=groupname).update_one(add_to_set___members=user)
+                      groupname=groupname).update_one(add_to_set___members=user,
+                                                      ldap_synced=False)
 
 
 def add_group_sponsor(sitename: str, user: site_user_t, groupname: str):
@@ -899,7 +922,8 @@ def add_site_slurmer(sitename: str, group: site_group_t):
 def add_site_group(sitename: str, group: site_group_t):
     if type(group) is str:
         group = SiteGroup.objects.get(sitename=sitename, groupname=group)
-    Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group)
+    Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group,
+                                                   ldap_synced=False)
     Site.objects.get(sitename=sitename).save()
 
 
@@ -1925,6 +1949,60 @@ def group_new_system(args: argparse.Namespace):
 
 #########################################
 #
+# storage commands: cheeto database storage ...
+#
+#########################################
+
+
+def add_storage_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--name', required=True)
+    parser.add_argument('--owner', required=True)
+    parser.add_argument('--group', required=True)
+    parser.add_argument('--host', required=True)
+    parser.add_argument('--path', required=True)
+    parser.add_argument('--table', required=True)
+    parser.add_argument('--collection')
+    parser.add_argument('--quota')
+    parser.add_argument('--globus', type=bool, default=False)
+
+
+@subcommand('add', add_site_args_req, add_storage_args)
+def storage_add(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    connect_to_database(args.config.mongo)
+
+    if args.collection is None:
+        args.collection = args.table
+    
+    mount = AutoFSMount.objects.get(sitename=args.site,
+                                    tablename=args.table)
+    collection = ZFSSourceCollection.objects.get(sitename=args.site,
+                                                 name=args.collection)
+    owner = GlobalUser.objects.get(username=args.owner)
+    group = GlobalGroup.objects.get(groupname=args.group)
+
+    source = ZFSMountSource(name=args.name,
+                            sitename=args.site,
+                            host=args.host,
+                            host_path=args.path,
+                            owner=owner,
+                            group=group,
+                            collection=collection,
+                            quota=args.quota)
+    try:
+        source.save()
+    except NotUniqueError:
+        logger.error(f'ZFSMountSource with name {args.name} on site {args.site} already exists')
+        return ExitCode.NOT_UNIQUE
+
+    storage = Storage(name=args.name,
+                      source=source,
+                      mount=mount,
+                      globus=args.globus)
+    storage.save()
+
+#########################################
+#
 # hippoapi commands: cheeto database hippoapi ...
 #
 #########################################
@@ -2145,40 +2223,126 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
 def ldap_sync(sitename: str, config: Config):
     connect_to_database(config.mongo)
     ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
+    site = Site.objects.get(sitename=sitename)
 
-    for user in SiteUser.objects(sitename=sitename):
-        if user.parent.type == 'system' or user.status != 'active' \
-           or user.parent.status != 'active':
-            continue
-
-            print(user.to_dict())
-        ldap_user = LDAPUser.Schema().load(dict(uid=user.username,
-                                                email=user.parent.email,
-                                                uid_number=user.parent.uid,
-                                                gid_number=user.parent.gid,
-                                                fullname=user.parent.fullname,
-                                                surname=user.parent.fullname.split()[-1]))
-
-        if ldap_mgr.verify_user(user.username):
-            ldap_mgr.delete_user(user.username)
-        ldap_mgr.add_user(ldap_user)
-
-        if 'login-ssh' in user.access:
-            try:
-                ldap_mgr.add_user_to_group(user.username, 'cluster-users', sitename)
-            except:
-                pass
-        if 'compute-ssh' in user.access or user.parent.type == 'admin':
-            try:
-                ldap_mgr.add_user_to_group(user.username, 'compute-ssh-users', sitename)
-            except:
-                pass
+    for user in GlobalUser.objects():
+        ldap_sync_globaluser(user, ldap_mgr)
 
     for group in SiteGroup.objects(sitename=sitename):
-        if not ldap_mgr.verify_group(group.groupname, sitename):
-            print(group.to_dict())
-            ldap_group = LDAPGroup.load(dict(gid=group.groupname,
-                                             gid_number=group.parent.gid,
-                                             members=group.members))
-            ldap_mgr.add_group(ldap_group, sitename)
+        ldap_sync_group(group, ldap_mgr)
 
+    for user in SiteUser.objects(sitename=sitename):
+        ldap_sync_siteuser(user, ldap_mgr)
+
+    for storage in Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
+                                                                 tablename='home')):
+        if not storage.host.endswith(site.fqdn):
+            host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
+        else:
+            host = storage.host
+        username = storage.source.owner.username
+        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(username,
+                                                             'home',
+                                                             sitename))
+        ldap_mgr.add_home_automount(username,
+                                    sitename,
+                                    host,
+                                    storage.host_path,
+                                    storage.mount.nfs_options)
+
+    for storage in Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
+                                                                 tablename='group')):
+        if not storage.host.endswith(site.fqdn):
+            host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
+        else:
+            host = storage.host
+        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.name,
+                                                             'group',
+                                                             sitename))
+        ldap_mgr.add_group_automount(storage.name,
+                                    sitename,
+                                    host,
+                                    storage.host_path,
+                                    storage.mount.nfs_options)
+
+
+def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):
+    logger = logging.getLogger(__name__)
+    if group.ldap_synced and group.parent.ldap_synced:
+        logger.info(f'Group {group.groupname} does not need to be synced')
+        return
+    
+    logger.info(f'ldap_sync_group: sync {group.groupname}') 
+
+    if not mgr.group_exists(group.groupname, group.sitename):
+        mgr.add_group(LDAPGroup.load(dict(groupname=group.groupname,
+                                          gid=group.parent.gid,
+                                          members=group.members)),
+                      group.sitename)
+        return
+
+    ldap_group = mgr.query_group(group.groupname, group.sitename)
+    to_remove = ldap_group.members - group.members
+    to_add = group.members - ldap_group.members
+
+    mgr.remove_users_from_group(to_remove, group.groupname, group.sitename)
+    mgr.add_user_to_group(to_add, group.groupname, group.sitename)
+
+    group.ldap_synced = True
+    group.parent.ldap_synced = True
+
+    group.save()
+    group.parent.save()
+
+def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
+    logger = logging.getLogger(__name__)
+    if user.ldap_synced:
+        logger.info(f'GlobalUser {user.username} does not need to be synced.')
+        return
+    logger.info(f'ldap_sync_globaluser: sync {user.username}')
+
+    data = dict(email=user.email,
+                uid=user.uid,
+                gid=user.gid,
+                shell=user.shell,
+                fullname=user.fullname,
+                surname=user.fullname.split()[-1]) #type: ignore
+    
+    try:
+        if mgr.user_exists(user.username):
+            mgr.update_user(user.username, **data)
+        else:
+            data['username'] = user.username
+            mgr.add_user(LDAPUser.load(data))
+    except LDAPCommitFailed:
+        logger.error(f'Failed to sync GlobalUser {user.username}.')
+    else:
+        user.ldap_synced = True
+        user.save()
+
+
+def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager):
+    logger = logging.getLogger(__name__)
+    if user.ldap_synced and user.parent.ldap_synced:
+        logger.info(f'SiteUser {user.username} does not need to be synced.')
+        return
+
+    if not mgr.user_exists(user.username):
+        ldap_sync_globaluser(user.parent, mgr)
+
+    ldap_groups = mgr.query_user_memberships(user.username, user.sitename)
+
+    for status, groupname in mgr.config.user_status_groups.items():
+        if status == user.status and groupname not in ldap_groups:
+            mgr.add_user_to_group(user.username, groupname, user.sitename)
+        if status != user.status and groupname in ldap_groups:
+            mgr.remove_users_from_group([user.username], groupname, user.sitename)
+
+    for access, groupname in mgr.config.user_access_groups.items():
+        if access in user.access and groupname not in ldap_groups:
+            mgr.add_user_to_group(user.username, groupname, user.sitename)
+        if access not in user.access and groupname in ldap_groups:
+            mgr.remove_users_from_group([user.username], groupname, user.sitename)
+
+    user.ldap_synced = True
+    user.save()

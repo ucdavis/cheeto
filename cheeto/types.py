@@ -85,7 +85,7 @@ HIPPO_EVENT_STATUSES = {
 
 
 def is_listlike(obj):
-    return isinstance(obj, Sequence) and not isinstance(obj, (str, bytes, bytearray))
+    return isinstance(obj, (Sequence, set)) and not isinstance(obj, (str, bytes, bytearray))
 
 
 class _BaseModel:
