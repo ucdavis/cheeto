@@ -11,6 +11,7 @@ import argparse
 from dataclasses import is_dataclass
 from datetime import datetime
 from enum import Enum
+import inspect
 from pathlib import Path
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
@@ -50,6 +51,10 @@ def removed(d: dict, key: Any):
     except KeyError:
         pass
     return d
+
+
+def _ctx_name():
+    return inspect.stack()[1].function
 
 
 def get_relative_path(lower_path: Path, upper_path: Path):

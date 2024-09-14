@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 import logging
 from pathlib import Path
+from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
 
 from mongoengine import *
@@ -43,11 +44,12 @@ from .puppet import (MIN_PIGROUP_GID,
                      add_repo_args,
                      SiteData)
 from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS,
-                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, hippo_to_cheeto_access,  
+                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, MOUNT_OPTS, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
                     USER_STATUSES, ACCESS_TYPES, SlurmQOSValidFlags)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
+                    _ctx_name,
                     size_to_megs,
                     removed,
                     remove_nones)
@@ -120,7 +122,7 @@ class BaseDocument(Document):
         'abstract': True
     }
 
-    def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
+    def to_dict(self, strip_id=True, strip_empty=False, raw=False, rekey=False, **kwargs):
         data = self.to_mongo(use_db_field=False).to_dict()
         if strip_id:
             data.pop('id', None)
@@ -131,7 +133,13 @@ class BaseDocument(Document):
                     del data[key]
             if not raw and key in data \
                and isinstance(self._fields[key], (ReferenceField, GenericReferenceField)):
-                data[key] = getattr(self, key).to_dict()
+                data[key] = getattr(self, key).to_dict(strip_empty=strip_empty,
+                                                       raw=raw,
+                                                       strip_id=strip_id,
+                                                       rekey=rekey)
+            if rekey and key in data and key.startswith('_'):
+                data[key.lstrip('_') ] = data[key]
+                del data[key]
         return data
 
     def clean(self):
@@ -140,6 +148,10 @@ class BaseDocument(Document):
 
     def __repr__(self):
         return dumps_yaml(self.to_dict(raw=True, strip_id=False, strip_empty=False))
+
+    def pretty(self) -> str:
+        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
+        return dumps_yaml(data)
 
 
 class HippoEvent(BaseDocument):
@@ -159,7 +171,7 @@ class GlobalUser(BaseDocument):
     gid = POSIXIDField(required=True)
     fullname = StringField(required=True)
     shell = ShellField(required=True)
-    #home_directory = StringField(required=True)
+    home_directory = StringField(required=True)
     type = UserTypeField(required=True)
     status = UserStatusField(required=True, default='active')
     password = StringField()
@@ -200,6 +212,10 @@ class GlobalUser(BaseDocument):
         if pw == 'x':
             pw = None
 
+        home_directory = puppet_record.home
+        if home_directory is None:
+            home_directory = f'/home/{username}'
+
         return cls(
             username = username,
             email = puppet_record.email,
@@ -207,6 +223,7 @@ class GlobalUser(BaseDocument):
             gid = puppet_record.gid,
             fullname = puppet_record.fullname,
             shell = shell,
+            home_directory=home_directory,
             type = usertype,
             status = puppet_record.status,
             ssh_key = [] if ssh_key is None else ssh_key.split('\n'),
@@ -223,15 +240,16 @@ class GlobalUser(BaseDocument):
             gid = hippo_data.mothra,
             fullname = hippo_data.name,
             shell = DEFAULT_SHELL,
+            home_directory = f'/home/{hippo_data.kerberos}',
             type = 'user',
             status = 'active',
             ssh_key = [hippo_data.key],
             access = hippo_to_cheeto_access(hippo_data.access_types) #type: ignore
         )
 
-    @property
-    def home_directory(self):
-        return f'/home/{self.username}'
+    #@property
+    #def home_directory(self):
+    #    return f'/home/{self.username}'
 
 
 global_user_t = Union[GlobalUser, str]
@@ -549,10 +567,34 @@ class SiteSlurmAssociation(BaseDocument):
         return data
 
 
+class NFSSourceCollection(BaseDocument):
+    sitename = StringField(required=True)
+    name = StringField(required=True)
+    _host = StringField()
+    prefix = StringField()
+    _export_options = StringField()
+    _export_ranges = ListField(StringField())
+
+    meta = {
+        'allow_inheritance': True,
+        'indexes': [
+            {
+                'fields': ['sitename', 'name', '_cls'],
+                'name': 'primary',
+                'unique': True
+            }
+        ]
+    }
+
+
+class ZFSSourceCollection(NFSSourceCollection):
+    _quota = DataQuotaField()
+
+
 class StorageMountSource(BaseDocument):
     name = StringField(required=True)
     sitename = StringField(required=True)
-    host  = StringField()
+    _host  = StringField()
     owner = ReferenceField(GlobalUser, required=True, reverse_delete_rule=CASCADE)
     group = ReferenceField(GlobalGroup, required=True, reverse_delete_rule=CASCADE)
 
@@ -575,51 +617,109 @@ class StorageMountSource(BaseDocument):
         return data
 
 
-class NFSSourceCollection(BaseDocument):
-    sitename = StringField(required=True)
-    name = StringField(required=True)
-    host = StringField()
-    prefix = StringField()
-    export_options = StringField()
-    export_ranges = ListField(StringField())
-
-    meta = {
-        'allow_inheritance': True,
-        'indexes': [
-            {
-                'fields': ['sitename', 'name', '_cls'],
-                'name': 'primary',
-                'unique': True
-            }
-        ]
-    }
-
-
-class ZFSSourceCollection(NFSSourceCollection):
-    quota = DataQuotaField()
-
-
 class NFSMountSource(StorageMountSource):
-    host_path = StringField()
-    export_options = StringField()
-    export_ranges = ListField(StringField())
+    _host_path = StringField()
+    _export_options = StringField()
+    _export_ranges = ListField(StringField())
     collection = GenericReferenceField(choices=[NFSSourceCollection,
                                                 ZFSSourceCollection])
 
+    @property
+    def export_options(self) -> str:
+        if self._export_options:
+            return self._export_options
+        if self.collection and self.collection._export_options:
+            return self.collection._export_options
+        return ''
+
+    @property
+    def export_ranges(self):
+        if self.collection:
+            return set(self.collection._export_ranges) | set(self._export_ranges)
+        else:
+            return set(self._export_ranges)
+
+    @property
+    def host(self):
+        if self._host:
+            return self._host
+        elif self.collection._host:
+            return self.collection._host
+        else:
+            raise ValueError(f'MountSource {self.name} has no host specified')
+
+    @property
+    def host_path(self):
+        if self._host_path:
+            return Path(self._host_path)
+        elif self.collection.prefix:
+            return Path(self.collection.prefix) / self.name
+        else:
+            raise ValueError(f'MountSource {self.name} has neither host_path nor collection prefix')
+
+
 
 class ZFSMountSource(NFSMountSource):
-    quota = DataQuotaField()
+    _quota = DataQuotaField()
+
+    @property
+    def quota(self):
+        if self._quota:
+            return self._quota
+        elif self.collection._quota:
+            return self.collection._quota
+        else:
+            return None
+
+def validate_mount_options(option: str):
+    tokens = option.split('=')
+    if tokens[0] not in MOUNT_OPTS:
+        raise ValidationError(f'{option} not a valid mount option')
+
+class MountOptionsMixin(Document):
+    _options = ListField(StringField(validation=validate_mount_options))
+    _add_options = ListField(StringField(validation=validate_mount_options))
+    _remove_options = ListField(StringField(validation=validate_mount_options))
+
+    meta = {
+        'abstract': True
+    }
 
 
-class StorageMount(BaseDocument):
+class AutomountMap(BaseDocument, MountOptionsMixin):
     sitename = StringField(required=True)
-    meta = {'allow_inheritance': True}
-
-
-class AutoFSMount(StorageMount):
     prefix = StringField(required=True)
     tablename = StringField(required=True, unique_with=['sitename', 'prefix'])
-    nfs_options = StringField()
+
+
+class StorageMount(BaseDocument, MountOptionsMixin):
+    sitename = StringField(required=True)
+
+    meta = {
+        'allow_inheritance': True
+    }
+
+
+class Automount(StorageMount):
+    name = StringField(required=True)
+    map = ReferenceField(AutomountMap, required=True, unique_with='name')
+
+    @property
+    def mount_options(self):
+        if self._options:
+            return self._options
+
+        options = set(self.map._options)
+        if self._remove_options:
+            options = options - self._remove_options
+        if self._add_options:
+            options = options | self._add_options
+
+        return options
+
+    @property
+    def mount_path(self):
+        return Path(self.map.prefix) / self.name
 
 
 class QuobyteMount(StorageMount):
@@ -636,43 +736,39 @@ class Storage(BaseDocument):
                                    choices=[NFSMountSource,
                                             ZFSMountSource])
     mount = GenericReferenceField(required=True,
-                                  choices=[AutoFSMount,
-                                           QuobyteMount,
-                                           BeeGFSMount])
+                                  choices=[Automount])
     globus = BooleanField()
 
     @property
+    def owner(self):
+        return self.source.owner.username
+
+    @property
+    def group(self):
+        return self.source.group.groupname
+
+    @property
     def host_path(self):
-        if self.source.host_path:
-            return Path(self.source.host_path)
-        elif self.source.collection.prefix:
-            return Path(self.source.collection.prefix) / self.source.name
-        else:
-            raise ValueError(f'Storage {self.name} source has neither host_path nor collection prefix')
+        return self.source.host_path
 
     @property
     def host(self):
-        if self.source.host:
-            return self.source.host
-        elif self.source.collection.host:
-            return self.source.collection.host
-        else:
-            raise ValueError(f'Storage {self.name} source has not host specified')
+        return self.source.host
 
     @property
     def mount_path(self):
-        return Path(self.mount.prefix) / self.name
+        return self.mount.mount_path
+
+    @property
+    def mount_options(self):
+        return self.mount.mount_options
 
     @property
     def quota(self):
         if not isinstance(self.source, ZFSMountSource):
             return None
-        elif self.source.quota:
-            return self.source.quota
-        elif self.source.collection and self.source.collection.quota:
-            return self.source.collection.quota
         else:
-            return None
+            return self.source.quota
 
 
 @handler(signals.post_save)
@@ -705,10 +801,10 @@ site_t = Union[Site, str]
 
 
 def connect_to_database(config: MongoConfig):
-    connect(config.database,
-            host=config.uri,
-            username=config.user,
-            password=config.password)
+    return connect(config.database,
+                   host=config.uri,
+                   username=config.user,
+                   password=config.password)
 
 
 def query_user_exists(username: str,
@@ -721,7 +817,7 @@ def query_user_exists(username: str,
         else:
             _ = SiteUser.objects.get(username=username, sitename=sitename)
     except DoesNotExist:
-        logger.error(f'User {username} at site {sitename} does not exist.')
+        logger.warning(f'User {username} at site {sitename} does not exist.')
         if raise_exc:
             raise
         return False
@@ -850,11 +946,15 @@ def query_user_sponsor_of(sitename: str, user: site_user_t):
 
 
 def query_user_home_storage(sitename: str, user: site_user_t):
+    logger = logging.getLogger(__name__)
     if type(user) is SiteUser:
         user = user.username
-    home_collection = NFSSourceCollection.objects.get(name='home', sitename=sitename)
-    return Storage.objects.get(source__in=StorageMountSource.objects(collection=home_collection,
-                                                                     name=user))
+    home_collection = NFSSourceCollection.objects.get(name='home',
+                                                      sitename=sitename)
+    home_sources = StorageMountSource.objects(collection=home_collection,
+                                              name=user)
+    #logger.info(f'{_ctx_name()}: {user}: {home_sources}')
+    return Storage.objects.get(source__in=home_sources)
  
 
 def query_user_storages(sitename: str, user: site_user_t):
@@ -871,11 +971,28 @@ def query_group_storages(sitename: str, group: global_group_t, tablename: Option
     if type(group) is str:
         group = GlobalGroup.objects.get(groupname=group)
     if tablename:
-        mount = AutoFSMount.objects.get(tablename=tablename, sitename=sitename)
+        mounts = Automount.objects(map=AutomountMap.objects.get(sitename=sitename, tablename='group'))
         return Storage.objects(source__in=StorageMountSource.objects(sitename=sitename, group=group),
-                               mount=mount)
+                               mount__in=mounts)
     else:
         return Storage.objects(source__in=StorageMountSource.objects(sitename=sitename, group=group))
+
+
+def query_automap_storages(sitename: str, tablename: str):
+    automap = AutomountMap.objects.get(sitename=sitename, tablename=tablename)
+    mounts = Automount.objects(map=automap).only('id')
+
+    return Storage.objects(mount__in=mounts)
+
+
+def query_associated_storages(sitename: str, username: str):
+    user = SiteUser.objects.get(sitename=sitename, username=username)
+    sitegroups = SiteGroup.objects(sitename=sitename, _members=user).only('parent')
+    globalgroups = [sg.parent for sg in sitegroups]
+
+    sources = StorageMountSource.objects(Qv(sitename=sitename) &
+                                         (Qv(group__in=globalgroups) | Qv(owner=user.parent)))
+    return Storage.objects(source__in=sources)
 
 
 def add_group_member(sitename: str, user: site_user_t, groupname: str):
@@ -935,6 +1052,39 @@ def get_next_system_id() -> int:
     return max(ids) + 1
 
 
+def create_home_storage(sitename: str, user: global_user_t):
+    logger = logging.getLogger(__name__)
+    if type(user) is str:
+        user = GlobalUser.objects.get(username=user).only('username')
+    group = GlobalGroup.objects.get(groupname=user.username).only('id')
+    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+                                                 name='home')
+    automap = AutomountMap.objects.get(sitename=sitename,
+                                       tablename='home').only('id')
+
+    source = ZFSMountSource(name=user.username,
+                            sitename=sitename,
+                            owner=user,
+                            group=group,
+                            collection=collection)
+    source.save()
+
+    mount = Automount(sitename=sitename,
+                      name=user.username,
+                      map=automap)
+    try:
+        mount.save()
+    except Exception as e:
+        logger.error(f'{_ctx_name()}: could not save mount {mount}')
+        source.delete()
+        raise
+
+    storage = Storage(name=user.username,
+                      source=source,
+                      mount=mount)
+    storage.save()
+
+
 def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
     logger = logging.getLogger(__name__)
     global_group = GlobalGroup(groupname=groupname,
@@ -958,8 +1108,8 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
 
     collection = ZFSSourceCollection.objects.get(sitename=sitename,
                                                  name='share')
-    mount = AutoFSMount.objects.get(sitename=sitename,
-                                    tablename='share')
+    automap = AutomountMap.objects.get(sitename=sitename,
+                                       tablename='share')
 
     for share_name, share in shares.items():
         owner = GlobalUser.objects.get(username=share.storage.owner)
@@ -967,8 +1117,8 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
 
         source_args = dict(name=share_name,
                            sitename=sitename,
-                           host_path=share.storage.autofs.path,
-                           host=share.storage.autofs.nas,
+                           _host_path=share.storage.autofs.path,
+                           _host=share.storage.autofs.nas,
                            owner=owner,
                            group=group,
                            collection=collection)
@@ -976,7 +1126,7 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
 
         if share.storage.zfs:
             source_type = ZFSMountSource
-            source_args['quota'] = share.storage.zfs.quota
+            source_args['_quota'] = share.storage.zfs.quota
 
         source = source_type(**source_args)
 
@@ -985,6 +1135,17 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
         except NotUniqueError:
             source = source_type.objects.get(sitename=sitename,
                                              name=share.storage.autofs.path)
+
+        mount = Automount(sitename=sitename,
+                          name=share_name,
+                          map=automap,
+                          _options=share.storage.autofs.split_options())
+        try:
+            mount.save()
+        except NotUniqueError:
+            mount = Automount.objects.get(sitename=sitename,
+                                          name=share_name,
+                                          map=automap)
 
         storage = Storage(name=share_name,
                           source=source,
@@ -1005,10 +1166,11 @@ def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
 
     collection = ZFSSourceCollection.objects.get(sitename=sitename,
                                                  name='group')
+    automap = AutomountMap.objects.get(sitename=sitename,
+                                       tablename='group')
 
     for storage in storages:
-        mount = AutoFSMount.objects.get(sitename=sitename,
-                                        tablename='group')
+
         owner = GlobalUser.objects.get(username=storage.owner)
         if storage.group:
             group = GlobalGroup.objects.get(groupname=storage.group)
@@ -1017,8 +1179,8 @@ def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
         if not storage.zfs:
             source = NFSMountSource(name=storage.autofs.path,
                                     sitename=sitename,
-                                    host_path=storage.autofs.path,
-                                    host=storage.autofs.nas,
+                                    _host_path=storage.autofs.path,
+                                    _host=storage.autofs.nas,
                                     owner=owner,
                                     group=group,
                                     collection=collection)
@@ -1026,24 +1188,35 @@ def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
                 source.save()
             except NotUniqueError:
                 source = NFSMountSource.objects.get(sitename=sitename,
-                                                    host=storage.autofs.nas,
-                                                    host_path=storage.autofs.path)
+                                                    _host=storage.autofs.nas,
+                                                    _host_path=storage.autofs.path)
                                                     
         else:
             source = ZFSMountSource(name=storage.autofs.path,
                                     sitename=sitename,
-                                    host=storage.autofs.nas,
-                                    host_path=storage.autofs.path,
+                                    _host=storage.autofs.nas,
+                                    _host_path=storage.autofs.path,
                                     owner=owner,
                                     group=group,
-                                    quota=storage.zfs.quota,
+                                    _quota=storage.zfs.quota,
                                     collection=collection)
             try:
                 source.save()
             except NotUniqueError:
                 source = ZFSMountSource.objects.get(sitename=sitename,
-                                                    host=storage.autofs.nas,
-                                                    host_path=storage.autofs.path)
+                                                    _host=storage.autofs.nas,
+                                                    _host_path=storage.autofs.path)
+
+        mount = Automount(sitename=sitename,
+                          map=automap,
+                          name=storage.name,
+                          _options=storage.autofs.split_options())
+        try:
+            mount.save()
+        except NotUniqueError:
+            mount = Automount.objects.get(sitename=sitename,
+                                          map=automap,
+                                          name=storage.name)
         
         record = Storage(name=storage.name,
                          source=source,
@@ -1200,13 +1373,14 @@ def user_to_puppet(user: SiteUser):
     if user.type == 'system':
         tags.add('system-tag')
 
-    home_collection = NFSSourceCollection.objects.get(name='home', sitename=user.sitename)
-    home_storage = Storage.objects.get(source__in=StorageMountSource.objects(collection=home_collection, 
-                                                                             name=user.username))
-    
-    storage = dict(autofs={'nas': home_storage.host,
-                           'path': str(home_storage.host_path.parent)},
-                   zfs={'quota': home_storage.quota} if home_storage.quota else False)
+    try:
+        home_storage = query_user_home_storage(user.sitename, user)
+    except DoesNotExist:
+        storage = None
+    else:
+        storage = dict(autofs={'nas': home_storage.host,
+                               'path': str(home_storage.host_path.parent)},
+                       zfs=get_puppet_zfs(home_storage))
     user_data = dict(fullname=user.fullname,
                      email=user.email,
                      uid=user.uid,
@@ -1231,12 +1405,13 @@ def get_puppet_zfs(storage: Storage):
 
 
 def group_to_puppet(group: SiteGroup):
-    storages = query_group_storages(group.sitename, group.parent, tablename='group')
-    
+    storages = query_group_storages(group.sitename,
+                                    group.parent,
+                                    tablename='group')
     storages_data = [
         {'name': s.name,
-         'owner': s.source.owner.username,
-         'group': group.groupname,
+         'owner': s.owner,
+         'group': s.group,
          'autofs': {
             'nas': s.host,
             'path': str(s.host_path)},
@@ -1252,8 +1427,8 @@ def group_to_puppet(group: SiteGroup):
 
 def share_to_puppet(share: Storage):
     storage_data = {
-        'owner': share.source.owner.username,
-        'group': share.source.group.groupname,
+        'owner': share.owner,
+        'group': share.group,
         'autofs': {
             'nas': share.host,
             'path': str(share.host_path)},
@@ -1275,8 +1450,7 @@ def site_to_puppet(sitename: str):
         groups[group.groupname] = group_to_puppet(group)
 
     shares = {}
-    storages = Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
-                                                             tablename='share'))
+    storages = query_automap_storages(sitename, 'share')
     for share in storages.order_by('name'):
         shares[share.name] = share_to_puppet(share)
 
@@ -1294,7 +1468,7 @@ def purge_database():
     for collection in (Site, GlobalUser, SiteUser, GlobalGroup, SiteGroup, HippoEvent,
                        SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS,
                        StorageMountSource, NFSMountSource, ZFSMountSource,
-                       StorageMount, Storage, NFSSourceCollection):
+                       StorageMount, Automount, AutomountMap, Storage, NFSSourceCollection):
         collection.drop_collection()
 
 
@@ -1379,23 +1553,29 @@ def load(args: argparse.Namespace):
                 autofs = config['autofs']
                 col_args = dict(sitename=args.site,
                                 name=tablename,
-                                host=autofs.get('nas', None),
+                                _host=autofs.get('nas', None),
                                 prefix=autofs.get('path', None),
-                                export_options=export_options,
-                                export_ranges=export_ranges,
-                                quota=config.get('zfs', {}).get('quota', None))
+                                _export_options=export_options,
+                                _export_ranges=export_ranges,
+                                _quota=config.get('zfs', {}).get('quota', None))
                 collection = ZFSSourceCollection(**{k:v for k, v in col_args.items() if v is not None})
                 try:
                     collection.save()
                 except NotUniqueError:
                     pass
+
+                if (raw_opts := config['autofs'].get('options', False)):
+                    options = raw_opts.strip('-').split(',')
+                else:
+                    options = None
+
                 mount_args = dict(sitename=args.site,
                                   prefix=f'/{tablename}',
                                   tablename=tablename,
-                                  nfs_options=config['autofs'].get('options', None))
-                mount = AutoFSMount(**{k:v for k, v in mount_args.items() if v is not None})
+                                  _options=options)
+                mountmap = AutomountMap(**{k:v for k, v in mount_args.items() if v is not None})
                 try:
-                    mount.save()
+                    mountmap.save()
                 except NotUniqueError:
                     pass
 
@@ -1423,8 +1603,8 @@ def load(args: argparse.Namespace):
         group_sudoers = defaultdict(set)
         home_collection = ZFSSourceCollection.objects.get(sitename=args.site,
                                                           name='home')
-        home_mount = AutoFSMount.objects.get(sitename=args.site,
-                                             tablename='home')
+        home_automap = AutomountMap.objects.get(sitename=args.site,
+                                                tablename='home')
         for user_name, user_record in site_data.iter_users():
             if user_record.ensure == 'absent':
                 continue
@@ -1475,13 +1655,16 @@ def load(args: argparse.Namespace):
             if user_record.group_sudo is not None:
                 for group_name in user_record.group_sudo:
                     group_sudoers[group_name].add(site_record)
+            
+            if user_name == 'root':
+                continue
 
             us = user_record.storage
             if us and us.autofs:
                 source = NFSMountSource(name=user_name,
                                         sitename=args.site,
-                                        host=us.autofs.nas,
-                                        host_path=str(Path(us.autofs.path) / user_name),
+                                        _host=us.autofs.nas,
+                                        _host_path=str(Path(us.autofs.path) / user_name),
                                         owner=global_record,
                                         group=global_group,
                                         collection=home_collection)
@@ -1490,7 +1673,7 @@ def load(args: argparse.Namespace):
                                         sitename=args.site,
                                         owner=global_record,
                                         group=global_group,
-                                        quota=us.zfs.quota,
+                                        _quota=us.zfs.quota,
                                         collection=home_collection)
             else:
                 source = ZFSMountSource(name=user_name,
@@ -1503,9 +1686,21 @@ def load(args: argparse.Namespace):
             except NotUniqueError:
                 source = StorageMountSource.objects.get(sitename=args.site,
                                                         name=user_name)
+
+            options = us.autofs.split_options() if us is not None and us.autofs is not None else None
+            mount = Automount(sitename=args.site,
+                              name=user_name,
+                              map=home_automap,
+                              _options=options)
+            try:
+                mount.save()
+            except NotUniqueError:
+                mount = Automount.objects.get(sitename=args.site,
+                                              name=user_name,
+                                              map=home_automap)
             storage_record = Storage(name=user_name,
                                      source=source,
-                                     mount=home_mount)
+                                     mount=mount)
             try:
                 storage_record.save()
             except NotUniqueError:
@@ -1517,8 +1712,8 @@ def load(args: argparse.Namespace):
                 continue
             if group_record.storage is not None:
                 load_group_storages_from_puppet(group_record.storage,
-                                    groupname,
-                                    args.site)
+                                                groupname,
+                                                args.site)
             if group_record.sponsors is not None:
                 for username in group_record.sponsors:
                     add_group_sponsor(args.site, username, groupname)
@@ -1962,7 +2157,10 @@ def add_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--path', required=True)
     parser.add_argument('--table', required=True)
     parser.add_argument('--collection')
-    parser.add_argument('--quota')
+    parser.add_argument('--quota', help='Override default quota from the collection')
+    parser.add_argument('--options', help='Override mount options from automount map for this mount')
+    parser.add_argument('--add-options', help='Add mount options to automount map options for this mount')
+    parser.add_argument('--remove-options', help='Remove mount options from automount map options for this mount')
     parser.add_argument('--globus', type=bool, default=False)
 
 
@@ -1974,8 +2172,8 @@ def storage_add(args: argparse.Namespace):
     if args.collection is None:
         args.collection = args.table
     
-    mount = AutoFSMount.objects.get(sitename=args.site,
-                                    tablename=args.table)
+    automap = AutomountMap.objects.get(sitename=args.site,
+                                       tablename=args.table)
     collection = ZFSSourceCollection.objects.get(sitename=args.site,
                                                  name=args.collection)
     owner = GlobalUser.objects.get(username=args.owner)
@@ -1983,17 +2181,35 @@ def storage_add(args: argparse.Namespace):
 
     source = ZFSMountSource(name=args.name,
                             sitename=args.site,
-                            host=args.host,
-                            host_path=args.path,
+                            _host=args.host,
+                            _host_path=args.path,
                             owner=owner,
                             group=group,
                             collection=collection,
-                            quota=args.quota)
+                            _quota=args.quota)
+
+    mount = Automount(name=args.name,
+                      sitename=args.site,
+                      map=automap,
+                      _options=args.options.split(',') if args.options else None,
+                      _add_options=args.add_options.split(',') if args.add_options else None,
+                      _remove_options=args.remove_options.split(',') if args.remove_options else None)
+
     try:
         source.save()
     except NotUniqueError:
         logger.error(f'ZFSMountSource with name {args.name} on site {args.site} already exists')
         return ExitCode.NOT_UNIQUE
+
+    try:
+        mount.save()
+    except NotUniqueError:
+        logger.error(f'ZFSMountSource with name {args.name} on site {args.site} already exists')
+        source.delete()
+        return ExitCode.NOT_UNIQUE
+    except:
+        source.delete()
+        raise
 
     storage = Storage(name=args.name,
                       source=source,
@@ -2198,6 +2414,11 @@ def process_createaccount_event(event: QueuedEventDataModel,
                                _members=[site_user])
         site_group.save()
 
+    try:
+        create_home_storage(sitename, global_user)
+    except Exception:
+        logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}')
+
     for group in event.groups:
         add_group_member(sitename, username, group.name)
 
@@ -2234,24 +2455,22 @@ def ldap_sync(sitename: str, config: Config):
     for user in SiteUser.objects(sitename=sitename):
         ldap_sync_siteuser(user, ldap_mgr)
 
-    for storage in Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
-                                                                 tablename='home')):
+    for storage in query_automap_storages(sitename, 'home'):
         if not storage.host.endswith(site.fqdn):
             host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
         else:
             host = storage.host
-        username = storage.source.owner.username
-        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(username,
+
+        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.owner,
                                                              'home',
                                                              sitename))
-        ldap_mgr.add_home_automount(username,
+        ldap_mgr.add_home_automount(storage.owner,
                                     sitename,
                                     host,
                                     storage.host_path,
-                                    storage.mount.nfs_options)
+                                    '-' + ','.join(storage.mount_options))
 
-    for storage in Storage.objects(mount=AutoFSMount.objects.get(sitename=sitename,
-                                                                 tablename='group')):
+    for storage in query_automap_storages(sitename, 'group'):
         if not storage.host.endswith(site.fqdn):
             host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
         else:
@@ -2260,10 +2479,10 @@ def ldap_sync(sitename: str, config: Config):
                                                              'group',
                                                              sitename))
         ldap_mgr.add_group_automount(storage.name,
-                                    sitename,
-                                    host,
-                                    storage.host_path,
-                                    storage.mount.nfs_options)
+                                     sitename,
+                                     host,
+                                     storage.host_path,
+                                     '-' + ','.join(storage.mount_options))
 
 
 def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):

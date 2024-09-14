@@ -52,6 +52,12 @@ class PuppetAutofs(BaseModel):
     path: str # TODO: path-like
     options: Optional[str] = None
 
+    def split_options(self):
+        if self.options is None:
+            return None
+        else:
+            return self.options.strip('-').split(',')
+
 
 @require_kwargs
 @dataclass(frozen=True)
