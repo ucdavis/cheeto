@@ -817,8 +817,8 @@ def query_user_exists(username: str,
         else:
             _ = SiteUser.objects.get(username=username, sitename=sitename)
     except DoesNotExist:
-        logger.warning(f'User {username} at site {sitename} does not exist.')
         if raise_exc:
+            logger.warning(f'User {username} at site {sitename} does not exist.')
             raise
         return False
     else:
@@ -1177,7 +1177,7 @@ def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
         else:
             group = GlobalGroup.objects.get(groupname=groupname)
         if not storage.zfs:
-            source = NFSMountSource(name=storage.autofs.path,
+            source = NFSMountSource(name=storage.name,
                                     sitename=sitename,
                                     _host_path=storage.autofs.path,
                                     _host=storage.autofs.nas,
@@ -1358,6 +1358,7 @@ def slurm_association_state(sitename: str):
 
 
 def user_to_puppet(user: SiteUser):
+    logger = logging.getLogger(__name__)
     memberships = set(query_user_groups(user.sitename, user))
     memberships.remove(user.username)
     slurmerships = list(query_user_slurmership(user.sitename, user))
@@ -1390,11 +1391,15 @@ def user_to_puppet(user: SiteUser):
                      tag=tags,
                      home=user.home_directory,
                      password=user.password,
-                     expiry=user.expiry,
+                     expiry=str(user.expiry) if user.expiry else None,
                      slurm=slurm,
                      storage=storage)
     remove_nones(user_data)
-    return PuppetUserRecord.load(user_data)
+    try:
+        return PuppetUserRecord.load(user_data)
+    except:
+        logger.error(f'{_ctx_name()}: PuppetUserRecord validation error loading {user_data}')
+        return None
 
 
 def get_puppet_zfs(storage: Storage):
@@ -1441,7 +1446,9 @@ def share_to_puppet(share: Storage):
 def site_to_puppet(sitename: str):
     users = {}
     for user in SiteUser.objects(sitename=sitename).order_by('username'):
-        users[user.username] = user_to_puppet(user)
+        record = user_to_puppet(user)
+        if record:
+            users[user.username] = record
 
     groups = {}
     for group in SiteGroup.objects(sitename=sitename).order_by('groupname'):
@@ -1513,6 +1520,11 @@ def site_write_to_puppet(args: argparse.Namespace):
     puppet_map = site_to_puppet(args.site)
     puppet_map.save_yaml(args.puppet_yaml)
 
+
+@subcommand('to-ldap',
+            add_site_args_req)
+def site_sync_to_ldap(args: argparse.Namespace):
+    ldap_sync(args.site, args.config)
 
 #########################################
 #
@@ -1635,8 +1647,11 @@ def load(args: argparse.Namespace):
                                    _members=[site_record])
             try:
                 site_group.save()
-            except:
-                pass
+            except NotUniqueError:
+                logger.info(f'{_ctx_name()}: SiteGroup {user_name} already exists, adding user as member')
+                add_group_member(args.site, site_record, user_name)
+            except Exception as e:
+                logger.warning(f'{_ctx_name()}: error saving SiteGroup for {user_name}: {e}')
 
             if global_record.type == 'system' and args.system_groups:
                 global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
@@ -2217,6 +2232,36 @@ def storage_add(args: argparse.Namespace):
                       globus=args.globus)
     storage.save()
 
+
+@subcommand('to-puppet',
+            add_site_args_req, 
+            lambda parser: parser.add_argument('puppet_yaml', type=Path))
+def storage_to_puppet(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    zfs = defaultdict(list)
+    nfs = defaultdict(list)
+    for s in StorageMountSource.objects(sitename=args.site):
+        data = dict(name=s.name,
+                    owner=s.owner.username, 
+                    group=s.group.groupname, 
+                    path=str(s.host_path), 
+                    export_options=s.export_options, 
+                    export_ranges=list(s.export_ranges))
+        if s._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
+            data['quota'] = s.quota
+            zfs[s.host].append(data)
+        else:
+            nfs[s.host].append(data)
+
+    puppet = {'zfs': dict(zfs)}
+    if nfs:
+        puppet['nfs'] = dict(nfs)
+
+    with args.puppet_yaml.open('w') as fp:
+        print(dumps_yaml(puppet), file=fp)
+
+
 #########################################
 #
 # hippoapi commands: cheeto database hippoapi ...
@@ -2446,8 +2491,8 @@ def ldap_sync(sitename: str, config: Config):
     ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
     site = Site.objects.get(sitename=sitename)
 
-    for user in GlobalUser.objects():
-        ldap_sync_globaluser(user, ldap_mgr)
+    for user in SiteUser.objects(sitename=sitename):
+        ldap_sync_globaluser(user.parent, ldap_mgr)
 
     for group in SiteGroup.objects(sitename=sitename):
         ldap_sync_group(group, ldap_mgr)

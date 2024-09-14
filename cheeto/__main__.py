@@ -79,6 +79,7 @@ def main():
     site_commands = site_parser.add_subparsers()
     database.site_add_global_slurm(site_commands)
     database.site_write_to_puppet(site_commands)
+    database.site_sync_to_ldap(site_commands)
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())
@@ -102,6 +103,7 @@ def main():
     storage_parser.set_defaults(func = lambda _: storage_parser.print_help())
     storage_commands = storage_parser.add_subparsers()
     database.storage_add(storage_commands)
+    database.storage_to_puppet(storage_commands)
 
     args = parser.parse_args()
     if not hasattr(args, 'log'):

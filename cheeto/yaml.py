@@ -55,6 +55,7 @@ def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper.Representer.add_representer(Int64, RoundTripRepresenter.represent_int)
     dumper.Representer.add_representer(ObjectId, objectid_representer)
     dumper.Representer.add_representer(DBRef, dbref_representer)
+    dumper.Representer.add_representer(set, RoundTripRepresenter.represent_list)
     stream = StringIO()
     dumper.dump(obj, stream, **kwargs)
     return stream.getvalue()
