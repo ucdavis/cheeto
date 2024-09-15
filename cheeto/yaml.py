@@ -7,7 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 12.04.2023
 
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from typing import Any, Type
 from enum import Enum
 import os
@@ -51,6 +51,7 @@ def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
     dumper.width = sys.maxsize
     dumper.Representer.add_representer(OrderedDict, RoundTripRepresenter.represent_dict)
+    dumper.Representer.add_representer(defaultdict, RoundTripRepresenter.represent_dict)
     dumper.Representer.add_representer(str, str_representer)
     dumper.Representer.add_representer(Int64, RoundTripRepresenter.represent_int)
     dumper.Representer.add_representer(ObjectId, objectid_representer)

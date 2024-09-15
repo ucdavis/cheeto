@@ -15,6 +15,7 @@ from pathlib import Path
 from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
 
+from bson.json_util import default
 from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
@@ -1464,6 +1465,8 @@ def site_to_puppet(sitename: str):
     return PuppetAccountMap(user=users,
                             group=groups,
                             share=shares)
+
+
         
 
 def purge_database():
@@ -2239,24 +2242,39 @@ def storage_add(args: argparse.Namespace):
 def storage_to_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
-    zfs = defaultdict(list)
-    nfs = defaultdict(list)
-    for s in StorageMountSource.objects(sitename=args.site):
-        data = dict(name=s.name,
-                    owner=s.owner.username, 
-                    group=s.group.groupname, 
-                    path=str(s.host_path), 
-                    export_options=s.export_options, 
-                    export_ranges=list(s.export_ranges))
-        if s._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
-            data['quota'] = s.quota
-            zfs[s.host].append(data)
-        else:
-            nfs[s.host].append(data)
+    zfs = dict(group=defaultdict(list), user=defaultdict(list))
+    nfs = dict(group=defaultdict(list), user=defaultdict(list))
 
-    puppet = {'zfs': dict(zfs)}
+
+    for s in query_automap_storages(args.site, 'group'):
+        data = dict(name=s.name,
+                    owner=s.owner, 
+                    group=s.group, 
+                    path=str(s.host_path), 
+                    export_options=s.source.export_options, 
+                    export_ranges=list(s.source.export_ranges))
+        if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
+            data['quota'] = s.quota
+            data['permissions'] = '2770'
+            zfs['group'][s.host].append(data)
+        else:
+            nfs['group'][s.host].append(data)
+
+    for s in query_automap_storages(args.site, 'home'):
+        data = dict(name=s.name,
+                    owner=s.owner, 
+                    group=s.group, 
+                    path=str(s.host_path))
+        if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
+            data['quota'] = s.quota
+            data['permissions'] = '0770'
+            zfs['user'][s.host].append(data)
+        else:
+            nfs['user'][s.host].append(data)
+
+    puppet = {'zfs': zfs}
     if nfs:
-        puppet['nfs'] = dict(nfs)
+        puppet['nfs'] = nfs
 
     with args.puppet_yaml.open('w') as fp:
         print(dumps_yaml(puppet), file=fp)
@@ -2533,10 +2551,15 @@ def ldap_sync(sitename: str, config: Config):
 def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):
     logger = logging.getLogger(__name__)
     if group.ldap_synced and group.parent.ldap_synced:
-        logger.info(f'Group {group.groupname} does not need to be synced')
+        logger.info(f'{_ctx_name()}: Group {group.groupname} does not need to be synced')
+        return
+
+    special_groups = set(mgr.config.user_access_groups.values()) | set(mgr.config.user_status_groups.values())
+    if group.groupname in special_groups:
+        logger.info(f'{_ctx_name()}: Skip sync for special group {group.groupname}')
         return
     
-    logger.info(f'ldap_sync_group: sync {group.groupname}') 
+    logger.info(f'{_ctx_name()}: sync {group.groupname}') 
 
     if not mgr.group_exists(group.groupname, group.sitename):
         mgr.add_group(LDAPGroup.load(dict(groupname=group.groupname,
@@ -2561,9 +2584,9 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):
 def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
     logger = logging.getLogger(__name__)
     if user.ldap_synced:
-        logger.info(f'GlobalUser {user.username} does not need to be synced.')
+        logger.info(f'{_ctx_name()}: GlobalUser {user.username} does not need to be synced.')
         return
-    logger.info(f'ldap_sync_globaluser: sync {user.username}')
+    logger.info(f'{_ctx_name()}: sync {user.username}')
 
     data = dict(email=user.email,
                 uid=user.uid,
@@ -2579,7 +2602,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
             data['username'] = user.username
             mgr.add_user(LDAPUser.load(data))
     except LDAPCommitFailed:
-        logger.error(f'Failed to sync GlobalUser {user.username}.')
+        logger.error(f'{_ctx_name()}: Failed to sync GlobalUser {user.username}.')
     else:
         user.ldap_synced = True
         user.save()
@@ -2588,7 +2611,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
 def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager):
     logger = logging.getLogger(__name__)
     if user.ldap_synced and user.parent.ldap_synced:
-        logger.info(f'SiteUser {user.username} does not need to be synced.')
+        logger.info(f'{_ctx_name()}: SiteUser {user.username} does not need to be synced.')
         return
 
     if not mgr.user_exists(user.username):
@@ -2598,14 +2621,18 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager):
 
     for status, groupname in mgr.config.user_status_groups.items():
         if status == user.status and groupname not in ldap_groups:
+            logger.info(f'{_ctx_name()}: add status {status} for {user.username}')
             mgr.add_user_to_group(user.username, groupname, user.sitename)
         if status != user.status and groupname in ldap_groups:
+            logger.info(f'{_ctx_name()}: remove status {status} for {user.username}')
             mgr.remove_users_from_group([user.username], groupname, user.sitename)
 
     for access, groupname in mgr.config.user_access_groups.items():
         if access in user.access and groupname not in ldap_groups:
+            logger.info(f'{_ctx_name()}: add access {access} for {user.username}')
             mgr.add_user_to_group(user.username, groupname, user.sitename)
         if access not in user.access and groupname in ldap_groups:
+            logger.info(f'{_ctx_name()}: remove access {access} for {user.username}')
             mgr.remove_users_from_group([user.username], groupname, user.sitename)
 
     user.ldap_synced = True
