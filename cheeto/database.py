@@ -1546,6 +1546,23 @@ def site_write_to_sympa(args: argparse.Namespace):
                 print(user.email, file=fp)
 
 
+@subcommand('root-key',
+            add_site_args_req,
+            lambda parser: parser.add_argument('output_txt', type=Path))
+def site_write_root_key(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    with args.output_txt.open('w') as fp:
+        for user in SiteUser.objects(sitename=args.site,
+                                     parent__in=GlobalUser.objects(type='admin')):
+            if 'root-ssh' in user.access:
+                if user.ssh_key:
+                    print(f'# {user.username} <{user.email}>', file=fp)
+                for key in user.ssh_key:
+                    print(key, file=fp)
+
+
+
 #########################################
 #
 # load commands: cheeto database load ...
