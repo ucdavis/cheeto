@@ -19,7 +19,6 @@ from bson.json_util import default
 from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
-from rich import print
 
 from .args import subcommand
 from .config import HippoConfig, LDAPConfig, MongoConfig, Config
@@ -1562,6 +1561,26 @@ def site_write_root_key(args: argparse.Namespace):
                     print(key, file=fp)
 
 
+@subcommand('list')
+def site_list(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    for site in Site.objects():
+        print(site.sitename, site.fqdn)
+
+
+@subcommand('show',
+            lambda parser: parser.add_argument('sitename'))
+def site_show(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    site = Site.objects.get(sitename=args.sitename)
+    console = Console()
+    console.print(site.fqdn)
+    total_users = SiteUser.objects(sitename=args.sitename).count()
+    reg_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='user')).count()
+    admin_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='admin')).count()
+    system_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='system')).count()
 
 #########################################
 #
