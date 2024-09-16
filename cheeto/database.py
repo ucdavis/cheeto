@@ -20,6 +20,8 @@ from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 
+from cheeto.git import GitRepo
+
 from .args import subcommand
 from .config import HippoConfig, LDAPConfig, MongoConfig, Config
 from .errors import ExitCode
@@ -953,6 +955,21 @@ def query_user_sponsor_of(sitename: str, user: site_user_t):
         yield group.groupname
 
 
+def query_admin_keys(sitename: Optional[str] = None):
+    if sitename is not None:
+        query = SiteUser.objects(sitename=sitename,
+                                 parent__in=GlobalUser.objects(type='admin'))
+    else:
+        query = GlobalUser.objects(type='admin')
+    
+    keys = []
+    for user in query:
+        if 'root-ssh' in user.access:
+            keys.extend(user.ssh_key)
+
+    return keys
+
+
 def query_user_home_storage(sitename: str, user: site_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is SiteUser:
@@ -1542,12 +1559,14 @@ def site_sync_to_ldap(args: argparse.Namespace):
             add_site_args_req,
             lambda parser: parser.add_argument('output_txt', type=Path),
             lambda parser: parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu']))
-def site_write_to_sympa(args: argparse.Namespace):
+def site_write_sympa(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
-    ignore = set(args.ignore)
+    _site_write_sympa(args.site, args.output_txt, set(args.ignore))
 
-    with args.output_txt.open('w') as fp:
-        for user in SiteUser.objects(sitename='hive', 
+
+def _site_write_sympa(sitename: str, output: Path, ignore: set):
+    with output.open('w') as fp:
+        for user in SiteUser.objects(sitename=sitename, 
                                      parent__in=GlobalUser.objects(type__in=['user', 'admin'])):
             if user.status != 'inactive' and user.email not in ignore:
                 print(user.email, file=fp)
@@ -1558,15 +1577,42 @@ def site_write_to_sympa(args: argparse.Namespace):
             lambda parser: parser.add_argument('output_txt', type=Path))
 def site_write_root_key(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
+    _site_write_root_key(args.site, args.output_txt)
 
-    with args.output_txt.open('w') as fp:
-        for user in SiteUser.objects(sitename=args.site,
+
+def _site_write_root_key(sitename: str, output: Path):
+    with output.open('w') as fp:
+        for user in SiteUser.objects(sitename=sitename,
                                      parent__in=GlobalUser.objects(type='admin')):
             if 'root-ssh' in user.access:
                 if user.ssh_key:
                     print(f'# {user.username} <{user.email}>', file=fp)
                 for key in user.ssh_key:
                     print(key, file=fp)
+
+
+@subcommand('sync-new-puppet',
+            add_site_args_req,
+            lambda parser: parser.add_argument('repo', type=Path),
+            lambda parser: parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu']))
+def site_sync_new_puppet(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    site = Site.objects.get(sitename=args.site)
+    repo = GitRepo(args.repo)
+    prefix = (args.repo / 'domains' / site.fqdn).absolute()
+
+    with repo.commit(f'Update root.pub, storage.yaml, and sympa.txt for {site.fqdn}.', clean=True) as add:
+        root_key_path = prefix / 'root.pub'
+        _site_write_root_key(args.site, root_key_path)
+
+        storage_path = prefix / 'storage.yaml'
+        _storage_to_puppet(args.site, storage_path)
+
+        sympa_path = prefix / 'sympa.txt'
+        _site_write_sympa(args.site, sympa_path, args.ignore_emails)
+
+        add(root_key_path, storage_path, sympa_path)
 
 
 @subcommand('list')
@@ -2302,12 +2348,15 @@ def storage_add(args: argparse.Namespace):
             lambda parser: parser.add_argument('puppet_yaml', type=Path))
 def storage_to_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
+    _storage_to_puppet(args.site, args.puppet_yaml)
+
+def _storage_to_puppet(sitename: str, output: Path):
 
     zfs = dict(group=defaultdict(list), user=defaultdict(list))
     nfs = dict(group=defaultdict(list), user=defaultdict(list))
 
 
-    for s in query_automap_storages(args.site, 'group'):
+    for s in query_automap_storages(sitename, 'group'):
         data = dict(name=s.name,
                     owner=s.owner, 
                     group=s.group, 
@@ -2321,7 +2370,7 @@ def storage_to_puppet(args: argparse.Namespace):
         else:
             nfs['group'][s.host].append(data)
 
-    for s in query_automap_storages(args.site, 'home'):
+    for s in query_automap_storages(sitename, 'home'):
         data = dict(name=s.name,
                     owner=s.owner, 
                     group=s.group, 
@@ -2339,7 +2388,7 @@ def storage_to_puppet(args: argparse.Namespace):
     if nfs:
         puppet['nfs'] = nfs
 
-    with args.puppet_yaml.open('w') as fp:
+    with output.open('w') as fp:
         print(dumps_yaml(puppet), file=fp)
 
 
@@ -2708,6 +2757,10 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
         if access not in user.access and groupname in ldap_groups:
             logger.info(f'{_ctx_name()}: remove access {access} for {user.username}')
             mgr.remove_users_from_group([user.username], groupname, user.sitename)
+
+    if user.type == 'system':
+        keys = query_admin_keys(sitename=user.sitename)
+        mgr.update_user(user.username, ssh_keys=keys)
 
     user.ldap_synced = True
     user.save()

@@ -10,8 +10,6 @@
 import argparse
 import sys
 
-from cheeto import hippoapi
-
 from . import __version__
 from . import config
 from . import database
@@ -80,9 +78,10 @@ def main():
     database.site_add_global_slurm(site_commands)
     database.site_write_to_puppet(site_commands)
     database.site_sync_to_ldap(site_commands)
-    database.site_write_to_sympa(site_commands)
+    database.site_write_sympa(site_commands)
     database.site_write_root_key(site_commands)
     database.site_list(site_commands)
+    database.site_sync_new_puppet(site_commands)
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())

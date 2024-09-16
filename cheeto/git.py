@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 31.05.2023
 
+from contextlib import contextmanager
 from enum import Enum, auto
 import logging
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 import socket
 from typing import Optional, Tuple
 
+from filelock import FileLock
 import sh
 
 from .utils import human_timestamp, TIMESTAMP_NOW, sanitize_timestamp
@@ -48,6 +50,9 @@ class Git:
         if remote_create is None:
             return self.cmd.bake('push')
         return self.cmd.bake('push', '--set-upstream', 'origin', remote_create)
+
+    def merge(self, branch: str):
+        return self.cmd.bake('merge', branch)
 
     def clean(self, force: Optional[bool] = True,
                     exclude: Optional[str] = None) -> sh.Command:
@@ -138,9 +143,58 @@ class Gh:
             #raise ValueError(f'Unknown CI Status: "{status}"')
 
 
-def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
+def branch_name_title(prefix: Optional[str] = 'cheeto-puppet-sync') -> Tuple[str, str]:
     branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
     title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
     return branch_name, title
 
 
+class GitRepo:
+
+    def __init__(self,
+                 root: Path,
+                 base_branch: str = 'main'):
+        self.root = root
+        self.lock_file = self.root / '.cheeto.lock'
+        self.base_branch = base_branch
+        self.cmd = Git(working_dir=self.root.absolute())
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    def lock(self, timeout: int):
+        return FileLock(self.lock_file, timeout=timeout)
+
+    @contextmanager
+    def commit(self,
+               message: str,
+               working_branch: Optional[str] = None,
+               clean: bool = False,
+               timeout: int = 30):
+        
+        if working_branch is None:
+            working_branch, _ = branch_name_title()
+
+        with self.lock(timeout):
+            self.cmd.checkout(self.base_branch)()
+            if clean:
+                self.cmd.clean(force=True, exclude=self.lock_file.name)()
+            self.cmd.pull()()
+            self.cmd.checkout(branch=working_branch, create=True)()
+            start_commit = self.cmd.rev_parse()().strip()
+
+            yield self.cmd.add()
+
+            self.cmd.commit(message)()
+            end_commit = self.cmd.rev_parse()().strip()
+
+            if start_commit == end_commit:
+                self.logger.warning('No commits made.')
+                return
+
+            self.logger.info(f'Pushing and creating branch: {working_branch}.')
+            self.cmd.push(remote_create=working_branch)()
+
+            self.logger.info(f'merge {working_branch} into {self.base_branch}')
+            self.cmd.checkout(self.base_branch)()
+            self.cmd.merge(working_branch)()
+
+            self.cmd.push()()
