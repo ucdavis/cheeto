@@ -800,11 +800,19 @@ class Site(BaseDocument):
 site_t = Union[Site, str]
 
 
-def connect_to_database(config: MongoConfig):
+def connect_to_database(config: MongoConfig, quiet: bool = False):
+    if not quiet:
+        console = Console(stderr=True)
+        console.print(f'mongo config:')
+        console.print(f'  uri: [green]{config.uri}:{config.port}')
+        console.print(f'  user: [green]{config.user}')
+        console.print(f'  db: [green]{config.database}')
+        console.print(f'  tls: {config.tls}\n')
     return connect(config.database,
                    host=config.uri,
                    username=config.user,
-                   password=config.password)
+                   password=config.password,
+                   tls=config.tls)
 
 
 def query_user_exists(username: str,

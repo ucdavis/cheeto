@@ -44,6 +44,7 @@ class MongoConfig(BaseModel):
     uri: str
     port: int
     user: str
+    tls: bool
     password: str
     database: str
 

@@ -109,6 +109,10 @@ def main():
     database.storage_to_puppet(storage_commands)
 
     args = parser.parse_args()
+    
+    console = log.Console(stderr=True)
+    console.print(f'cheeto [green]v{__version__}[/green]')
+
     if not hasattr(args, 'log'):
         args.func(args)
     else:
