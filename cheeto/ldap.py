@@ -337,6 +337,7 @@ class LDAPManager:
         if not len(usernames):
             return None
         if not cursor.entries:
+            self.logger.error(f'Group {groupname} does not exist in LDAP tree.')
             return None
         if verify_user:
             for username in usernames:

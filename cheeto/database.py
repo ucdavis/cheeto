@@ -2593,11 +2593,6 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
     if force:
         logger.info(f'{_ctx_name()}: force sync {group.groupname}, deleting existing dn')
         mgr.delete_dn(mgr.get_group_dn(group.groupname, group.sitename))
-
-    special_groups = set(mgr.config.user_access_groups.values()) | set(mgr.config.user_status_groups.values())
-    if group.groupname in special_groups:
-        logger.info(f'{_ctx_name()}: Skip sync for special group {group.groupname}')
-        return
     
     logger.info(f'{_ctx_name()}: sync {group.groupname}') 
 
@@ -2606,6 +2601,11 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
                                           gid=group.parent.gid,
                                           members=group.members)),
                       group.sitename)
+        return
+
+    special_groups = set(mgr.config.user_access_groups.values()) | set(mgr.config.user_status_groups.values())
+    if group.groupname in special_groups:
+        logger.info(f'{_ctx_name()}: Skip sync for special group {group.groupname}')
         return
 
     ldap_group = mgr.query_group(group.groupname, group.sitename)
