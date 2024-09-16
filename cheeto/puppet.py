@@ -75,8 +75,8 @@ class PuppetUserStorage(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOSTRES(BaseModel):
-    cpus: Optional[UInt32] = None 
-    gpus: Optional[UInt32] = None 
+    cpus: Optional[int] = None 
+    gpus: Optional[int] = None 
     mem: Optional[DataQuota] = None 
 
     @marshmallow.post_load

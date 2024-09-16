@@ -211,12 +211,13 @@ def sanitize_tres(tres_string: str) -> dict:
 def build_puppet_tres(tres_string: str) -> Optional[dict]:
     slurm_tres = sanitize_tres(tres_string)
     if any((item is not None for item in slurm_tres.values())):
-        puppet_tres = dict(cpus=slurm_tres.get('cpu', None),
-                           mem=slurm_tres.get('mem', None),
-                           gpus=slurm_tres.get('gpu', None))
+        puppet_tres = dict(cpus=slurm_tres.get('cpu', -1),
+                           mem=slurm_tres.get('mem', -1),
+                           gpus=slurm_tres.get('gpu', -1))
     else:
         puppet_tres = None
 
+    print(puppet_tres)
     return puppet_tres
 
 
