@@ -1521,6 +1521,16 @@ def add_site_args_req(parser: argparse.ArgumentParser):
     parser.add_argument('--site', '-s', default=None, required=True)
 
 
+def parse_site_arg(site: str):
+    try:
+        Site.objects.get(sitename=site)
+    except:
+        site = Site.objects.get(fqdn=site)
+        return site.sitename
+    else:
+        return site
+
+
 @subcommand('add', add_site_args)
 def site_add(args: argparse.Namespace):
     logger = logging.getLogger(__name__)

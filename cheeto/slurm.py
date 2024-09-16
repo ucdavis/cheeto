@@ -25,7 +25,7 @@ from cheeto.errors import ExitCode
 from .args import subcommand
 from .types import *
 from .database import (connect_to_database,
-                       add_site_args,
+                       add_site_args, parse_site_arg,
                        slurm_association_state as build_db_association_state,
                        slurm_qos_state as build_db_qos_state)
 from .puppet import (parse_yaml_forest,
@@ -504,11 +504,13 @@ def sync(args: argparse.Namespace):
         if args.site is None:
             console.print('Must provide --site when source is db!')
             return ExitCode.BAD_CMDLINE_ARGS
+        connect_to_database(args.config.mongo)
+        sitename = parse_site_arg(args.site)
+        console.print(f'Sync slurm for site {sitename}')
         console.rule('Load association data')
         console.print('Load from mongodb...')
-        connect_to_database(args.config.mongo)
-        cheeto_associations = build_db_association_state(args.site)
-        cheeto_qos_map = build_db_qos_state(args.site)
+        cheeto_associations = build_db_association_state(sitename)
+        cheeto_qos_map = build_db_qos_state(sitename)
 
     sacctmgr = SAcctMgr(sudo=args.sudo)
     console.print('Getting current associations...')
