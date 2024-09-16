@@ -637,9 +637,9 @@ class NFSMountSource(StorageMountSource):
     @property
     def export_ranges(self):
         if self.collection:
-            return set(self.collection._export_ranges) | set(self._export_ranges)
+            return sorted(set(self.collection._export_ranges) | set(self._export_ranges))
         else:
-            return set(self._export_ranges)
+            return sorted(set(self._export_ranges))
 
     @property
     def host(self):
@@ -2350,6 +2350,7 @@ def storage_to_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _storage_to_puppet(args.site, args.puppet_yaml)
 
+
 def _storage_to_puppet(sitename: str, output: Path):
 
     zfs = dict(group=defaultdict(list), user=defaultdict(list))
@@ -2362,7 +2363,7 @@ def _storage_to_puppet(sitename: str, output: Path):
                     group=s.group, 
                     path=str(s.host_path), 
                     export_options=s.source.export_options, 
-                    export_ranges=list(s.source.export_ranges))
+                    export_ranges=s.source.export_ranges)
         if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
             data['quota'] = s.quota
             data['permissions'] = '2770'
@@ -2376,7 +2377,7 @@ def _storage_to_puppet(sitename: str, output: Path):
                     group=s.group, 
                     path=str(s.host_path),
                     export_options=s.source.export_options, 
-                    export_ranges=list(s.source.export_ranges))
+                    export_ranges=s.source.export_ranges)
         if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
             data['quota'] = s.quota
             data['permissions'] = '0770'

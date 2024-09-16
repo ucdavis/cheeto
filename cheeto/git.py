@@ -182,12 +182,11 @@ class GitRepo:
             start_commit = self.cmd.rev_parse()().strip()
 
             yield self.cmd.add()
-
-            self.cmd.commit(message)()
-            end_commit = self.cmd.rev_parse()().strip()
-
-            if start_commit == end_commit:
-                self.logger.warning('No commits made.')
+            
+            try:
+                self.cmd.commit(message)()
+            except sh.ErrorReturnCode_1: #type: ignore
+                self.logger.info(f'Nothing to commit.')
                 return
 
             self.logger.info(f'Pushing and creating branch: {working_branch}.')
