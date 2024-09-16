@@ -498,7 +498,7 @@ class SiteGroup(BaseDocument):
     _sponsors = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _sudoers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
     _slurmers = ListField(ReferenceField(SiteUser, reverse_delete_rule=PULL))
-    slurm = EmbeddedDocumentField(SiteSlurmAccount)
+    slurm = EmbeddedDocumentField(SiteSlurmAccount, default=SiteSlurmAccount)
 
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
