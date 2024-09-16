@@ -1525,9 +1525,26 @@ def site_write_to_puppet(args: argparse.Namespace):
 
 
 @subcommand('to-ldap',
-            add_site_args_req)
+            add_site_args_req,
+            lambda parser: parser.add_argument('--force', '-f', default=False, action='store_true'))
 def site_sync_to_ldap(args: argparse.Namespace):
-    ldap_sync(args.site, args.config)
+    ldap_sync(args.site, args.config, force=args.force)
+
+
+@subcommand('to-sympa',
+            add_site_args_req,
+            lambda parser: parser.add_argument('output_txt', type=Path),
+            lambda parser: parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu']))
+def site_write_to_sympa(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    ignore = set(args.ignore)
+
+    with args.output_txt.open('w') as fp:
+        for user in SiteUser.objects(sitename='hive', 
+                                     parent__in=GlobalUser.objects(type__in=['user', 'admin'])):
+            if user.status != 'inactive' and user.email not in ignore:
+                print(user.email, file=fp)
+
 
 #########################################
 #
@@ -2264,7 +2281,9 @@ def storage_to_puppet(args: argparse.Namespace):
         data = dict(name=s.name,
                     owner=s.owner, 
                     group=s.group, 
-                    path=str(s.host_path))
+                    path=str(s.host_path),
+                    export_options=s.source.export_options, 
+                    export_ranges=list(s.source.export_ranges))
         if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
             data['quota'] = s.quota
             data['permissions'] = '0770'
@@ -2504,19 +2523,19 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
         create_group_from_sponsor(site_user)
 
 
-def ldap_sync(sitename: str, config: Config):
+def ldap_sync(sitename: str, config: Config, force: bool = False):
     connect_to_database(config.mongo)
     ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
     site = Site.objects.get(sitename=sitename)
 
     for user in SiteUser.objects(sitename=sitename):
-        ldap_sync_globaluser(user.parent, ldap_mgr)
+        ldap_sync_globaluser(user.parent, ldap_mgr, force=force)
 
     for group in SiteGroup.objects(sitename=sitename):
-        ldap_sync_group(group, ldap_mgr)
+        ldap_sync_group(group, ldap_mgr, force=force)
 
     for user in SiteUser.objects(sitename=sitename):
-        ldap_sync_siteuser(user, ldap_mgr)
+        ldap_sync_siteuser(user, ldap_mgr, force=force)
 
     for storage in query_automap_storages(sitename, 'home'):
         if not storage.host.endswith(site.fqdn):
@@ -2548,11 +2567,15 @@ def ldap_sync(sitename: str, config: Config):
                                      '-' + ','.join(storage.mount_options))
 
 
-def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):
+def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
-    if group.ldap_synced and group.parent.ldap_synced:
+    if not force and (group.ldap_synced and group.parent.ldap_synced):
         logger.info(f'{_ctx_name()}: Group {group.groupname} does not need to be synced')
         return
+
+    if force:
+        logger.info(f'{_ctx_name()}: force sync {group.groupname}, deleting existing dn')
+        mgr.delete_dn(mgr.get_group_dn(group.groupname, group.sitename))
 
     special_groups = set(mgr.config.user_access_groups.values()) | set(mgr.config.user_status_groups.values())
     if group.groupname in special_groups:
@@ -2581,12 +2604,16 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager):
     group.save()
     group.parent.save()
 
-def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
+def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
-    if user.ldap_synced:
+    if not force and user.ldap_synced:
         logger.info(f'{_ctx_name()}: GlobalUser {user.username} does not need to be synced.')
         return
     logger.info(f'{_ctx_name()}: sync {user.username}')
+
+    if force:
+        logger.info(f'{_ctx_name()}: force sync {user.username}, deleting existing dn')
+        mgr.delete_user(user.username)
 
     data = dict(email=user.email,
                 uid=user.uid,
@@ -2594,6 +2621,9 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
                 shell=user.shell,
                 fullname=user.fullname,
                 surname=user.fullname.split()[-1]) #type: ignore
+
+    if user.ssh_key:
+        data['ssh_keys'] = user.ssh_key
     
     try:
         if mgr.user_exists(user.username):
@@ -2601,21 +2631,21 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager):
         else:
             data['username'] = user.username
             mgr.add_user(LDAPUser.load(data))
-    except LDAPCommitFailed:
-        logger.error(f'{_ctx_name()}: Failed to sync GlobalUser {user.username}.')
+    except LDAPCommitFailed as e:
+        logger.error(f'{_ctx_name()}: Failed to sync GlobalUser {user.username}: {e}')
     else:
         user.ldap_synced = True
         user.save()
 
 
-def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager):
+def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
-    if user.ldap_synced and user.parent.ldap_synced:
+    if not force and (user.ldap_synced and user.parent.ldap_synced):
         logger.info(f'{_ctx_name()}: SiteUser {user.username} does not need to be synced.')
         return
 
     if not mgr.user_exists(user.username):
-        ldap_sync_globaluser(user.parent, mgr)
+        ldap_sync_globaluser(user.parent, mgr, force=force)
 
     ldap_groups = mgr.query_user_memberships(user.username, user.sitename)
 

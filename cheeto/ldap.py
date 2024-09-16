@@ -60,7 +60,8 @@ class LDAPUser(LDAPRecord):
     surname: str
     home_directory: str = field(default='')
     shell: str = field(default=DEFAULT_SHELL)
-
+    
+    ssh_keys: Optional[List[str]] = None
     password: Optional[str] = None
     dn: Optional[str] = None
 
@@ -240,7 +241,7 @@ class LDAPManager:
     def update_user(self,
                     username: str,
                     **attrs):
-        reader = self._query_user(username)
+        reader = self.dn_reader(self.get_user_dn(username), self.user_def)
         cursor = reader.search()
         if len(cursor) != 1:
             raise LDAPCommitFailed(f'Should have gotten a single cursor result, got {len(cursor)}')
@@ -261,6 +262,11 @@ class LDAPManager:
 
         dn = self.get_user_dn(username)
         self.logger.info(f'delete_user: {dn}')
+        self.connection.delete(dn)
+
+    def delete_dn(self,
+                  dn: str):
+        self.logger.info(f'delete_dn: {dn}')
         self.connection.delete(dn)
 
     @property

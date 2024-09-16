@@ -80,6 +80,7 @@ def main():
     database.site_add_global_slurm(site_commands)
     database.site_write_to_puppet(site_commands)
     database.site_sync_to_ldap(site_commands)
+    database.site_write_to_sympa(site_commands)
 
     user_parser = database_commands.add_parser('user')
     user_parser.set_defaults(func = lambda _: user_parser.print_help())
