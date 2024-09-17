@@ -34,7 +34,8 @@ from .puppet import (parse_yaml_forest,
                      PuppetAccountMap,
                      SlurmQOS)
 from .utils import (check_filter,
-                    filter_nulls)
+                    filter_nulls,
+                    _ctx_name)
 
 class SControl:
 
@@ -217,7 +218,6 @@ def build_puppet_tres(tres_string: str) -> Optional[dict]:
     else:
         puppet_tres = None
 
-    print(puppet_tres)
     return puppet_tres
 
 
@@ -346,6 +346,7 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
 
 
 def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]:
+    logger = logging.getLogger(__name__)
     deletions = []
     updates = []
     additions = []
@@ -356,6 +357,7 @@ def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]
         else:
             new_qos = new_qoses[qos_name]
             if old_qos != new_qos:
+                logger.info(f'{_ctx_name()}: old qos: {old_qos} new qos: {new_qos}')
                 updates.append((qos_name, new_qos))
     
     for qos_name, new_qos in new_qoses.items():

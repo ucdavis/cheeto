@@ -168,7 +168,8 @@ class GitRepo:
                message: str,
                working_branch: Optional[str] = None,
                clean: bool = False,
-               timeout: int = 30):
+               timeout: int = 30,
+               push_merge: bool = True):
         
         if working_branch is None:
             working_branch, _ = branch_name_title()
@@ -189,11 +190,12 @@ class GitRepo:
                 self.logger.info(f'Nothing to commit.')
                 return
 
-            self.logger.info(f'Pushing and creating branch: {working_branch}.')
-            self.cmd.push(remote_create=working_branch)()
+            if push_merge:
+                self.logger.info(f'Pushing and creating branch: {working_branch}.')
+                self.cmd.push(remote_create=working_branch)()
 
-            self.logger.info(f'merge {working_branch} into {self.base_branch}')
-            self.cmd.checkout(self.base_branch)()
-            self.cmd.merge(working_branch)()
+                self.logger.info(f'merge {working_branch} into {self.base_branch}')
+                self.cmd.checkout(self.base_branch)()
+                self.cmd.merge(working_branch)()
 
-            self.cmd.push()()
+                self.cmd.push()()

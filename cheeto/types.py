@@ -54,6 +54,13 @@ USER_TYPES = {
     'system'
 }
 
+GROUP_TYPES = {
+    'user',
+    'access',
+    'system',
+    'group'
+}
+
 USER_STATUSES = {
     'active',
     'inactive',
@@ -65,7 +72,8 @@ ACCESS_TYPES = {
     'ondemand',
     'compute-ssh',
     'root-ssh',
-    'sudo'
+    'sudo',
+    'slurm'
 }
 
 

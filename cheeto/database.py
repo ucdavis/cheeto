@@ -45,7 +45,7 @@ from .puppet import (MIN_PIGROUP_GID,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
                      add_repo_args,
                      SiteData)
-from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS,
+from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, GROUP_TYPES,
                     HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, MOUNT_OPTS, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
                     USER_STATUSES, ACCESS_TYPES, SlurmQOSValidFlags)
@@ -86,6 +86,10 @@ def UserStatusField(**kwargs):
 
 def UserAccessField(**kwargs) -> StringField:
     return StringField(choices=ACCESS_TYPES,
+                       **kwargs)
+
+def GroupTypeField(**kwargs) -> StringField:
+    return StringField(choices=GROUP_TYPES,
                        **kwargs)
 
 def ShellField(**kwargs) -> StringField:
@@ -384,6 +388,7 @@ site_user_t = Union[SiteUser, str]
 class GlobalGroup(BaseDocument):
     groupname = POSIXNameField(required=True, primary_key=True)
     gid = POSIXIDField(required=True)
+    type = GroupTypeField(required=True, default='group')
 
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
@@ -429,6 +434,12 @@ class SlurmTRES(EmbeddedDocument):
                    gpus=puppet_tres.gpus,
                    mem=puppet_tres.mem)
 
+    def to_dict(self):
+        data = self.to_mongo(use_db_field=False).to_dict()
+        data.pop('id', None)
+        data.pop('_id', None)
+        return data
+
 
 class SiteSlurmQOS(BaseDocument):
     sitename = StringField(required=True)
@@ -469,6 +480,13 @@ class SiteSlurmQOS(BaseDocument):
         tokens.append(f'Priority={self.priority}')
 
         return tokens
+
+    def to_puppet(self):
+        return PuppetSlurmQOS.load(dict(group=self.group_limits.to_dict() if self.group_limits else None,
+                                        user=self.user_limits.to_dict() if self.user_limits else None,
+                                        job=self.job_limits.to_dict() if self.job_limits else None,
+                                        priority=self.priority if self.priority else 0,
+                                        flags=self.flags if self.flags else None))
 
     @classmethod
     def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS) -> Self:
@@ -809,7 +827,7 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
         console.print(f'  uri: [green]{config.uri}:{config.port}')
         console.print(f'  user: [green]{config.user}')
         console.print(f'  db: [green]{config.database}')
-        console.print(f'  tls: {config.tls}\n')
+        console.print(f'  tls: {config.tls}')
     return connect(config.database,
                    host=config.uri,
                    username=config.user,
@@ -1365,19 +1383,27 @@ def load_slurm_from_puppet(sitename: str, data: PuppetAccountMap):
 
 
 def slurm_qos_state(sitename: str) -> dict[str, SiteSlurmQOS]:
-    return {s.qosname: s for s in SiteSlurmQOS.objects(sitename=sitename)}
+    return {s.qosname: s.to_puppet() for s in SiteSlurmQOS.objects(sitename=sitename)}
 
 
-def slurm_association_state(sitename: str):
+def slurm_association_state(sitename: str, ignore: set[str] = {'root'}):
+    logger = logging.getLogger(__name__)
+
     state = dict(users={}, accounts={})
-
-    for user in SiteUser.objects(sitename=sitename):
+    for user in SiteUser.objects(Qv(sitename=sitename) &
+                                 (
+                                     Qv(parent__in=GlobalUser.objects(access='slurm').only('username'))
+                                     | Qv(_access='slurm')
+                                 )):
+        if user.username in ignore:
+            logger.info(f'{_ctx_name()}: {user}')
         for assoc in query_user_slurm(sitename, user.username):
             assoc_tuple = (user.username, assoc.group.groupname, assoc.partition.partitionname)
             state['users'][assoc_tuple] = assoc.qos.qosname
 
     state['accounts'] = {g.groupname: (g.slurm.max_user_jobs, g.slurm.max_group_jobs) \
-                         for g in SiteGroup.objects(sitename=sitename)}
+                         for g in SiteGroup.objects(sitename=sitename,
+                                                    parent__in=GlobalGroup.objects(type='group').only('groupname'))}
 
     return state
 
@@ -1558,6 +1584,35 @@ def site_write_to_puppet(args: argparse.Namespace):
     puppet_map.save_yaml(args.puppet_yaml)
 
 
+@subcommand('sync-old-puppet',
+            add_site_args_req,
+            lambda parser: parser.add_argument('repo', type=Path),
+            lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
+def site_sync_old_puppet(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    site = Site.objects.get(sitename=args.site)
+    repo = GitRepo(args.repo)
+    prefix = (args.repo / 'domains' / site.fqdn).absolute()
+    yaml_path = prefix / 'merged' / 'all.yaml'
+    puppet_map = site_to_puppet(args.site)
+
+    with repo.commit(f'Update merged yaml for {args.site}',
+                     clean=True,
+                     push_merge=args.push_merge) as add:
+        puppet_map.save_yaml(yaml_path)
+        add(yaml_path)
+
+        for user in SiteUser.objects(sitename=args.site).only('parent'):
+            if not user.parent.ssh_key:
+                continue
+            keyfile = (args.repo / 'keys' / f'{user.parent.username}.pub').absolute()
+            with keyfile.open('w') as fp:
+                for key in user.parent.ssh_key:
+                    print(key, file=fp)
+            add(keyfile)
+
+
 @subcommand('to-ldap',
             add_site_args_req,
             lambda parser: parser.add_argument('--force', '-f', default=False, action='store_true'))
@@ -1604,7 +1659,8 @@ def _site_write_root_key(sitename: str, output: Path):
 @subcommand('sync-new-puppet',
             add_site_args_req,
             lambda parser: parser.add_argument('repo', type=Path),
-            lambda parser: parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu']))
+            lambda parser: parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu']),
+            lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
 def site_sync_new_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
@@ -1612,7 +1668,9 @@ def site_sync_new_puppet(args: argparse.Namespace):
     repo = GitRepo(args.repo)
     prefix = (args.repo / 'domains' / site.fqdn).absolute()
 
-    with repo.commit(f'Update root.pub, storage.yaml, and sympa.txt for {site.fqdn}.', clean=True) as add:
+    with repo.commit(f'Update root.pub, storage.yaml, and sympa.txt for {site.fqdn}.',
+                     clean=True,
+                     push_merge=args.push_merge) as add:
         root_key_path = prefix / 'root.pub'
         _site_write_root_key(args.site, root_key_path)
 
@@ -2455,7 +2513,11 @@ def filter_events(events: List[QueuedEventModel],
                 yield event
 
 
-def hippoapi_client(config: HippoConfig):
+def hippoapi_client(config: HippoConfig, quiet: bool = False):
+    if not quiet:
+        console = Console(stderr=True)
+        console.print('hippo config:')
+        console.print(f'  uri: {config.base_url}')
     return AuthenticatedClient(follow_redirects=True,
                                base_url=config.base_url,
                                token=config.api_key,
@@ -2642,11 +2704,7 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
         ldap_sync_siteuser(user, ldap_mgr, force=force)
 
     for storage in query_automap_storages(sitename, 'home'):
-        if not storage.host.endswith(site.fqdn):
-            host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
-        else:
-            host = storage.host
-
+        host = f'{storage.host}${{HOST_SUFFIX}}'
         ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.owner,
                                                              'home',
                                                              sitename))
@@ -2657,10 +2715,7 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
                                     '-' + ','.join(storage.mount_options))
 
     for storage in query_automap_storages(sitename, 'group'):
-        if not storage.host.endswith(site.fqdn):
-            host = f'{storage.host}${{HOST_SUFFIX}}.{site.fqdn}'
-        else:
-            host = storage.host
+        host = f'{storage.host}${{HOST_SUFFIX}}'
         ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.name,
                                                              'group',
                                                              sitename))
@@ -2707,6 +2762,7 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
 
     group.save()
     group.parent.save()
+
 
 def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
