@@ -168,6 +168,7 @@ class HippoEvent(BaseDocument):
     status = StringField(required=True,
                          default='Pending',
                          choices=HIPPO_EVENT_STATUSES)
+    data = DictField()
 
 
 class GlobalUser(BaseDocument):
@@ -1127,12 +1128,12 @@ def get_next_system_id() -> int:
 def create_home_storage(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is str:
-        user = GlobalUser.objects.get(username=user).only('username')
-    group = GlobalGroup.objects.get(groupname=user.username).only('id')
+        user = GlobalUser.objects.get(username=user)
+    group = GlobalGroup.objects.get(groupname=user.username)
     collection = ZFSSourceCollection.objects.get(sitename=sitename,
                                                  name='home')
     automap = AutomountMap.objects.get(sitename=sitename,
-                                       tablename='home').only('id')
+                                       tablename='home')
 
     source = ZFSMountSource(name=user.username,
                             sitename=sitename,
@@ -2586,6 +2587,7 @@ def _process_hippoapi_events(events: Iterable[QueuedEventModel],
 
         event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
                                                                     set_on_insert__action=event.action, 
+                                                                    set_on_insert__data=event.to_dict(),
                                                                     new=True)
         if post_back and event_record.status == 'Complete':
             logger.info(f'Event id={event.id} already marked complete, attempting postback')
@@ -2632,7 +2634,7 @@ def process_updatesshkey_event(event: QueuedEventDataModel,
                                config: HippoConfig):
     logger = logging.getLogger(__name__)
     hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster)
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
     username = hippo_account.kerberos
     ssh_key = hippo_account.key
 
@@ -2651,7 +2653,7 @@ def process_createaccount_event(event: QueuedEventDataModel,
     logger = logging.getLogger(__name__)
 
     hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster)
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
     username = hippo_account.kerberos
 
     logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
@@ -2682,7 +2684,7 @@ def process_createaccount_event(event: QueuedEventDataModel,
         site_user = SiteUser(username=username,
                              sitename=sitename,
                              parent=global_user,
-                             _access=hippo_to_cheeto_access(hippo_account.access_types)) #type: ignore
+                             _access=hippo_to_cheeto_access(hippo_account.access_types) | {'slurm'}) #type: ignore
         site_user.save()
         site_group = SiteGroup(groupname=username,
                                sitename=sitename,
@@ -2706,7 +2708,7 @@ def process_addaccounttogroup_event(event: QueuedEventDataModel,
                                     config: HippoConfig):
     logger = logging.getLogger(__name__)
     hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster)
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
     logger.info(f'Process AddAccountToGroup for site {sitename}, event: {event}')
 
     for group in event.groups:
