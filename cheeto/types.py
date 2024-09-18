@@ -51,7 +51,8 @@ DISABLED_SHELLS = {
 USER_TYPES = {
     'user',
     'admin',
-    'system'
+    'system',
+    'class'
 }
 
 GROUP_TYPES = {
@@ -197,6 +198,10 @@ class _BaseModel:
     SKIP_VALUES = [None, {}, []]
     Schema: ClassVar[Type[_Schema]] = _Schema # For the type checker
 
+    class Meta:
+        ordered = True
+        render_module = yaml
+
     def items(self):
         return dataclasses.asdict(self).items() #type: ignore
 
@@ -224,10 +229,9 @@ class _BaseModel:
     @staticmethod
     def _sort(data):
         if BaseModel._sortable(data):
-            if isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
+            if is_listlike(data):
                 return sorted(data)
             elif isinstance(data, (dict, OrderedDict)):
-
                 return OrderedDict(sorted(data.items(), key=lambda t: t[0]))
             else:
                 return data
@@ -237,11 +241,6 @@ class _BaseModel:
     @post_dump
     def sort_listlikes(self, data, **kwargs):
         return BaseModel._sort(data)
-
-
-    class Meta:
-        ordered = True
-        render_module = yaml
 
     @classmethod
     def load(cls, data: dict, **kwargs) -> Self:

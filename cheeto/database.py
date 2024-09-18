@@ -10,6 +10,7 @@
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable
+from enum import member
 import logging
 from pathlib import Path
 from re import A, L
@@ -975,6 +976,14 @@ def query_user_slurmership(sitename: str, user: site_user_t):
         yield group.groupname
 
 
+def query_user_sudogroups(sitename: str, user: site_user_t):
+    if type(user) is str:
+        user = SiteUser.objects.get(sitename=sitename, username=user)
+    qs = SiteGroup.objects(_sudoers=user, sitename=sitename).only('groupname')
+    for group in qs:
+        yield group.groupname
+
+
 def query_user_slurm(sitename: str, user: site_user_t):
     if type(user) is str:
         user = SiteUser.objects.get(sitename=sitename, username=user)
@@ -1443,7 +1452,9 @@ def user_to_puppet(user: SiteUser):
     logger = logging.getLogger(__name__)
     memberships = set(query_user_groups(user.sitename, user))
     memberships.remove(user.username)
-    slurmerships = list(query_user_slurmership(user.sitename, user))
+    memberships = sorted(memberships)
+    slurmerships = sorted(list(query_user_slurmership(user.sitename, user)))
+    group_sudo = sorted(list(query_user_sudogroups(user.sitename, user)))
     slurm = {'account': slurmerships} if slurmerships else None
     
     tags = set()
@@ -1469,6 +1480,7 @@ def user_to_puppet(user: SiteUser):
                      uid=user.uid,
                      gid=user.gid,
                      groups=memberships,
+                     group_sudo=group_sudo,
                      shell=user.shell,
                      tag=tags,
                      home=user.home_directory,
@@ -1534,8 +1546,10 @@ def site_to_puppet(sitename: str):
 
     groups = {}
     for group in SiteGroup.objects(sitename=sitename).order_by('groupname'):
-        if query_user_exists(group.groupname, sitename):
-            continue
+        if group.parent.type == 'user':
+            user = SiteUser.objects.get(username=group.groupname, sitename=sitename)
+            if user.uid == group.gid:
+                continue
         groups[group.groupname] = group_to_puppet(group)
 
     shares = {}
@@ -1630,7 +1644,6 @@ def site_sync_old_puppet(args: argparse.Namespace):
                      clean=True,
                      push_merge=args.push_merge) as add:
         puppet_map.save_yaml(yaml_path)
-        add(yaml_path)
 
         for user in SiteUser.objects(sitename=args.site).only('parent'):
             if not user.parent.ssh_key:
@@ -1639,7 +1652,7 @@ def site_sync_old_puppet(args: argparse.Namespace):
             with keyfile.open('w') as fp:
                 for key in user.parent.ssh_key:
                     print(key, file=fp)
-            add(keyfile)
+        add(args.repo)
 
 
 @subcommand('to-ldap',
@@ -2663,7 +2676,8 @@ def process_createaccount_event(event: QueuedEventDataModel,
         global_user = GlobalUser.from_hippo(hippo_account)
         global_user.save()
         global_group = GlobalGroup(groupname=username,
-                                   gid=global_user.gid)
+                                   gid=global_user.gid,
+                                   type='user')
         global_group.save()
     else:
         logger.info(f'GlobalUser for {username} exists, checking status.')
