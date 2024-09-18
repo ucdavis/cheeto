@@ -8,6 +8,7 @@
 # Date   : 10.04.2023
 
 import argparse
+from collections import namedtuple
 import csv
 from enum import Enum, auto
 from io import StringIO
@@ -16,11 +17,10 @@ import os
 import sys
 from typing import Any, Generator, Tuple, Optional, TextIO
 
+from marshmallow import ValidationError
 from rich.console import Console
 from rich.progress import track
 import sh
-
-from cheeto.errors import ExitCode
 
 from .args import subcommand
 from .types import *
@@ -28,6 +28,7 @@ from .database import (connect_to_database,
                        add_site_args, parse_site_arg,
                        slurm_association_state as build_db_association_state,
                        slurm_qos_state as build_db_qos_state)
+from .errors import ExitCode
 from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
@@ -35,7 +36,8 @@ from .puppet import (parse_yaml_forest,
                      SlurmQOS)
 from .utils import (check_filter,
                     filter_nulls,
-                    _ctx_name)
+                    _ctx_name, remove_nones)
+
 
 class SControl:
 
@@ -97,13 +99,14 @@ class SAcctMgr:
         return self.add.bake(*args)
 
     def modify_account(self, account_name: str,
-                             max_user_jobs: int = -1,
-                             max_group_jobs: int = -1) -> sh.Command:
+                             account: SlurmAccount) -> sh.Command:
         return self.modify.bake('account',
                                 account_name,
                                 'set',
-                                f'MaxJobs={max_user_jobs}',
-                                f'MaxSubmit={max_group_jobs}')
+                                f'MaxJobs={account.max_user_jobs}',
+                                f'GrpJobs={account.max_group_jobs}',
+                                f'MaxWall={account.max_job_length}',
+                                f'MaxSubmit={account.max_submit_jobs}')
 
     def remove_account(self, account_name: str) -> sh.Command:
         return self.remove.bake('account', account_name)
@@ -212,9 +215,10 @@ def sanitize_tres(tres_string: str) -> dict:
 def build_puppet_tres(tres_string: str) -> Optional[dict]:
     slurm_tres = sanitize_tres(tres_string)
     if any((item is not None for item in slurm_tres.values())):
-        puppet_tres = dict(cpus=slurm_tres.get('cpu', -1),
-                           mem=slurm_tres.get('mem', -1),
-                           gpus=slurm_tres.get('gpu', -1))
+        puppet_tres = dict(cpus=slurm_tres.get('cpu', None),
+                           mem=slurm_tres.get('mem', None),
+                           gpus=slurm_tres.get('gpu', None))
+        remove_nones(puppet_tres)
     else:
         puppet_tres = None
 
@@ -223,6 +227,7 @@ def build_puppet_tres(tres_string: str) -> Optional[dict]:
 
 def build_slurm_qos_state(qos_file_pointer: TextIO,
                           filter_on: dict = {'Name': 'normal'}) -> Tuple[dict, dict]:
+    logger = logging.getLogger(__name__)
     qos_map = {}
     filtered_map = {}
     for row in SAcctMgr.get_show_parser(qos_file_pointer):
@@ -232,16 +237,19 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         puppet_grp_tres = build_puppet_tres(row['GrpTRES'])
         puppet_job_tres = build_puppet_tres(row['MaxTRES'])
         puppet_user_tres = build_puppet_tres(row['MaxTRESPU'])
-
-        puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres, #type: ignore
-                                                 job=puppet_job_tres,
-                                                 user=puppet_user_tres,
-                                                 priority=row['Priority'])) 
-        
-        if filter_row:
-            filtered_map[row['Name']] = puppet_qos
+        data = dict(group=puppet_grp_tres, #type: ignore
+                    job=puppet_job_tres,
+                    user=puppet_user_tres,
+                    priority=row['Priority'])
+        try:
+            puppet_qos = SlurmQOS.Schema().load(data) 
+        except ValidationError as e:
+            logger.error(f'{_ctx_name()}: {data}, {e}')
         else:
-            qos_map[row['Name']] = puppet_qos
+            if filter_row:
+                filtered_map[row['Name']] = puppet_qos
+            else:
+                qos_map[row['Name']] = puppet_qos
 
     return qos_map, filtered_map
 
@@ -260,7 +268,11 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
             filter_row = check_filter(row, filter_accounts_on)
             if not filter_row:
                 extras = (int(row['MaxJobs']) if 'MaxJobs' in row else -1,
-                          int(row['MaxSubmit']) if 'MaxSubmit' in row else -1)
+                          )
+                extras = SlurmAccount(max_user_jobs=int(row.get('MaxJobs', -1)),
+                                      max_submit_jobs=int(row.get('MaxSubmit', -1)),
+                                      max_group_jobs=int(row.get('GrpJobs', -1)),
+                                      max_job_length=row.get('MaxWall', '-1'))
                 associations['accounts'][row['Account']] = extras
         elif 'User' in row:
             filter_row = check_filter(row, filter_users_on)
@@ -389,6 +401,8 @@ def reconcile_users(old_assocs: dict, new_assocs: dict) -> Tuple[list, list, lis
 
 
 def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, list, list]:
+    logger = logging.getLogger(__name__)
+
     deletions = []
     updates = []
     additions = []
@@ -398,11 +412,12 @@ def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, li
             deletions.append(account_name)
         else:
             if old_extra != new_accounts[account_name]:
-                updates.append((account_name, *new_accounts[account_name]))
+                logger.info(f'{_ctx_name()}: old: {old_extra}, new: {new_accounts[account_name]}')
+                updates.append((account_name, new_accounts[account_name]))
 
     for account_name, new_extra in new_accounts.items():
         if account_name not in old_accounts:
-            additions.append((account_name, *new_extra))
+            additions.append((account_name, new_extra))
     
     return deletions, updates, additions
 

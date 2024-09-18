@@ -132,7 +132,9 @@ class SlurmPartition(BaseModel):
 class SlurmRecord(BaseModel):
     account: Optional[Union[KerberosID, Set[KerberosID]]] = None 
     partitions: Optional[Mapping[str, SlurmPartition]] = None
-    max_jobs: Optional[UInt32] = None 
+    max_jobs: Optional[int] = None 
+    max_group_jobs: Optional[int] = None
+    max_submit_jobs: Optional[int] = None
 
 
 @require_kwargs

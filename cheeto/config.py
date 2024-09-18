@@ -66,6 +66,13 @@ class IAMConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class SlurmConfig(BaseModel):
+    account_attrs: Mapping[str, str]
+    qos_attrs: Mapping[str, str]
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class Config(BaseModel):
     ldap: Mapping[str, LDAPConfig]
     hippo: HippoConfig

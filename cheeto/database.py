@@ -46,12 +46,12 @@ from .puppet import (MIN_PIGROUP_GID,
                      add_repo_args,
                      SiteData)
 from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, GROUP_TYPES,
-                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, MOUNT_OPTS, hippo_to_cheeto_access,  
+                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, MOUNT_OPTS, SlurmAccount, hippo_to_cheeto_access,  
                     is_listlike, UINT_MAX, USER_TYPES,
                     USER_STATUSES, ACCESS_TYPES, SlurmQOSValidFlags)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
-                    _ctx_name,
+                    _ctx_name, removed_nones,
                     size_to_megs,
                     removed,
                     remove_nones)
@@ -434,6 +434,11 @@ class SlurmTRES(EmbeddedDocument):
                    gpus=puppet_tres.gpus,
                    mem=puppet_tres.mem)
 
+    def to_puppet(self) -> PuppetSlurmQOSTRES:
+        return PuppetSlurmQOSTRES(cpus=None if self.cpus == -1 else self.cpus,
+                                  gpus=None if self.gpus == -1 else self.gpus,
+                                  mem=self.mem)
+
     def to_dict(self):
         data = self.to_mongo(use_db_field=False).to_dict()
         data.pop('id', None)
@@ -481,12 +486,21 @@ class SiteSlurmQOS(BaseDocument):
 
         return tokens
 
+    @no_type_check
     def to_puppet(self):
-        return PuppetSlurmQOS.load(dict(group=self.group_limits.to_dict() if self.group_limits else None,
-                                        user=self.user_limits.to_dict() if self.user_limits else None,
-                                        job=self.job_limits.to_dict() if self.job_limits else None,
-                                        priority=self.priority if self.priority else 0,
-                                        flags=self.flags if self.flags else None))
+        return PuppetSlurmQOS(group=self.group_limits.to_puppet() if self.group_limits else None,
+                              user=self.user_limits.to_puppet() if self.user_limits else None,
+                              job=self.job_limits.to_puppet() if self.job_limits else None,
+                              priority=self.priority if self.priority else 0,
+                              flags=self.flags if self.flags else None)
+        #return PuppetSlurmQOS.load(dict(group=removed_nones(self.group_limits.to_dict())\
+        #                                    if self.group_limits else None,
+        #                                user=removed_nones(self.user_limits.to_dict())\
+        #                                    if self.user_limits else None,
+        #                                job=removed_nones(self.job_limits.to_dict())\
+        #                                    if self.job_limits else None,
+        #                                priority=self.priority if self.priority else 0,
+        #                                flags=self.flags if self.flags else None))
 
     @classmethod
     def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS) -> Self:
@@ -506,6 +520,8 @@ class SiteSlurmQOS(BaseDocument):
 class SiteSlurmAccount(EmbeddedDocument):
     max_user_jobs = IntField(default=-1)
     max_group_jobs = IntField(default=-1)
+    max_submit_jobs = IntField(default=-1)
+    max_job_length = StringField(default='-1')
 
 
 class SiteGroup(BaseDocument):
@@ -927,6 +943,19 @@ def create_group_from_sponsor(sponsor_user: SiteUser):
                            _sudoers=[sponsor_user])
     site_group.save()
     logger.info(f'Created SiteGroup from sponsor {sponsor_user.username}: {site_group.to_dict()}')
+
+
+def query_group_slurm_associations(sitename: str, group: site_group_t):
+    if type(group) is str:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=group)
+
+    users = (user for user in (set(group._members) | set(group._slurmers)) \
+             if 'slurm' in user.access)
+    associations = SiteSlurmAssociation.objects(sitename=sitename,
+                                                group=group)
+    for user in users:
+        for assoc in associations:
+            yield (user.username, assoc.group.groupname, assoc.partition.partitionname), assoc.qos.qosname
 
 
 def query_user_groups(sitename: str, user: site_user_t):
@@ -1390,20 +1419,21 @@ def slurm_association_state(sitename: str, ignore: set[str] = {'root'}):
     logger = logging.getLogger(__name__)
 
     state = dict(users={}, accounts={})
-    for user in SiteUser.objects(Qv(sitename=sitename) &
-                                 (
-                                     Qv(parent__in=GlobalUser.objects(access='slurm').only('username'))
-                                     | Qv(_access='slurm')
-                                 )):
-        if user.username in ignore:
-            logger.info(f'{_ctx_name()}: {user}')
-        for assoc in query_user_slurm(sitename, user.username):
-            assoc_tuple = (user.username, assoc.group.groupname, assoc.partition.partitionname)
-            state['users'][assoc_tuple] = assoc.qos.qosname
 
-    state['accounts'] = {g.groupname: (g.slurm.max_user_jobs, g.slurm.max_group_jobs) \
-                         for g in SiteGroup.objects(sitename=sitename,
-                                                    parent__in=GlobalGroup.objects(type='group').only('groupname'))}
+    for group in SiteGroup.objects(sitename=sitename,
+                                   parent__in=GlobalGroup.objects(type='group')):
+
+        assocs = False
+        for assoc_tuple, qos_name in query_group_slurm_associations(sitename, group):
+            state['users'][assoc_tuple] = qos_name
+            assocs = True
+        
+        if assocs:
+            account = SlurmAccount(max_user_jobs=group.slurm.max_user_jobs,
+                                   max_submit_jobs=group.slurm.max_submit_jobs,
+                                   max_group_jobs=group.slurm.max_group_jobs,
+                                   max_job_length=group.slurm.max_job_length)
+            state['accounts'][group.groupname] = account
 
     return state
 
@@ -1516,8 +1546,6 @@ def site_to_puppet(sitename: str):
                             group=groups,
                             share=shares)
 
-
-        
 
 def purge_database():
     prompt = input('WARNING: YOU ARE ABOUT TO PURGE THE DATABASE. TYPE "PURGE" TO CONTINUE: ')
@@ -2297,7 +2325,7 @@ def add_group_add_member_args(parser: argparse.ArgumentParser):
     parser.add_argument('--groups', '-g', nargs='+', required=True)
 
 
-@subcommand('add-user', add_group_add_member_args, add_site_args)
+@subcommand('add-user', add_group_add_member_args, add_site_args_req)
 def group_add_user(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
@@ -2307,7 +2335,7 @@ def group_add_user(args: argparse.Namespace):
             add_group_member(args.site, username, groupname)
 
 
-@subcommand('add-sponsor', add_group_add_member_args)
+@subcommand('add-sponsor', add_group_add_member_args, add_site_args_req)
 def group_add_sponsor(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()

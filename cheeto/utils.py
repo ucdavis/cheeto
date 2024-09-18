@@ -38,6 +38,10 @@ def remove_nones(d: dict):
             del d[key]
 
 
+def removed_nones(d: dict) -> dict:
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def check_filter(d: dict, filter_on: dict):
     for key, val in d.items():
         if val in filter_on.get(key, []):

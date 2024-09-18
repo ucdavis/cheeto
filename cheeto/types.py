@@ -7,7 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 22.03.2023
 
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from collections.abc import Hashable, Iterable, Sequence
 import dataclasses
 import datetime
@@ -327,6 +327,18 @@ def validate_yaml_forest(yaml_forest: dict,
             continue
         else:
             yield source_root, puppet_data
+
+
+SlurmAccount = namedtuple('SlurmAccount', ['max_user_jobs',
+                                           'max_group_jobs',
+                                           'max_submit_jobs',
+                                           'max_job_length'])
+
+
+SlurmAssociation = namedtuple('SlurmAssociation', ['username',
+                                                   'account',
+                                                   'partition',
+                                                   'qos'])
 
 
 KerberosID = Annotated[str, mf.String(validate=mv.Regexp(r'[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)'))]
