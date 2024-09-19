@@ -91,11 +91,12 @@ class SAcctMgr:
         self.show = self.cmd.bake('show', '-P')
 
     def add_account(self, account_name: str,
-                          max_user_jobs: int = -1,
-                          max_group_jobs: int = -1) -> sh.Command:
-        args = ['account', account_name]
-        args.append(f'MaxJobs={max_user_jobs}')
-        args.append(f'MaxSubmit={max_group_jobs}')
+                          account: SlurmAccount) -> sh.Command:
+        args = ['account', account_name,
+                f'MaxJobs={account.max_user_jobs}',
+                f'GrpJobs={account.max_group_jobs}',
+                f'MaxWall={account.max_job_length}',
+                f'MaxSubmit={account.max_submit_jobs}']
         return self.add.bake(*args)
 
     def modify_account(self, account_name: str,

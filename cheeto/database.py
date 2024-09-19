@@ -539,6 +539,21 @@ class SiteGroup(BaseDocument):
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
 
+    meta = {
+        'indexes': [
+            {
+                'fields': ('groupname', 'sitename'),
+                'unique': True
+            },
+            {
+                'fields': ['_members']
+            },
+            {
+                'fields': ['_slurmers']
+            }
+        ]
+    }
+
     @property
     def gid(self):
         return self.parent.gid
@@ -1513,7 +1528,9 @@ def group_to_puppet(group: SiteGroup):
          'group': s.group,
          'autofs': {
             'nas': s.host,
-            'path': str(s.host_path)},
+            'path': str(s.host_path),
+            'options': ','.join(sorted(set(s.mount_options) - {'fstype=nfs'}, reverse=True))
+         },
          'zfs': get_puppet_zfs(s),
          'globus': s.globus
         } for s in storages
@@ -1630,12 +1647,13 @@ def site_write_to_puppet(args: argparse.Namespace):
 @subcommand('sync-old-puppet',
             add_site_args_req,
             lambda parser: parser.add_argument('repo', type=Path),
+            lambda parser: parser.add_argument('--base-branch', default='main'),
             lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
 def site_sync_old_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     site = Site.objects.get(sitename=args.site)
-    repo = GitRepo(args.repo)
+    repo = GitRepo(args.repo, base_branch=args.base_branch)
     prefix = (args.repo / 'domains' / site.fqdn).absolute()
     yaml_path = prefix / 'merged' / 'all.yaml'
     puppet_map = site_to_puppet(args.site)
@@ -1652,7 +1670,7 @@ def site_sync_old_puppet(args: argparse.Namespace):
             with keyfile.open('w') as fp:
                 for key in user.parent.ssh_key:
                     print(key, file=fp)
-        add(args.repo)
+        add(args.repo.absolute())
 
 
 @subcommand('to-ldap',
