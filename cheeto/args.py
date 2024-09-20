@@ -28,12 +28,10 @@ SubCommandFunc = Callable[Concatenate[Subparsers, P], None]
 
 
 def add_common_args(parser):
-    from .config import get_config
     
     parser.add_argument('--log', type=Path, default=Path(os.devnull),
                         help='Log to file.')
     parser.add_argument('--quiet', default=False, action='store_true')
-    parser.add_argument('--config', type=get_config, default=get_config())
 
 
 def subcommand(subcommand_name: str, *arg_adders: Callable[[ArgumentParser], None]) \

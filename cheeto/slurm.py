@@ -97,6 +97,7 @@ class SAcctMgr:
                 f'GrpJobs={account.max_group_jobs}',
                 f'MaxWall={account.max_job_length}',
                 f'MaxSubmit={account.max_submit_jobs}']
+
         return self.add.bake(*args)
 
     def modify_account(self, account_name: str,

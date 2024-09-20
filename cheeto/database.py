@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from enum import member
 import logging
+from operator import attrgetter
 from pathlib import Path
 from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
@@ -384,7 +385,25 @@ class SiteUser(BaseDocument):
             data['parent'] = self.parent.to_dict(strip_id=strip_id, raw=raw, strip_empty=strip_empty, **kwargs) #type: ignore
         return data
 
+
 site_user_t = Union[SiteUser, str]
+
+
+def handle_site_user(sitename: str, user: site_user_t) -> site_user_t:
+    if type(user) is str:
+        return SiteUser.objects.get(sitename=sitename, username=user)
+    return user
+
+
+def handle_site_users(sitename: str, users: Iterable[site_user_t]):
+    to_query = []
+    for user in users:
+        if type(user) is str:
+            to_query.append(user)
+        else:
+            yield user
+    for user in SiteUser.objects(sitename=sitename, username__in=to_query):
+        yield user
 
 
 class GlobalGroup(BaseDocument):
@@ -603,6 +622,27 @@ class SiteGroup(BaseDocument):
 
 
 site_group_t = Union[SiteGroup, str]
+
+
+def query_site_groups(sitename: str, groupnames: Iterable[str]):
+    return SiteGroup.objects(sitename=sitename, groupname__in=set(groupnames))
+
+
+def handle_site_group(sitename: str, group: site_group_t) -> site_group_t:
+    if type(group) is str:
+        return SiteGroup.objects.get(sitename=sitename, groupname=group)
+    return group
+
+
+def handle_site_groups(sitename: str, groups: Iterable[site_group_t]):
+    to_query = []
+    for group in groups:
+        if type(group) is str:
+            to_query.append(group)
+        else:
+            yield group
+    for group in SiteGroup.objects(sitename=sitename, groupname__in=to_query):
+        yield group
 
 
 class SiteSlurmAssociation(BaseDocument):
@@ -1092,38 +1132,93 @@ def query_associated_storages(sitename: str, username: str):
     return Storage.objects(source__in=sources)
 
 
-def add_group_member(sitename: str, user: site_user_t, groupname: str):
-    if type(user) is str:
-        user = SiteUser.objects.get(sitename=sitename, username=user)
-    logging.getLogger(__name__).info(f'Add user {user.username} to group {groupname} for site {sitename}')
-    SiteGroup.objects(sitename=sitename,
-                      groupname=groupname).update_one(add_to_set___members=user,
-                                                      ldap_synced=False)
+def query_site_memberships(sitename: str):
+    memberships = defaultdict(set)
+    slurmerships = defaultdict(set)
+    sudoships = defaultdict(set)
+    for group in SiteGroup.objects(sitename=sitename):
+        for username in group.members:
+            memberships[username].add(group.groupname)
+        for username in group.slurmers:
+            slurmerships[username].add(group.groupname)
+        for username in group.sudoers:
+            sudoships[username].add(group.groupname)
+
+    return memberships, slurmerships, sudoships
 
 
-def add_group_sponsor(sitename: str, user: site_user_t, groupname: str):
-    if type(user) is str:
-        user = SiteUser.objects.get(sitename=sitename, username=user)
-    logging.getLogger(__name__).info(f'Add sponsor {user.username} to group {groupname} for site {sitename}')
-    SiteGroup.objects(sitename=sitename,
-                      groupname=groupname).update_one(add_to_set___sponsors=user)
+def group_add_user_element(sitename: str,
+                           groups: Iterable[site_group_t], 
+                           users: Iterable[site_user_t],
+                           field: str):
+    logger = logging.getLogger(__name__)
+    groups = handle_site_groups(sitename, groups)
+    users = list(handle_site_users(sitename, users))
+    for group in groups:
+        logger.info(f'{_ctx_name()}: {group.groupname}: add {list(map(attrgetter("username"), users))} to {field}')
+        group.update(**{f'add_to_set__{field}': users},
+                     ldap_synced=False)
 
 
-def add_group_sudoer(sitename: str, user: site_user_t, groupname: str):
-    if type(user) is str:
-        user = SiteUser.objects.get(sitename=sitename, username=user)
-    logging.getLogger(__name__).info(f'Add sudoer {user.username} to group {groupname} for site {sitename}')
-    SiteGroup.objects(sitename=sitename,
-                      groupname=groupname).update_one(add_to_set___sudoers=user)
+def group_remove_user_element(sitename: str,
+                              groups: Iterable[site_group_t], 
+                              users: Iterable[site_user_t],
+                              field: str):
+    logger = logging.getLogger(__name__)
+    groups = handle_site_groups(sitename, groups)
+    users = list(handle_site_users(sitename, users))
+    for group in groups:
+        logger.info(f'{_ctx_name()}: {group.groupname}: remove {list(map(attrgetter("username"), users))} from {field}')
+        group.update(**{f'pull_all__{field}': users},
+                     ldap_synced=False)
 
 
-def add_group_slurmer(sitename: str, user: site_user_t, groupname: str):
-    if type(user) is str:
-        user = SiteUser.objects.get(sitename=sitename, username=user)
-    logging.getLogger(__name__).info(f'Add slurmer {user.username} to group {groupname} for site {sitename}')
+def add_group_member(sitename: str, 
+                     user: site_user_t,
+                     group: site_group_t):
+    group_add_user_element(sitename, [group], [user], '_members')
 
-    SiteGroup.objects(sitename=sitename,
-                      groupname=groupname).update_one(add_to_set___slurmers=user)
+
+def remove_group_member(sitename: str,
+                        user: site_user_t,
+                        group: site_group_t):
+    group_remove_user_element(sitename, [group], [user], '_members')
+
+
+def add_group_sponsor(sitename: str,
+                      user: site_user_t,
+                      group: site_group_t):
+    group_add_user_element(sitename, [group], [user], '_sponsors')
+
+
+def remove_group_sponsor(sitename: str, 
+                         user: site_user_t, 
+                         group: site_group_t):
+    group_remove_user_element(sitename, [group], [user], '_sponsors')
+
+
+def add_group_sudoer(sitename: str, 
+                     user: site_user_t, 
+                     group: site_group_t):
+    group_add_user_element(sitename, [group], [user], '_sudoers')
+
+
+def remove_group_sudoer(sitename: str,
+                        user: site_user_t,
+                        group: site_group_t):
+    group_remove_user_element(sitename, [group], [user], '_sudoers')
+
+
+def add_group_slurmer(sitename: str,
+                      user: site_user_t,
+                      group: site_group_t):
+    group_add_user_element(sitename, [group], [user], '_slurmers')
+
+
+def remove_group_slurmer(sitename: str,
+                         user: site_user_t,
+                         group: site_group_t):
+    group_remove_user_element(sitename, [group], [user], '_slurmers')
 
 
 def add_site_slurmer(sitename: str, group: site_group_t):
@@ -1463,14 +1558,13 @@ def slurm_association_state(sitename: str, ignore: set[str] = {'root'}):
     return state
 
 
-def user_to_puppet(user: SiteUser):
+def user_to_puppet(user: SiteUser,
+                   groups: set[str], 
+                   slurm: set[str], 
+                   group_sudo: set[str]):
     logger = logging.getLogger(__name__)
-    memberships = set(query_user_groups(user.sitename, user))
-    memberships.remove(user.username)
-    memberships = sorted(memberships)
-    slurmerships = sorted(list(query_user_slurmership(user.sitename, user)))
-    group_sudo = sorted(list(query_user_sudogroups(user.sitename, user)))
-    slurm = {'account': slurmerships} if slurmerships else None
+    groups.remove(user.username)
+    slurm = {'account': sorted(slurm)} if slurm else None
     
     tags = set()
     if 'compute-ssh' in user.access:
@@ -1494,8 +1588,8 @@ def user_to_puppet(user: SiteUser):
                      email=user.email,
                      uid=user.uid,
                      gid=user.gid,
-                     groups=memberships,
-                     group_sudo=group_sudo,
+                     groups=sorted(groups),
+                     group_sudo=sorted(group_sudo),
                      shell=user.shell,
                      tag=tags,
                      home=user.home_directory,
@@ -1554,13 +1648,24 @@ def share_to_puppet(share: Storage):
     return PuppetShareRecord.load(dict(storage=storage_data))
 
 
-def site_to_puppet(sitename: str):
+def site_to_puppet(sitename: str) -> PuppetAccountMap:
+    logger = logging.getLogger(__name__)
+    logger.info(f'{_ctx_name()}: convert site {sitename} to legacy puppet format.')
+    
+    logger.info(f'{_ctx_name()}: creating membership map')
+    memberships, slurmerships, sudoships = query_site_memberships(sitename)
+
+    logger.info(f'{_ctx_name()}: converting users')
     users = {}
     for user in SiteUser.objects(sitename=sitename).order_by('username'):
-        record = user_to_puppet(user)
+        record = user_to_puppet(user,
+                                memberships.get(user.username, set()),
+                                slurmerships.get(user.username, set()),
+                                sudoships.get(user.username, set()))
         if record:
             users[user.username] = record
 
+    logger.info(f'{_ctx_name()}: converting groups')
     groups = {}
     for group in SiteGroup.objects(sitename=sitename).order_by('groupname'):
         if group.parent.type == 'user':
@@ -1569,6 +1674,7 @@ def site_to_puppet(sitename: str):
                 continue
         groups[group.groupname] = group_to_puppet(group)
 
+    logger.info(f'{_ctx_name()}: converting shares')
     shares = {}
     storages = query_automap_storages(sitename, 'share')
     for share in storages.order_by('name'):
@@ -2167,28 +2273,28 @@ def user_show(args: argparse.Namespace):
     try:
         if args.site is not None:
             user = SiteUser.objects.get(username=args.username,
-                                        sitename=args.site).to_dict(strip_empty=True)
+                                        sitename=args.site)
+            user_data = user.to_dict(strip_empty=True)
             if not args.verbose:
-                user['parent'] = removed(user['parent'], 'ssh_key')
-                del user['sitename']
-                del user['parent']['gid']
-            user['groups'] = list(query_user_groups(args.site, args.username))
-            if args.verbose:
-                user['slurm'] = list(map(lambda s: removed(s, 'sitename'),
-                                         (s.to_dict() for s in query_user_slurm(args.site, args.username))))
-            else:
-                user['slurm'] = query_user_partitions(args.site, args.username)
-
-
+                user_data['parent'] = removed(user_data['parent'], 'ssh_key')
+                del user_data['sitename']
+                del user_data['parent']['gid']
+            user_data['groups'] = list(query_user_groups(args.site, args.username))
+            if 'slurm' in user.access:
+                if args.verbose:
+                    user_data['slurm'] = list(map(lambda s: removed(s, 'sitename'),
+                                             (s.to_dict() for s in query_user_slurm(args.site, args.username))))
+                else:
+                    user_data['slurm'] = query_user_partitions(args.site, args.username)
         else:
-            user = GlobalUser.objects.get(username=args.username).to_dict()
-            user['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
+            user_data = GlobalUser.objects.get(username=args.username).to_dict()
+            user_data['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
         logger.info(f'User {args.username} with scope {scope} does not exist.')
     else:
         console = Console()
-        output = dumps_yaml(user)
+        output = dumps_yaml(user_data)
         console.print(highlight_yaml(output))
 
 
@@ -2357,24 +2463,52 @@ def add_group_add_member_args(parser: argparse.ArgumentParser):
     parser.add_argument('--groups', '-g', nargs='+', required=True)
 
 
-@subcommand('add-user', add_group_add_member_args, add_site_args_req)
-def group_add_user(args: argparse.Namespace):
+@subcommand('add-member', add_group_add_member_args, add_site_args_req)
+def group_add_member(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
-    console = Console()
+    group_add_user_element(args.site, args.groups, args.users, '_members')
 
-    for username in args.users:
-        for groupname in args.groups:
-            add_group_member(args.site, username, groupname)
+
+@subcommand('remove-member', add_group_add_member_args, add_site_args_req)
+def group_remove_member(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_remove_user_element(args.site, args.groups, args.users, '_members')
 
 
 @subcommand('add-sponsor', add_group_add_member_args, add_site_args_req)
 def group_add_sponsor(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
-    console = Console()
+    group_add_user_element(args.site, args.groups, args.users, '_sponsors')
 
-    for username in args.users:
-        for groupname in args.groups:
-            add_group_sponsor(args.site, username, groupname)
+
+@subcommand('remove-sponsor', add_group_add_member_args, add_site_args_req)
+def group_remove_sponsor(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_remove_user_element(args.site, args.groups, args.users, '_sponsors')
+
+
+@subcommand('add-sudoer', add_group_add_member_args, add_site_args_req)
+def group_add_sudoer(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_add_user_element(args.site, args.groups, args.users, '_sudoers')
+
+
+@subcommand('remove-sudoer', add_group_add_member_args, add_site_args_req)
+def group_remove_sudoer(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_remove_user_element(args.site, args.groups, args.users, '_sudoers')
+
+
+@subcommand('add-slurmer', add_group_add_member_args, add_site_args_req)
+def group_add_slurmer(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_add_user_element(args.site, args.groups, args.users, '_slurmers')
+
+
+@subcommand('remove-slurmer', add_group_add_member_args, add_site_args_req)
+def group_remove_slurmer(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_remove_user_element(args.site, args.groups, args.users, '_slurmers')
 
 
 def add_group_new_system_args(parser: argparse.ArgumentParser):

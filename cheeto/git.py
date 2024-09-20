@@ -180,7 +180,6 @@ class GitRepo:
                 self.cmd.clean(force=True, exclude=self.lock_file.name)()
             self.cmd.pull()()
             self.cmd.checkout(branch=working_branch, create=True)()
-            start_commit = self.cmd.rev_parse()().strip()
 
             yield self.cmd.add()
             
@@ -188,6 +187,7 @@ class GitRepo:
                 self.cmd.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 self.logger.info(f'Nothing to commit.')
+                self.cmd.checkout(self.base_branch)()
                 return
 
             if push_merge:
@@ -199,3 +199,5 @@ class GitRepo:
                 self.cmd.merge(working_branch)()
 
                 self.cmd.push()()
+            else:
+                self.cmd.checkout(self.base_branch)()

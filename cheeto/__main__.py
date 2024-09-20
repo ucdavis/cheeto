@@ -20,7 +20,6 @@ from . import nocloud
 from . import puppet
 from . import slurm
 
-from .args import add_common_args
 from .config import get_config
 
 
@@ -28,6 +27,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.set_defaults(func = lambda _: parser.print_help())
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
+    parser.add_argument('--config', type=get_config, default=get_config())
     commands = parser.add_subparsers()
 
     config_parser = commands.add_parser('config')
@@ -98,8 +98,14 @@ def main():
     group_commands = group_parser.add_subparsers()
     database.show_group(group_commands)
     database.query_groups(group_commands)
-    database.group_add_user(group_commands)
+    database.group_add_member(group_commands)
+    database.group_remove_member(group_commands)
     database.group_add_sponsor(group_commands)
+    database.group_remove_sponsor(group_commands)
+    database.group_add_sudoer(group_commands)
+    database.group_remove_sudoer(group_commands)
+    database.group_add_slurmer(group_commands)
+    database.group_remove_slurmer(group_commands)
     database.group_new_system(group_commands)
 
     storage_parser = database_commands.add_parser('storage')

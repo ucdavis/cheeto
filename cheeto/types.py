@@ -59,7 +59,8 @@ GROUP_TYPES = {
     'user',
     'access',
     'system',
-    'group'
+    'group',
+    'admin'
 }
 
 USER_STATUSES = {

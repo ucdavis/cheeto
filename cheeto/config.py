@@ -129,11 +129,7 @@ def write(args: argparse.Namespace):
                                            login_dn='uid=cheeto,ou=Services,dc=hpc,dc=ucdavis,dc=edu',
                                            password='password',
                                            user_classes=['inetOrgPerson', 'posixAccount']),
-                        ucdavis = LDAPConfig(servers=['ldaps://ldap.ucdavis.edu'],
-                                             searchbase='ou=People,dc=ucdavis,dc=edu',
-                                             login_dn='',
-                                             password='',
-                                             user_classes=['inetOrgPerson'])
+
                     ))
 
     config_path = get_config_path()
