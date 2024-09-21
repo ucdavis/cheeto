@@ -2309,7 +2309,10 @@ def add_show_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--verbose', action='store_true', default=False)
 
 
-@subcommand('show', add_show_user_args, add_site_args)
+@subcommand('show',
+            add_show_user_args,
+            add_site_args,
+            help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
 def user_show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
@@ -2350,7 +2353,8 @@ def add_user_status_args(parser: argparse.ArgumentParser):
 
 @subcommand('set-status',
             add_user_status_args,
-            add_site_args)
+            add_site_args,
+            help='Set the status for a user, globally or per-site if --site is provided')
 def user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
@@ -2369,7 +2373,8 @@ def add_user_access_args(parser: argparse.ArgumentParser):
 @subcommand('add-access',
             add_user_access_args,
             add_user_args,
-            add_site_args)
+            add_site_args,
+            help='Add an access type to user(s), globally or per-site if --site is provided')
 def user_add_access(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
@@ -2380,7 +2385,8 @@ def user_add_access(args: argparse.Namespace):
 @subcommand('remove-access',
             add_user_access_args,
             add_user_args,
-            add_site_args)
+            add_site_args,
+            help='Remove an access type from user(s), globally or per-site if --site is provided')
 def user_remove_access(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
@@ -2394,7 +2400,8 @@ def add_user_type_args(parser: argparse.ArgumentParser):
 
 @subcommand('set-type',
             add_user_args,
-            add_user_type_args)
+            add_user_type_args,
+            help='Set the type of user(s)')
 def user_set_type(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
@@ -2410,13 +2417,16 @@ def add_user_membership_args(parser: argparse.ArgumentParser):
     parser.add_argument('users', nargs='+')
 
 
-@subcommand('groups', add_user_membership_args, add_site_args_req)
+@subcommand('groups',
+            add_user_args,
+            add_site_args_req,
+            help='Output the user(s) group memberships in YAML format')
 def user_groups(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
     output = {}
-    for username in args.users:
+    for username in args.user:
         output[username] = list(query_user_groups(args.site, username))
     dumped = dumps_yaml(output)
     console.print(highlight_yaml(dumped))

@@ -14,7 +14,7 @@ from argparse import ArgumentParser, Namespace, _SubParsersAction
 import os
 from functools import wraps
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 from typing_extensions import Concatenate, ParamSpec, Union
 
 from .errors import ExitCode
@@ -34,14 +34,16 @@ def add_common_args(parser):
     parser.add_argument('--quiet', default=False, action='store_true')
 
 
-def subcommand(subcommand_name: str, *arg_adders: Callable[[ArgumentParser], None]) \
+def subcommand(subcommand_name: str,
+               *arg_adders: Callable[[ArgumentParser], None],
+               help: Optional[str] = None) \
 -> Callable[[NamespaceFunc[P]], SubCommandFunc[P]]:
 
     def wrapper(func: NamespaceFunc[P]) -> SubCommandFunc[P]:
    
         @wraps(func)
         def wrapped(parent_parser: Subparsers, *args: P.args, **kwargs: P.kwargs) -> None:
-            parser = parent_parser.add_parser(subcommand_name)
+            parser = parent_parser.add_parser(subcommand_name, help=help)
             add_common_args(parser)
             parser.set_defaults(func=func)
             for adder in arg_adders:
