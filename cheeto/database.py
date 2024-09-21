@@ -11,6 +11,7 @@ import argparse
 from collections import defaultdict
 from collections.abc import Iterable
 from enum import member
+from functools import partialmethod, singledispatch
 import logging
 from operator import attrgetter
 from pathlib import Path
@@ -162,6 +163,17 @@ class BaseDocument(Document):
         return dumps_yaml(data)
 
 
+class SyncQuerySet(QuerySet):
+    
+    def update(self, *args, **kwargs):
+        kwargs['ldap_synced'] = kwargs.get('ldap_synced', False)
+        return super().update(*args, **kwargs)
+
+    def update_one(self, *args, **kwargs):
+        kwargs['ldap_synced'] = kwargs.get('ldap_synced', False)
+        return super().update_one(*args, **kwargs)
+
+
 class HippoEvent(BaseDocument):
     hippo_id = LongField(required=True, unique=True)
     action = StringField(required=True,
@@ -190,6 +202,10 @@ class GlobalUser(BaseDocument):
 
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
+
+    meta = {
+        'queryset_class': SyncQuerySet
+    }
 
     @classmethod
     def from_puppet(cls, username: str, 
@@ -271,13 +287,12 @@ def user_apply_globals(sender, document, **kwargs):
     if site.global_groups:
         for site_group in site.global_groups:
             logger.info(f'Splat {site.sitename}: Add member {document.username} to group {site_group.groupname}')
-            site_group.update(add_to_set___members=document,
-                              ldap_synced=False)
+            site_group.update(add_to_set___members=document)
     if site.global_slurmers:
         for site_group in site.global_slurmers:
             logger.info(f'Splat {site.sitename}: Add slurmer {document.username} to group {site_group.groupname}')
-            site_group.update(add_to_set___slurmers=document,
-                              ldap_synced=False)
+            site_group.update(add_to_set___slurmers=document)
+
 
 
 @user_apply_globals.apply #type: ignore
@@ -299,7 +314,8 @@ class SiteUser(BaseDocument):
                 'fields': ('username', 'sitename'),
                 'unique': True
             }
-        ]
+        ],
+        'queryset_class': SyncQuerySet
     }
 
     @property
@@ -413,6 +429,10 @@ class GlobalGroup(BaseDocument):
 
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
+
+    meta = {
+        'queryset_class': SyncQuerySet
+    }
     
     @classmethod
     def from_puppet(cls, groupname: str, puppet_record: PuppetGroupRecord) -> Self:
@@ -570,7 +590,8 @@ class SiteGroup(BaseDocument):
             {
                 'fields': ['_slurmers']
             }
-        ]
+        ],
+        'queryset_class': SyncQuerySet
     }
 
     @property
@@ -873,12 +894,10 @@ def site_apply_globals(sender, document, **kwargs):
         logger.info(f'Update globals with {len(site_users)} users')
         for site_group in document.global_groups:
             for site_user in site_users:
-                site_group.update(add_to_set___groups=site_user,
-                                  ldap_synced=False)
+                site_group.update(add_to_set___groups=site_user)
         for site_group in document.global_slurmers:
             for site_user in site_users:
-                site_group.update(add_to_set___slurmers=site_user,
-                                  ldap_synced=False)
+                site_group.update(add_to_set___slurmers=site_user)
 
 
 @site_apply_globals.apply #type: ignore
@@ -914,9 +933,9 @@ def query_user_exists(username: str,
     logger = logging.getLogger(__name__)
     try:
         if sitename is None:
-            _ = GlobalUser.objects.get(username=username)
+            _ = GlobalUser.objects.get(username=username).only('username')
         else:
-            _ = SiteUser.objects.get(username=username, sitename=sitename)
+            _ = SiteUser.objects.get(username=username, sitename=sitename).only('username')
     except DoesNotExist:
         if raise_exc:
             logger.warning(f'User {username} at site {sitename} does not exist.')
@@ -948,16 +967,6 @@ def add_user_comment(username: str, comment: str):
     GlobalUser.objects(username=username).update_one(push__comments=comment)
 
 
-def add_user_access(username: str, access_type: str, sitename: Optional[str] = None):
-    if sitename is None:
-        GlobalUser.objects(username=username).update_one(add_to_set__access=access_type,
-                                                         ldap_synced=False) #type: ignore
-    else:
-        SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(add_to_set___access=access_type,
-                                                       ldap_synced=False)
-
-
 def set_user_status(username: str,
                     status: str,
                     reason: str,
@@ -968,18 +977,45 @@ def set_user_status(username: str,
     add_user_comment(username, comment)
 
     if sitename is None:
-        GlobalUser.objects(username=username).update_one(set__status=status,
-                                                         ldap_synced=False) #type: ignore
+        GlobalUser.objects(username=username).update_one(set__status=status) #type: ignore
     else:
         SiteUser.objects(username=username, #type: ignore
-                         sitename=sitename).update_one(set___status=status,
-                                                       ldap_synced=False)
+                         sitename=sitename).update_one(set___status=status)
 
 
 def set_user_type(username: str,
                   usertype: str):
-    GlobalUser.objects(username=username).update_one(set__type=usertype,
-                                                     ldap_synced=False)
+    GlobalUser.objects(username=username).update_one(set__type=usertype)
+
+
+@singledispatch
+def add_user_access(user: SiteUser | GlobalUser | str, access: str):
+    pass
+
+
+@add_user_access.register
+def _(user: SiteUser, access: str):
+    user.update(add_to_set___access=access)
+
+
+@add_user_access.register
+def _(user: GlobalUser, access: str):
+    user.update(add_to_set__access=access)
+
+
+@singledispatch
+def remove_user_access(user: SiteUser | GlobalUser, access: str):
+    pass
+
+
+@remove_user_access.register
+def _(user: SiteUser, access: str):
+    user.update(pull___access=access)
+
+
+@remove_user_access.register
+def _(user: GlobalUser, access: str):
+    user.update(pull__access=access)
 
 
 def create_group_from_sponsor(sponsor_user: SiteUser):
@@ -1156,8 +1192,7 @@ def group_add_user_element(sitename: str,
     users = list(handle_site_users(sitename, users))
     for group in groups:
         logger.info(f'{_ctx_name()}: {group.groupname}: add {list(map(attrgetter("username"), users))} to {field}')
-        group.update(**{f'add_to_set__{field}': users},
-                     ldap_synced=False)
+        group.update(**{f'add_to_set__{field}': users})
 
 
 def group_remove_user_element(sitename: str,
@@ -1169,8 +1204,7 @@ def group_remove_user_element(sitename: str,
     users = list(handle_site_users(sitename, users))
     for group in groups:
         logger.info(f'{_ctx_name()}: {group.groupname}: remove {list(map(attrgetter("username"), users))} from {field}')
-        group.update(**{f'pull_all__{field}': users},
-                     ldap_synced=False)
+        group.update(**{f'pull_all__{field}': users})
 
 
 def add_group_member(sitename: str, 
@@ -1231,8 +1265,7 @@ def add_site_slurmer(sitename: str, group: site_group_t):
 def add_site_group(sitename: str, group: site_group_t):
     if type(group) is str:
         group = SiteGroup.objects.get(sitename=sitename, groupname=group)
-    Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group,
-                                                   ldap_synced=False)
+    Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group)
     Site.objects.get(sitename=sitename).save()
 
 
@@ -2260,6 +2293,17 @@ def query_users(args: argparse.Namespace):
 #########################################
 
 
+def add_user_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--user', '-u', nargs='+', required=True)
+
+
+def process_user_args(args: argparse.Namespace):
+    if args.site:
+        return SiteUser.objects(sitename=args.site, username__in=args.user)
+    else:
+        return GlobalUser.objects(username__in=args.user)
+
+
 def add_show_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('username')
     parser.add_argument('--verbose', action='store_true', default=False)
@@ -2304,7 +2348,9 @@ def add_user_status_args(parser: argparse.ArgumentParser):
     parser.add_argument('--reason', '-r', required=True)
 
 
-@subcommand('set-status', add_user_status_args, add_site_args)
+@subcommand('set-status',
+            add_user_status_args,
+            add_site_args)
 def user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
@@ -2316,20 +2362,48 @@ def user_set_status(args: argparse.Namespace):
         logger.info(f'User {args.username} with scope {scope} does not exist.')
 
 
+def add_user_access_args(parser: argparse.ArgumentParser):
+    parser.add_argument('access', choices=list(ACCESS_TYPES))
+
+
+@subcommand('add-access',
+            add_user_access_args,
+            add_user_args,
+            add_site_args)
+def user_add_access(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    for user in process_user_args(args):
+        add_user_access(user, args.access)
+
+
+@subcommand('remove-access',
+            add_user_access_args,
+            add_user_args,
+            add_site_args)
+def user_remove_access(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+
+    for user in process_user_args(args):
+        remove_user_access(user, args.access)
+
+
 def add_user_type_args(parser: argparse.ArgumentParser):
-    parser.add_argument('username')
     parser.add_argument('type', choices=list(USER_TYPES))
 
 
-@subcommand('set-type', add_user_type_args)
+@subcommand('set-type',
+            add_user_args,
+            add_user_type_args)
 def user_set_type(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
-    try:
-        set_user_type(args.username, args.type)
-    except GlobalUser.DoesNotExist:
-        logger.info(f'User {args.username} does not exist.')
+    for user in args.user:
+        try:
+            set_user_type(user, args.type)
+        except GlobalUser.DoesNotExist:
+            logger.info(f'User {args.username} does not exist.')
 
 
 def add_user_membership_args(parser: argparse.ArgumentParser):
@@ -2804,12 +2878,13 @@ def process_updatesshkey_event(event: QueuedEventDataModel,
     ssh_key = hippo_account.key
 
     logger.info(f'Process UpdateSshKey for user {username}')
-    global_user = GlobalUser.objects.get(username=username)
+    user = SiteUser.objects.get(username=username, sitename=sitename)
+    global_user = user.parent
     global_user.ssh_key = [ssh_key]
     global_user.save()
 
     logger.info(f'Add login-ssh access to user {username}, site {sitename}')
-    add_user_access(username, 'login-ssh', sitename=sitename)
+    add_user_access(user, 'login-ssh')
 
 
 def process_createaccount_event(event: QueuedEventDataModel,

@@ -90,6 +90,8 @@ def main():
     database.query_users(user_commands)
     database.user_set_status(user_commands)
     database.user_set_type(user_commands)
+    database.user_add_access(user_commands)
+    database.user_remove_access(user_commands)
     database.user_groups(user_commands)
     database.user_show(user_commands)
 
