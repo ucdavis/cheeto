@@ -1624,7 +1624,7 @@ def user_to_puppet(user: SiteUser,
                      groups=sorted(groups),
                      group_sudo=sorted(group_sudo),
                      shell=user.shell,
-                     tag=tags,
+                     tag=sorted(tags),
                      home=user.home_directory,
                      password=user.password,
                      expiry=str(user.expiry) if user.expiry else None,
@@ -1664,7 +1664,7 @@ def group_to_puppet(group: SiteGroup):
     ]
 
     return PuppetGroupRecord.load(dict(gid=group.gid,
-                                       sponsors=group.sponsors,
+                                       sponsors=sorted(group.sponsors),
                                        storage=storages_data))
 
 
