@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "cheeto"
-version = "1.0.rc6"
+version = "1.0.rc7"
 description = "Utilities for the UC Davis HPC Core Facility."
 license = "Proprietary"
 authors = [

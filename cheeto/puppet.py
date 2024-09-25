@@ -8,14 +8,13 @@
 # Date   : 21.02.2023
 
 import argparse
-from dataclasses import asdict, field
+from dataclasses import field
 from enum import Enum
 import logging
 import os
 import traceback
-from typing import Callable, Optional, List, Mapping, Union, Set, Tuple, Type
+from typing import Callable, Optional, List, Mapping, Union, Tuple, Type
 from typing_extensions import Concatenate
-import socket
 import sys
 
 from filelock import FileLock
@@ -29,7 +28,6 @@ from rich.syntax import Syntax
 
 from .args import subcommand
 from .errors import ExitCode
-from .git import Gh, Git, branch_name_title
 from .ldap import LDAPManager
 from .yaml import (MergeStrategy,
                    parse_yaml_forest,
@@ -103,7 +101,7 @@ class SlurmQOS(BaseModel):
     user: Optional[SlurmQOSTRES] = None 
     job: Optional[SlurmQOSTRES] = None 
     priority: Optional[int] = 0
-    flags: Optional[Set[SlurmQOSFlag]] = None 
+    flags: Optional[List[SlurmQOSFlag]] = None 
 
     def to_slurm(self) -> List[str]:
         tokens = []
@@ -130,7 +128,7 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, Set[KerberosID]]] = None 
+    account: Optional[Union[KerberosID, List[KerberosID]]] = None 
     partitions: Optional[Mapping[str, SlurmPartition]] = None
     max_jobs: Optional[int] = None 
     max_group_jobs: Optional[int] = None
@@ -150,11 +148,11 @@ class PuppetUserRecord(BaseModel):
     email: Email
     uid: LinuxUID 
     gid: LinuxGID
-    groups: Optional[Set[KerberosID]] = None 
+    groups: Optional[List[KerberosID]] = None 
     group_sudo: Optional[List[KerberosID]] = None 
     password: Optional[LinuxPassword] = None 
     shell: Optional[Shell] = None 
-    tag: Optional[Set[str]] = None
+    tag: Optional[List[str]] = None
     home: Optional[str] = None
     expiry: Optional[Union[Date, PuppetAbsent]] = None 
 
@@ -227,7 +225,7 @@ class PuppetGroupRecord(BaseModel):
     gid: LinuxGID #type: ignore
     sponsors: Optional[List[KerberosID]] = None 
     ensure: Optional[PuppetEnsure] = None 
-    tag: Optional[Set[str]] = None
+    tag: Optional[List[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
     slurm: Optional[SlurmRecord] = None
