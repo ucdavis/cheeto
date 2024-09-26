@@ -933,9 +933,9 @@ def query_user_exists(username: str,
     logger = logging.getLogger(__name__)
     try:
         if sitename is None:
-            _ = GlobalUser.objects.get(username=username).only('username')
+            _ = GlobalUser.objects.get(username=username)
         else:
-            _ = SiteUser.objects.get(username=username, sitename=sitename).only('username')
+            _ = SiteUser.objects.get(username=username, sitename=sitename)
     except DoesNotExist:
         if raise_exc:
             logger.warning(f'User {username} at site {sitename} does not exist.')
