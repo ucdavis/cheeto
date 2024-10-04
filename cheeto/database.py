@@ -10,7 +10,6 @@
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable
-from enum import member
 from functools import partialmethod, singledispatch
 import logging
 from operator import attrgetter
@@ -18,7 +17,6 @@ from pathlib import Path
 from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
 
-from bson.json_util import default
 from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
@@ -26,7 +24,7 @@ from mongoengine.queryset.visitor import Q as Qv
 from cheeto.git import GitRepo
 
 from .args import subcommand
-from .config import HippoConfig, LDAPConfig, MongoConfig, Config
+from .config import HippoConfig, MongoConfig, Config
 from .errors import ExitCode
 from .hippoapi.api.event_queue import (event_queue_pending_events,
                                        event_queue_update_status)
@@ -41,20 +39,32 @@ from .puppet import (MIN_PIGROUP_GID,
                      MIN_SYSTEM_UID,
                      PuppetAccountMap, 
                      PuppetGroupRecord,
-                     PuppetGroupStorage, PuppetShareMap, PuppetShareRecord, PuppetShareStorage,
+                     PuppetGroupStorage,
+                     PuppetShareRecord,
                      PuppetUserRecord,
-                     PuppetUserStorage,
                      SlurmQOS as PuppetSlurmQOS,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
                      add_repo_args,
                      SiteData)
-from .types import (DEFAULT_SHELL, DISABLED_SHELLS, ENABLED_SHELLS, GROUP_TYPES,
-                    HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES, MOUNT_OPTS, SlurmAccount, hippo_to_cheeto_access,  
-                    is_listlike, UINT_MAX, USER_TYPES,
-                    USER_STATUSES, ACCESS_TYPES, SlurmQOSValidFlags)
+from .types import (DEFAULT_SHELL,
+                    DISABLED_SHELLS, 
+                    ENABLED_SHELLS, 
+                    GROUP_TYPES,
+                    HIPPO_EVENT_ACTIONS, 
+                    HIPPO_EVENT_STATUSES, 
+                    MOUNT_OPTS, 
+                    SlurmAccount, 
+                    hippo_to_cheeto_access,  
+                    is_listlike, 
+                    UINT_MAX,
+                    MIN_CLASS_ID,
+                    USER_TYPES,
+                    USER_STATUSES, 
+                    ACCESS_TYPES,
+                    SlurmQOSValidFlags)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
-                    _ctx_name, removed_nones,
+                    _ctx_name, 
                     size_to_megs,
                     removed,
                     remove_nones)
@@ -441,6 +451,11 @@ class GlobalGroup(BaseDocument):
             gid = puppet_record.gid
         )
 
+    def pretty(self):
+        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
+        data['sites'] = [sg.sitename for sg in SiteGroup.objects(groupname=self.groupname)]
+        return dumps_yaml(data)
+
 
 global_group_t = Union[GlobalGroup, str]
 
@@ -630,16 +645,45 @@ class SiteGroup(BaseDocument):
     def to_dict(self, strip_id=True, strip_empty=False, raw=False, **kwargs):
         data = super().to_dict(strip_id=strip_id, strip_empty=strip_empty, raw=raw, **kwargs)
         if not raw:
-            data['parent'] = self.parent.to_dict() #type: ignore
-            data.pop('_members')
-            data['members'] = self.members
-            data.pop('_sponsors')
-            data['sponsors'] = self.sponsors
-            data.pop('_sudoers')
-            data['sudoers'] = self.sudoers
-            data.pop('_slurmers')
-            data['slurmers'] = self.slurmers
+            data['parent'] = self.parent.to_dict(raw=False) #type: ignore
+            data.pop('_members', None)
+            if 'members' in data:
+                data['members'] = self.members
+            data.pop('_sponsors', None)
+            if 'sponsors' in data:
+                data['sponsors'] = self.sponsors
+            data.pop('_sudoers', None)
+            if 'sudoers' in data:
+                data['sudoers'] = self.sudoers
+            data.pop('_slurmers', None)
+            if 'slurmers' in data:
+                data['slurmers'] = self.slurmers
         return data
+
+    def pretty(self):
+        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
+        for key, value in data['parent'].items():
+            if key not in data:
+                data[key] = value
+        del data['parent']
+        
+        out = {}
+        out['groupname'] = data['groupname']
+        out['sitename'] = data['sitename']
+        out['gid'] = data['gid']
+        out['type' ] = data['type']
+        if 'slurm' in data:
+            out['slurm'] = data['slurm']
+        if 'members' in data:
+            out['members'] = data['members']
+        if 'sponsors' in data:
+            out['sponsors'] = data['sponsors']
+
+        for key, value in data.items():
+            if key not in out:
+                out[key] = value
+
+        return dumps_yaml(out)
 
 
 site_group_t = Union[SiteGroup, str]
@@ -790,6 +834,7 @@ def validate_mount_options(option: str):
     if tokens[0] not in MOUNT_OPTS:
         raise ValidationError(f'{option} not a valid mount option')
 
+
 class MountOptionsMixin(Document):
     _options = ListField(StringField(validation=validate_mount_options))
     _add_options = ListField(StringField(validation=validate_mount_options))
@@ -883,6 +928,20 @@ class Storage(BaseDocument):
             return None
         else:
             return self.source.quota
+
+    def pretty(self) -> str:
+        data = {}
+        data['name'] = self.name
+        data['type'] = type(self.source).__name__
+        data['owner'] = self.owner
+        data['group'] = self.group
+        if self.quota:
+            data['quota'] = self.quota
+        data['host'] = self.host
+        data['host_path'] = str(self.host_path)
+        data['mount_path'] = str(self.mount_path)
+        data['mount_options'] = self.mount_options
+        return dumps_yaml(data)
 
 
 @handler(signals.post_save)
@@ -1277,6 +1336,14 @@ def get_next_system_id() -> int:
     return max(ids) + 1
 
 
+def get_next_class_id() -> int:
+    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_CLASS_ID, 
+                                                 uid__lt=MIN_CLASS_ID+100000000))) \
+        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_CLASS_ID, 
+                                                  gid__lt=MIN_CLASS_ID+100000000)))
+    return max(ids) + 1
+
+
 def create_home_storage(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is str:
@@ -1313,6 +1380,7 @@ def create_home_storage(sitename: str, user: global_user_t):
 def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
     logger = logging.getLogger(__name__)
     global_group = GlobalGroup(groupname=groupname,
+                               type='system',
                                gid=get_next_system_id())
     global_group.save()
     logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
@@ -1324,6 +1392,24 @@ def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
                                    parent=global_group)
             site_group.save()
             logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
+
+
+
+def create_class_group(groupname: str, sitename: str) -> SiteGroup:
+    logger = logging.getLogger(__name__)
+    global_group = GlobalGroup(groupname=groupname,
+                               type='class',
+                               gid=get_next_class_id())
+    global_group.save()
+    logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
+
+    site_group = SiteGroup(groupname=groupname,
+                           sitename=sitename,
+                           parent=global_group)
+    site_group.save()
+    logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
+
+    return site_group
 
 
 def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
@@ -1764,7 +1850,7 @@ def site_add(args: argparse.Namespace):
 @subcommand('add-global-slurm',
             add_site_args,
             lambda parser: parser.add_argument('groups', nargs='+')) #type: ignore
-def site_add_global_slurm(args: argparse.Namespace):
+def cmd_site_add_global_slurm(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -1775,7 +1861,7 @@ def site_add_global_slurm(args: argparse.Namespace):
 @subcommand('to-puppet',
             add_site_args_req,
             lambda parser: parser.add_argument('puppet_yaml', type=Path))
-def site_write_to_puppet(args: argparse.Namespace):
+def cmd_site_write_to_puppet(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -1788,7 +1874,7 @@ def site_write_to_puppet(args: argparse.Namespace):
             lambda parser: parser.add_argument('repo', type=Path),
             lambda parser: parser.add_argument('--base-branch', default='main'),
             lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
-def site_sync_old_puppet(args: argparse.Namespace):
+def cmd_site_sync_old_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     site = Site.objects.get(sitename=args.site)
@@ -1815,7 +1901,7 @@ def site_sync_old_puppet(args: argparse.Namespace):
 @subcommand('to-ldap',
             add_site_args_req,
             lambda parser: parser.add_argument('--force', '-f', default=False, action='store_true'))
-def site_sync_to_ldap(args: argparse.Namespace):
+def cmd_site_sync_to_ldap(args: argparse.Namespace):
     ldap_sync(args.site, args.config, force=args.force)
 
 
@@ -1823,7 +1909,7 @@ def site_sync_to_ldap(args: argparse.Namespace):
             add_site_args_req,
             lambda parser: parser.add_argument('output_txt', type=Path),
             lambda parser: parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu']))
-def site_write_sympa(args: argparse.Namespace):
+def cmd_site_write_sympa(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _site_write_sympa(args.site, args.output_txt, set(args.ignore))
 
@@ -1839,7 +1925,7 @@ def _site_write_sympa(sitename: str, output: Path, ignore: set):
 @subcommand('root-key',
             add_site_args_req,
             lambda parser: parser.add_argument('output_txt', type=Path))
-def site_write_root_key(args: argparse.Namespace):
+def cmd_site_write_root_key(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _site_write_root_key(args.site, args.output_txt)
 
@@ -1860,7 +1946,7 @@ def _site_write_root_key(sitename: str, output: Path):
             lambda parser: parser.add_argument('repo', type=Path),
             lambda parser: parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu']),
             lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
-def site_sync_new_puppet(args: argparse.Namespace):
+def cmd_site_sync_new_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     site = Site.objects.get(sitename=args.site)
@@ -1883,7 +1969,7 @@ def site_sync_new_puppet(args: argparse.Namespace):
 
 
 @subcommand('list')
-def site_list(args: argparse.Namespace):
+def cmd_site_list(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     for site in Site.objects():
@@ -1915,8 +2001,8 @@ def add_database_load_args(parser: argparse.ArgumentParser):
     parser.add_argument('--nfs-yamls', nargs='+', type=Path)
 
 
-@subcommand('load', add_repo_args, add_site_args, add_database_load_args)
-def load(args: argparse.Namespace):
+@subcommand('from-puppet', add_repo_args, add_site_args, add_database_load_args)
+def cmd_site_from_puppet(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     
     site_data = SiteData(args.site_dir,
@@ -2211,7 +2297,7 @@ def add_query_user_args(parser: argparse.ArgumentParser):
 
 
 @subcommand('query', add_site_args, add_query_args, add_query_user_args)
-def query_users(args: argparse.Namespace):
+def cmd_user_query(args: argparse.Namespace):
 
     if args.list_fields:
         print('Global Fields:')
@@ -2313,7 +2399,7 @@ def add_show_user_args(parser: argparse.ArgumentParser):
             add_show_user_args,
             add_site_args,
             help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
-def user_show(args: argparse.Namespace):
+def cmd_user_show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2355,7 +2441,7 @@ def add_user_status_args(parser: argparse.ArgumentParser):
             add_user_status_args,
             add_site_args,
             help='Set the status for a user, globally or per-site if --site is provided')
-def user_set_status(args: argparse.Namespace):
+def cmd_user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2375,7 +2461,7 @@ def add_user_access_args(parser: argparse.ArgumentParser):
             add_user_args,
             add_site_args,
             help='Add an access type to user(s), globally or per-site if --site is provided')
-def user_add_access(args: argparse.Namespace):
+def cmd_user_add_access(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     for user in process_user_args(args):
@@ -2387,7 +2473,7 @@ def user_add_access(args: argparse.Namespace):
             add_user_args,
             add_site_args,
             help='Remove an access type from user(s), globally or per-site if --site is provided')
-def user_remove_access(args: argparse.Namespace):
+def cmd_user_remove_access(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     for user in process_user_args(args):
@@ -2402,7 +2488,7 @@ def add_user_type_args(parser: argparse.ArgumentParser):
             add_user_args,
             add_user_type_args,
             help='Set the type of user(s)')
-def user_set_type(args: argparse.Namespace):
+def cmd_user_set_type(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2421,7 +2507,7 @@ def add_user_membership_args(parser: argparse.ArgumentParser):
             add_user_args,
             add_site_args_req,
             help='Output the user(s) group memberships in YAML format')
-def user_groups(args: argparse.Namespace):
+def cmd_user_groups(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
@@ -2445,7 +2531,7 @@ def add_query_group_args(parser: argparse.ArgumentParser):
 
 
 @subcommand('query', add_query_args, add_query_group_args, add_site_args)
-def query_groups(args: argparse.Namespace):
+def cmd_group_query(args: argparse.Namespace):
     if args.list_fields:
         print('Global Fields:')
         describe_schema(GlobalGroupRecord.Schema())
@@ -2523,22 +2609,21 @@ def add_show_group_args(parser: argparse.ArgumentParser):
 
 
 @subcommand('show', add_show_group_args, add_site_args)
-def show_group(args: argparse.Namespace):
+def cmd_group_show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
     try:
         if args.site is not None:
-            group = SiteGroup.objects.get(groupname=args.groupname, sitename=args.site).to_dict()
+            group = SiteGroup.objects.get(groupname=args.groupname, sitename=args.site)
         else:
-            group = GlobalGroup.objects.get(groupname=args.groupname).to_dict()
-            group['sites'] = [sg.sitename for sg in SiteGroup.objects(groupname=args.groupname)]
+            group = GlobalGroup.objects.get(groupname=args.groupname)
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
         logger.info(f'Group {args.groupname} with scope {scope} does not exist.')
     else:
         console = Console()
-        output = dumps_yaml(group)
+        output = group.pretty()
         console.print(highlight_yaml(output))
 
 
@@ -2548,49 +2633,49 @@ def add_group_add_member_args(parser: argparse.ArgumentParser):
 
 
 @subcommand('add-member', add_group_add_member_args, add_site_args_req)
-def group_add_member(args: argparse.Namespace):
+def cmd_group_add_member(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_members')
 
 
 @subcommand('remove-member', add_group_add_member_args, add_site_args_req)
-def group_remove_member(args: argparse.Namespace):
+def cmd_group_remove_member(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_members')
 
 
 @subcommand('add-sponsor', add_group_add_member_args, add_site_args_req)
-def group_add_sponsor(args: argparse.Namespace):
+def cmd_group_add_sponsor(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_sponsors')
 
 
 @subcommand('remove-sponsor', add_group_add_member_args, add_site_args_req)
-def group_remove_sponsor(args: argparse.Namespace):
+def cmd_group_remove_sponsor(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_sponsors')
 
 
 @subcommand('add-sudoer', add_group_add_member_args, add_site_args_req)
-def group_add_sudoer(args: argparse.Namespace):
+def cmd_group_add_sudoer(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_sudoers')
 
 
 @subcommand('remove-sudoer', add_group_add_member_args, add_site_args_req)
-def group_remove_sudoer(args: argparse.Namespace):
+def cmd_group_remove_sudoer(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_sudoers')
 
 
 @subcommand('add-slurmer', add_group_add_member_args, add_site_args_req)
-def group_add_slurmer(args: argparse.Namespace):
+def cmd_group_add_slurmer(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_slurmers')
 
 
 @subcommand('remove-slurmer', add_group_add_member_args, add_site_args_req)
-def group_remove_slurmer(args: argparse.Namespace):
+def cmd_group_remove_slurmer(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_slurmers')
 
@@ -2600,8 +2685,10 @@ def add_group_new_system_args(parser: argparse.ArgumentParser):
     parser.add_argument('groupname')
 
 
-@subcommand('new-system', add_group_new_system_args)
-def group_new_system(args: argparse.Namespace):
+@subcommand('new-system',
+            add_group_new_system_args,
+            help='Create a new system group within the system ID range on the provided sites')
+def cmd_group_new_system(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
@@ -2613,6 +2700,29 @@ def group_new_system(args: argparse.Namespace):
     create_system_group(args.groupname, sitenames=sites)
 
 
+def add_group_new_class_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--instructors', '-i', nargs='+', required=True)
+    parser.add_argument('groupname')
+
+
+@subcommand('new-class',
+            add_site_args_req,
+            add_group_new_class_args,
+            help='Create a new class group within the class ID range and add instructors as sponsors')
+def cmd_group_new_class(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+
+    group = create_class_group(args.groupname, args.site)
+    for instructor in args.instructors:
+        if not query_user_exists(instructor, sitename=args.site):
+            console.print(f':warning: [italic dark_orange]{instructor} is not a valid user on {args.site}, skipping.')
+            continue
+        add_group_sponsor(args.site, instructor, group)
+
+    console.print(group.pretty())
+
+
 #########################################
 #
 # storage commands: cheeto database storage ...
@@ -2620,7 +2730,32 @@ def group_new_system(args: argparse.Namespace):
 #########################################
 
 
-def add_storage_args(parser: argparse.ArgumentParser):
+def add_storage_query_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--user', '-u')
+    parser.add_argument('--group', '-g')
+    parser.add_argument('--name', '-n')
+    parser.add_argument('--collection', '-c')
+    parser.add_argument('--host')
+    parser.add_argument('--automount', '-a')
+    
+
+
+@subcommand('show', add_site_args_req, add_storage_query_args)
+def cmd_storage_show(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+
+    storages : List[Storage] = []
+    if args.user:
+        user = GlobalUser.objects.get(username=args.user)
+        sources = StorageMountSource.objects(owner=user, sitename=args.site)
+        storages = Storage.objects(source__in=sources)
+    
+    for storage in storages:
+        console.print(highlight_yaml(storage.pretty()))
+
+
+def add_add_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--name', required=True)
     parser.add_argument('--owner', required=True)
     parser.add_argument('--group', required=True)
@@ -2635,8 +2770,8 @@ def add_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--globus', type=bool, default=False)
 
 
-@subcommand('add', add_site_args_req, add_storage_args)
-def storage_add(args: argparse.Namespace):
+@subcommand('add', add_site_args_req, add_add_storage_args)
+def cmd_storage_add(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2692,7 +2827,7 @@ def storage_add(args: argparse.Namespace):
 @subcommand('to-puppet',
             add_site_args_req, 
             lambda parser: parser.add_argument('puppet_yaml', type=Path))
-def storage_to_puppet(args: argparse.Namespace):
+def cmd_storage_to_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _storage_to_puppet(args.site, args.puppet_yaml)
 
@@ -2753,7 +2888,7 @@ def add_hippoapi_event_args(parser: argparse.ArgumentParser):
 
 
 @subcommand('process', add_hippoapi_event_args)
-def hippoapi_process(args: argparse.Namespace):
+def cmd_hippoapi_process(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
     process_hippoapi_events(args.config.hippo,
@@ -2763,7 +2898,7 @@ def hippoapi_process(args: argparse.Namespace):
 
 
 @subcommand('events', add_hippoapi_event_args)
-def hippoapi_events(args: argparse.Namespace):
+def cmd_hippoapi_events(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     console = Console()
     connect_to_database(args.config.mongo)

@@ -40,7 +40,7 @@ from .utils import (require_kwargs,
 
 
 MIN_PIGROUP_GID = 100_000_000
-MIN_SYSTEM_UID = 4_000_000_000
+MIN_SYSTEM_UID  = 4_000_000_000
 
 
 @require_kwargs

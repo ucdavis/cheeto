@@ -31,6 +31,8 @@ from .yaml import parse_yaml, puppet_merge
 
 UINT_MAX = 4_294_967_296
 
+MIN_CLASS_ID = 3_000_000_000
+
 DEFAULT_SHELL = '/usr/bin/bash'
 
 ENABLED_SHELLS = {
@@ -60,7 +62,8 @@ GROUP_TYPES = {
     'access',
     'system',
     'group',
-    'admin'
+    'admin',
+    'class'
 }
 
 USER_STATUSES = {
