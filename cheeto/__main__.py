@@ -36,11 +36,10 @@ def main():
     config.write(config_commands)
 
     hippo_parser = commands.add_parser('hippo')
+    hippo_parser.set_defaults(func = lambda _: hippo_parser.print_help())
     hippo_commands = hippo_parser.add_subparsers()
-    hippo.convert(hippo_commands)
-    hippo.sync(hippo_commands)
-    hippo.sanitize(hippo_commands)
-    hippo.validate(hippo_commands)
+    hippo.cmd_hippoapi_process(hippo_commands)
+    hippo.cmd_hippoapi_events(hippo_commands)
 
     puppet_parser = commands.add_parser('puppet')
     puppet_commands = puppet_parser.add_subparsers()
@@ -66,10 +65,9 @@ def main():
     database_commands = database_parser.add_subparsers()
 
     hippoapi_parser = database_commands.add_parser('hippoapi')
-    hippoapi_parser.set_defaults(func = lambda _: hippoapi_parser.print_help())
-    hippoapi_commands = hippoapi_parser.add_subparsers()
-    database.cmd_hippoapi_process(hippoapi_commands)
-    database.cmd_hippoapi_events(hippoapi_commands)
+
+
+
 
     site_parser = database_commands.add_parser('site')
     site_parser.set_defaults(func = lambda _: site_parser.print_help())

@@ -45,6 +45,7 @@ attrs = "^24.2.0"
 httpx = "^0.27.0"
 python-dateutil = "^2.9.0.post0"
 blinker = "^1.8.2"
+airium = {version = "^0.2.6", extras = ["parse"]}
 
 [build-system]
 requires = ["poetry-core"]

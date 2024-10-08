@@ -10,7 +10,7 @@
 # pyright: reportMissingTypeArgument=true
 
 
-from argparse import ArgumentParser, Namespace, _SubParsersAction
+from argparse import Action, ArgumentParser, Namespace, _SubParsersAction
 import os
 from functools import wraps
 from pathlib import Path
@@ -35,7 +35,7 @@ def add_common_args(parser):
 
 
 def subcommand(subcommand_name: str,
-               *arg_adders: Callable[[ArgumentParser], None],
+               *arg_adders: Callable[[ArgumentParser], Optional[Action]],
                help: Optional[str] = None) \
 -> Callable[[NamespaceFunc[P]], SubCommandFunc[P]]:
 
