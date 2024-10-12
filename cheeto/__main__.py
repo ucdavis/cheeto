@@ -8,6 +8,7 @@
 # Date   : 17.02.2023
 
 import argparse
+from pathlib import Path
 import sys
 
 from . import __version__
@@ -20,14 +21,20 @@ from . import nocloud
 from . import puppet
 from . import slurm
 
-from .config import get_config
+from .config import get_config, DEFAULT_CONFIG_PATH
+
+
+def process_config(args: argparse.Namespace):
+    args.config = get_config(config_path=args.config, profile=args.profile)
+    return args
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.set_defaults(func = lambda _: parser.print_help())
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
-    parser.add_argument('--config', type=get_config, default=get_config())
+    parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument('--profile', default='default')
     commands = parser.add_subparsers()
 
     config_parser = commands.add_parser('config')
@@ -63,11 +70,6 @@ def main():
     database_parser = commands.add_parser('database')
     database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
-
-    hippoapi_parser = database_commands.add_parser('hippoapi')
-
-
-
 
     site_parser = database_commands.add_parser('site')
     site_parser.set_defaults(func = lambda _: site_parser.print_help())
@@ -117,6 +119,7 @@ def main():
     database.cmd_storage_show(storage_commands)
 
     args = parser.parse_args()
+    process_config(args)
     
     console = log.Console(stderr=True)
     console.print(f'cheeto [green]v{__version__}[/green]')

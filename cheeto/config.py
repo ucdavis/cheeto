@@ -17,6 +17,9 @@ from .utils import require_kwargs
 from .xdg_base_dirs import xdg_config_home
 
 
+DEFAULT_CONFIG_PATH = xdg_config_home() / 'cheeto' / 'config.yaml'
+
+
 @require_kwargs
 @dataclass(frozen=True)
 class LDAPConfig(BaseModel):
@@ -73,32 +76,43 @@ class SlurmConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
-class Config(BaseModel):
+class _Config(BaseModel):
     ldap: Mapping[str, LDAPConfig]
+    hippo: HippoConfig
+    ucdiam: IAMConfig
+    mongo: Mapping[str, MongoConfig]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class Config(BaseModel):
+    ldap: LDAPConfig
     hippo: HippoConfig
     ucdiam: IAMConfig
     mongo: MongoConfig
 
 
-def get_config_path() -> pathlib.Path:
-    return xdg_config_home() / 'cheeto' / 'config.yaml'
-
-
-def get_config(config_path: Optional[pathlib.Path] = None) -> Union[Config, None]:
+def get_config(config_path: Optional[pathlib.Path] = None,
+               profile: str = 'default') -> Union[Config, None]:
     logger = logging.getLogger(__name__)
 
     if config_path is None:
-        config_path = get_config_path()
+        config_path = DEFAULT_CONFIG_PATH
     config_yaml = parse_yaml(str(config_path))
 
     try:
-        config = Config.Schema().load(config_yaml)
+        config : _Config = _Config.Schema().load(config_yaml)
     except ValidationError as e: #type: ignore
         logger.error(f'[red]ValidationError loading config: {config_path}[/]')
         logger.error(e.messages)
         return None
     else:
-        return config #type: ignore
+        return Config(
+            ldap = config.ldap.get(profile, config.ldap[list(config.ldap.keys())[0]]),
+            mongo = config.mongo.get(profile, config.mongo[list(config.mongo.keys())[0]]),
+            hippo = config.hippo,
+            ucdiam = config.ucdiam
+        )
 
 
 def add_show_args(parser):

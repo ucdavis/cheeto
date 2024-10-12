@@ -509,7 +509,7 @@ class SiteSlurmQOS(BaseDocument):
     user_limits = EmbeddedDocumentField(SlurmTRES)
     job_limits = EmbeddedDocumentField(SlurmTRES)
     priority = IntField()
-    flags = ListField(SlurmQOSFlagField)
+    flags = ListField(SlurmQOSFlagField())
 
     @property
     def group(self):
@@ -2879,7 +2879,7 @@ def _storage_to_puppet(sitename: str, output: Path):
 
 def ldap_sync(sitename: str, config: Config, force: bool = False):
     connect_to_database(config.mongo)
-    ldap_mgr = LDAPManager(config.ldap['hpccf'], pool_keepalive=15, pool_lifetime=30)
+    ldap_mgr = LDAPManager(config.ldap, pool_keepalive=15, pool_lifetime=30)
     site = Site.objects.get(sitename=sitename)
 
     for user in SiteUser.objects(sitename=sitename):
