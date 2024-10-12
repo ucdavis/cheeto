@@ -90,6 +90,8 @@ def main():
     database.cmd_user_query(user_commands)
     database.cmd_user_set_status(user_commands)
     database.cmd_user_set_type(user_commands)
+    database.cmd_user_set_password(user_commands)
+    database.cmd_user_generate_passwords(user_commands)
     database.cmd_user_add_access(user_commands)
     database.cmd_user_remove_access(user_commands)
     database.cmd_user_groups(user_commands)

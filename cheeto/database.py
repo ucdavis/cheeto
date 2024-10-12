@@ -14,6 +14,8 @@ from functools import partialmethod, singledispatch
 import logging
 from operator import attrgetter
 from pathlib import Path
+from cheeto.encrypt import generate_password
+import pyescrypt
 from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
 
@@ -21,7 +23,8 @@ from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 
-from cheeto.git import GitRepo
+from .encrypt import get_mcf_hasher, hash_yescrypt
+from .git import GitRepo
 
 from .args import subcommand
 from .config import HippoConfig, MongoConfig, Config
@@ -1045,6 +1048,14 @@ def set_user_status(username: str,
 def set_user_type(username: str,
                   usertype: str):
     GlobalUser.objects(username=username).update_one(set__type=usertype)
+
+
+def set_user_password(username: str,
+                      password: str,
+                      hasher: pyescrypt.Yescrypt):
+    user = GlobalUser.objects.get(username=username)
+    user.password = hash_yescrypt(hasher, password).decode('UTF-8')
+    user.save()
 
 
 @singledispatch
@@ -2452,6 +2463,50 @@ def cmd_user_set_status(args: argparse.Namespace):
         logger.info(f'User {args.username} with scope {scope} does not exist.')
 
 
+def add_user_password_args(parser: argparse.ArgumentParser):
+    parser.add_argument('-u', '--user', required=True)
+    parser.add_argument('-p', '--password', required=True)
+
+
+@subcommand('set-password',
+            add_user_password_args,
+            help='Set a (plaintext) password for a user; hashes it with yescrypt.')
+def cmd_user_set_password(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    hasher = get_mcf_hasher()
+    console = Console()
+
+    if len(args.password) < 20:
+        console.print(f'[red] Password must be at least 20 characters')
+        return ExitCode.BAD_CMDLINE_ARGS
+
+    try:
+        set_user_password(args.user, args.password, hasher)
+    except DoesNotExist:
+        console.print(f'[red]User {args.user} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+
+
+@subcommand('generate-passwords',
+            add_user_args,
+            lambda p: p.add_argument('--file', type=Path, default='/dev/stdout'),
+            help='Generate passwords for the given users and output the results in CSV')
+def cmd_user_generate_passwords(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+    hasher = get_mcf_hasher()
+   
+    with args.file.open('w') as fp:
+        for user in args.user:
+            password = generate_password()
+            try:
+                set_user_password(user, password, hasher)
+            except DoesNotExist:
+                console.print(f'[red] User {user} does not exist, skipping.')
+            else:
+                fp.write(f'{user} {password}\n')
+
+
 def add_user_access_args(parser: argparse.ArgumentParser):
     parser.add_argument('access', choices=list(ACCESS_TYPES))
 
@@ -2718,6 +2773,7 @@ def cmd_group_new_class(args: argparse.Namespace):
         if not query_user_exists(instructor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{instructor} is not a valid user on {args.site}, skipping.')
             continue
+        add_group_member(args.site, instructor, group)
         add_group_sponsor(args.site, instructor, group)
 
     console.print(group.pretty())

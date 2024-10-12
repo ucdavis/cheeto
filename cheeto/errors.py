@@ -18,3 +18,4 @@ class ExitCode(IntEnum):
     BAD_LDAP_QUERY = 5
     BAD_CMDLINE_ARGS = 6
     NOT_UNIQUE = 7
+    DOES_NOT_EXIST = 8
