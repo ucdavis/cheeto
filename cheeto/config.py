@@ -1,3 +1,11 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# (c) Camille Scott, 2023-2024
+# (c) The Regents of the University of California, Davis, 2023-2024
+# File   : database.py
+# License: Modified BSD
+# Author : Camille Scott <cswel@ucdavis.edu>
+# Date   : 11.10.2024
 
 import argparse
 import logging

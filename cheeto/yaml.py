@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : _yaml.py
 # License: Modified BSD
@@ -24,8 +24,6 @@ from rich.syntax import Syntax
 from ruamel import yaml as ryaml
 from ruamel.yaml.compat import StringIO
 from ruamel.yaml.representer import RoundTripRepresenter
-
-from .errors import ExitCode
 
 
 class OrderedDictRepresenter(RoundTripRepresenter):
