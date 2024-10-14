@@ -8,7 +8,6 @@
 # Date   : 17.02.2023
 
 import argparse
-from pathlib import Path
 import sys
 
 from . import __version__
@@ -21,7 +20,7 @@ from . import nocloud
 from . import puppet
 from . import slurm
 
-from .config import get_config, DEFAULT_CONFIG_PATH
+from .config import get_config
 
 
 def process_config(args: argparse.Namespace):
@@ -33,8 +32,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.set_defaults(func = lambda _: parser.print_help())
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
-    parser.add_argument('--config', type=Path, default=DEFAULT_CONFIG_PATH)
-    parser.add_argument('--profile', default='default')
     commands = parser.add_subparsers()
 
     config_parser = commands.add_parser('config')

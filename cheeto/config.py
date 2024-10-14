@@ -13,7 +13,6 @@ import pathlib
 import sys
 from typing import List, Optional, Union, Mapping
 
-from marshmallow import post_dump
 from marshmallow.exceptions import ValidationError
 from marshmallow_dataclass import dataclass
 

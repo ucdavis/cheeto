@@ -10,7 +10,7 @@
 import argparse
 from collections import defaultdict
 from collections.abc import Iterable
-from functools import partialmethod, singledispatch
+from functools import singledispatch
 import logging
 from operator import attrgetter
 from pathlib import Path
@@ -23,19 +23,12 @@ from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 
-from .encrypt import get_mcf_hasher, hash_yescrypt
-from .git import GitRepo
-
 from .args import subcommand
-from .config import HippoConfig, MongoConfig, Config
+from .config import MongoConfig, Config
+from .encrypt import get_mcf_hasher, hash_yescrypt
 from .errors import ExitCode
-from .hippoapi.api.event_queue import (event_queue_pending_events,
-                                       event_queue_update_status)
-from .hippoapi.client import AuthenticatedClient
-from .hippoapi.models import (QueuedEventAccountModel,
-                              QueuedEventModel,
-                              QueuedEventDataModel,
-                              QueuedEventUpdateModel)
+from .git import GitRepo
+from .hippoapi.models import QueuedEventAccountModel
 from .ldap import LDAPCommitFailed, LDAPManager, LDAPUser, LDAPGroup
 from .log import Console
 from .puppet import (MIN_PIGROUP_GID,
@@ -58,7 +51,6 @@ from .types import (DEFAULT_SHELL,
                     MOUNT_OPTS, 
                     SlurmAccount, 
                     hippo_to_cheeto_access,  
-                    is_listlike, 
                     UINT_MAX,
                     MIN_CLASS_ID,
                     USER_TYPES,

@@ -8,14 +8,14 @@
 # Date   : 12.04.2023
 
 from collections import OrderedDict, defaultdict
-from typing import Any, Type
+from typing import Any
 from enum import Enum
 import os
 from pathlib import Path
-from typing import Generator, Optional, Union
+from typing import Optional, Union
 import sys
 
-from bson import ObjectId, objectid
+from bson import ObjectId
 from bson.int64 import Int64
 from mergedeep import merge, Strategy
 from mongoengine.dereference import DBRef
