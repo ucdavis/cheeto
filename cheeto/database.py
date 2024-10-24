@@ -15,15 +15,14 @@ import logging
 from operator import attrgetter
 from pathlib import Path
 from cheeto.encrypt import generate_password
-import pyescrypt
-from re import A, L
 from typing import List, Optional, no_type_check, Self, Union
 
+import pyescrypt
 from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 
-from .args import subcommand
+from .args import regex_argtype, subcommand
 from .config import MongoConfig, Config
 from .encrypt import get_mcf_hasher, hash_yescrypt
 from .errors import ExitCode
@@ -42,12 +41,12 @@ from .puppet import (MIN_PIGROUP_GID,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
                      add_repo_args,
                      SiteData)
-from .types import (DEFAULT_SHELL,
+from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     DISABLED_SHELLS, 
                     ENABLED_SHELLS, 
                     GROUP_TYPES,
                     HIPPO_EVENT_ACTIONS, 
-                    HIPPO_EVENT_STATUSES, 
+                    HIPPO_EVENT_STATUSES, MAX_LABGROUP_ID, MIN_LABGROUP_ID, 
                     MOUNT_OPTS, 
                     SlurmAccount, 
                     hippo_to_cheeto_access,  
@@ -106,7 +105,7 @@ def ShellField(**kwargs) -> StringField:
                        **kwargs)
 
 def DataQuotaField(**kwargs) -> StringField:
-    return StringField(regex=r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]',
+    return StringField(regex=DATA_QUOTA_REGEX,
                        **kwargs)
 
 def SlurmQOSFlagField(**kwargs) -> StringField:
@@ -115,6 +114,14 @@ def SlurmQOSFlagField(**kwargs) -> StringField:
 
 class InvalidUser(RuntimeError):
     pass
+
+
+class DuplicateUser(ValueError):
+    def __init__(self, username):
+        super().__init__(f'User {username} already exists.')
+
+
+
 
 
 def handler(event):
@@ -407,7 +414,8 @@ class SiteUser(BaseDocument):
         return data
 
 
-site_user_t = Union[SiteUser, str]
+site_user_t = SiteUser | str
+User = SiteUser | GlobalUser
 
 
 def handle_site_user(sitename: str, user: site_user_t) -> site_user_t:
@@ -734,7 +742,7 @@ class NFSSourceCollection(BaseDocument):
             {
                 'fields': ['sitename', 'name', '_cls'],
                 'name': 'primary',
-                'unique': True
+      'unique': True
             }
         ]
     }
@@ -861,13 +869,13 @@ class Automount(StorageMount):
     @property
     def mount_options(self):
         if self._options:
-            return self._options
+            return list(self._options)
 
         options = set(self.map._options)
         if self._remove_options:
-            options = options - self._remove_options
+            options = options - set(self._remove_options)
         if self._add_options:
-            options = options | self._add_options
+            options = options | set(self._add_options)
 
         return options
 
@@ -892,6 +900,10 @@ class Storage(BaseDocument):
     mount = GenericReferenceField(required=True,
                                   choices=[Automount])
     globus = BooleanField()
+
+    @property
+    def sitename(self):
+        return self.source.sitename
 
     @property
     def owner(self):
@@ -927,6 +939,7 @@ class Storage(BaseDocument):
     def pretty(self) -> str:
         data = {}
         data['name'] = self.name
+        data['site'] = self.sitename
         data['type'] = type(self.source).__name__
         data['owner'] = self.owner
         data['group'] = self.group
@@ -981,9 +994,30 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
                    tls=config.tls)
 
 
+def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
+    logger = logging.getLogger(__name__)
+    try:
+        Site.objects.get(sitename=sitename) #type: ignore
+    except DoesNotExist:
+        if raise_exc:
+            logger.error(f'Site {sitename} does not exist.')
+            raise
+        logger.info(f'Site {sitename} does not exist.')
+        return False
+    else:
+        return True
+
+
+def query_user(username: str, sitename: str | None = None) -> User:
+    if sitename is not None:
+        return SiteUser.objects.get(username=username, sitename=sitename)
+    else:
+        return GlobalUser.objects.get(username=username)
+
+
 def query_user_exists(username: str,
-                sitename: Optional[str] = None,
-                raise_exc: bool = False) -> bool:
+                      sitename: Optional[str] = None,
+                      raise_exc: bool = False) -> bool:
     logger = logging.getLogger(__name__)
     try:
         if sitename is None:
@@ -999,18 +1033,23 @@ def query_user_exists(username: str,
         return True
 
 
-def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
-    logger = logging.getLogger(__name__)
-    try:
-        Site.objects.get(sitename=sitename) #type: ignore
-    except DoesNotExist:
-        if raise_exc:
-            logger.error(f'Site {sitename} does not exist.')
-            raise
-        logger.info(f'Site {sitename} does not exist.')
-        return False
+def query_user_type(types: list[str],
+                    sitename: str | None = None) -> list[User]:
+    global_users = GlobalUser.objects(type__in=types)
+    if sitename is not None:
+        return SiteUser.objects(parent__in=global_users, sitename=sitename)
     else:
-        return True
+        return global_users
+
+
+def query_user_access(access: list[str],
+                      sitename: str | None = None) -> list[User]:
+    global_users = GlobalUser.objects(access__in=access)
+    if sitename is not None:
+        return SiteUser.objects(parent__in=global_users, sitename=sitename)
+    else:
+        return global_users
+
 
 def tag_comment(comment: str):
     return f'[{TIMESTAMP_NOW}]: {comment}'
@@ -1194,7 +1233,7 @@ def query_user_home_storage(sitename: str, user: site_user_t):
 
 def query_user_storages(sitename: str, user: site_user_t):
     if type(user) is str:
-        user = GlobalUser.objects.get(sitename=sitename, username=user)
+        user = GlobalUser.objects.get(username=user)
     else:
         user = user.parent
 
@@ -1347,6 +1386,14 @@ def get_next_class_id() -> int:
     return max(ids) + 1
 
 
+def get_next_lab_id() -> int:
+    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_LABGROUP_ID, 
+                                                 uid__lt=MAX_LABGROUP_ID))) \
+        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_LABGROUP_ID, 
+                                                  gid__lt=MAX_LABGROUP_ID)))
+    return max(ids) + 1
+
+
 def create_home_storage(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is str:
@@ -1378,6 +1425,78 @@ def create_home_storage(sitename: str, user: global_user_t):
                       source=source,
                       mount=mount)
     storage.save()
+
+
+def create_user(username: str,
+                email: str,
+                uid: int,
+                fullname: str,
+                type: str = 'user',
+                shell: str = DEFAULT_SHELL,
+                status: str = 'active',
+                password: str | None = None,
+                ssh_key: list[str] | None = None,
+                access: list[str] | None = None,
+                sitenames: list[str] | None = None):
+    logger = logging.getLogger(__name__)
+
+    if query_user_exists(username, raise_exc=False):
+        raise DuplicateUser(username)
+    
+    user_kwargs = dict(
+        username=username,
+        email=email,
+        uid=uid,
+        gid=uid,
+        fullname=fullname,
+        type=type,
+        shell=shell,
+        status=status,
+        home_directory=f'/home/{username}'
+    )
+    if access is not None:
+        user_kwargs['access'] = access
+    if ssh_key is not None:
+        user_kwargs['ssh_key'] = ssh_key
+
+    global_user = GlobalUser(**user_kwargs)
+    global_user.save()
+
+    if password is not None:
+        hasher = get_mcf_hasher()
+        set_user_password(username, password, hasher)
+
+    global_group = GlobalGroup(groupname=username,
+                               gid=global_user.gid,
+                               type='user')
+    global_group.save()
+
+    if sitenames is not None:
+        for sitename in sitenames:
+            site_user = SiteUser(username=username,
+                                 sitename=sitename,
+                                 parent=global_user)
+            site_user.save()
+
+            site_group = SiteGroup(groupname=username,
+                                   sitename=sitename,
+                                   parent=global_group,
+                                   _members=[site_user])
+            site_group.save()
+
+
+def create_system_user(username: str,
+                       email: str,
+                       fullname: str,
+                       password: str | None = None):
+    uid = get_next_system_id()
+    create_user(username,
+                email,
+                uid,
+                fullname,
+                type='system',
+                password=password,
+                access=['login-ssh', 'compute-ssh'])
 
 
 def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
@@ -1413,6 +1532,22 @@ def create_class_group(groupname: str, sitename: str) -> SiteGroup:
     logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
 
     return site_group
+
+
+def create_lab_group(groupname: str, sitename: str | None = None):
+    gg = GlobalGroup(groupname=groupname,
+                     type='group',
+                     gid=get_next_lab_id())
+    gg.save()
+
+    if sitename is not None:
+        sg = SiteGroup(groupname=groupname,
+                       sitename=sitename,
+                       parent=gg)
+        sg.save()
+        return sg
+    else:
+        return gg
 
 
 def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
@@ -2394,8 +2529,44 @@ def process_user_args(args: argparse.Namespace):
 
 
 def add_show_user_args(parser: argparse.ArgumentParser):
-    parser.add_argument('username')
+    parser.add_argument('--username', '-u', help='Show the specific user')
+    parser.add_argument('--type', '-t', nargs='+',
+                        help=f'Show users of these types. Options: {USER_TYPES}')
+    parser.add_argument('--access', '-a', nargs='+',
+                        help=f'Show users with these accesses. Options: {ACCESS_TYPES}')
+    parser.add_argument('--email')
+    parser.add_argument('--status', nargs='+')
+    parser.add_argument('--uid')
+    parser.add_argument('--list', '-l', default=False, action='store_true',
+                        help='Only list usernames instead of full user info')
     parser.add_argument('--verbose', action='store_true', default=False)
+
+
+def _show_siteuser(user: SiteUser, verbose: bool = False) -> dict:
+    user_data = user.to_dict(strip_empty=True)
+    if not verbose:
+        user_data['parent'] = removed(user_data['parent'], 'ssh_key')
+        del user_data['sitename']
+        del user_data['parent']['gid']
+    user_data['groups'] = list(query_user_groups(user.sitename, user.username))
+    if 'slurm' in user.access:
+        if verbose:
+            user_data['slurm'] = list(map(lambda s: removed(s, 'sitename'),
+                                     (s.to_dict() for s in query_user_slurm(user.sitename, user.username))))
+        else:
+            user_data['slurm'] = query_user_partitions(user.sitename, user.username)
+    return user_data
+
+
+def _show_globaluser(user: GlobalUser, verbose: bool = False) -> dict:
+    user_data = user.to_dict()
+    user_data['sites'] = [su.sitename for su in SiteUser.objects(username=user.username)]
+    return user_data
+
+
+def _show_user(user: User, verbose: bool = False) -> dict:
+    return _show_globaluser(user, verbose=verbose) if isinstance(user, GlobalUser) \
+        else _show_siteuser(user, verbose=verbose)
 
 
 @subcommand('show',
@@ -2406,32 +2577,62 @@ def cmd_user_show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
-    try:
-        if args.site is not None:
-            user = SiteUser.objects.get(username=args.username,
-                                        sitename=args.site)
-            user_data = user.to_dict(strip_empty=True)
-            if not args.verbose:
-                user_data['parent'] = removed(user_data['parent'], 'ssh_key')
-                del user_data['sitename']
-                del user_data['parent']['gid']
-            user_data['groups'] = list(query_user_groups(args.site, args.username))
-            if 'slurm' in user.access:
-                if args.verbose:
-                    user_data['slurm'] = list(map(lambda s: removed(s, 'sitename'),
-                                             (s.to_dict() for s in query_user_slurm(args.site, args.username))))
-                else:
-                    user_data['slurm'] = query_user_partitions(args.site, args.username)
-        else:
-            user_data = GlobalUser.objects.get(username=args.username).to_dict()
-            user_data['sites'] = [su.sitename for su in SiteUser.objects(username=args.username)]
-    except DoesNotExist:
-        scope = 'Global' if args.site is None else args.site
-        logger.info(f'User {args.username} with scope {scope} does not exist.')
+    users: list[User] = []
+
+    if args.username:
+        try:
+            users.append(query_user(args.username, sitename=args.site))
+        except DoesNotExist:
+            scope = 'Global' if args.site is None else args.site
+            logger.info(f'User {args.username} with scope {scope} does not exist.')
+    elif args.type:
+        users.extend(query_user_type(args.type, sitename=args.site))
+    elif args.access:
+        users.extend(query_user_access(args.access, sitename=args.site))
+
+    console = Console()
+    if args.list:
+        console.print(' '.join((u.username for u in users)))
     else:
-        console = Console()
-        output = dumps_yaml(user_data)
-        console.print(highlight_yaml(output))
+        for user in users:
+            output = dumps_yaml(_show_user(user))
+            console.print(highlight_yaml(output))
+
+
+def add_user_new_system_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--email', default='hpc-help@ucdavis.edu')
+    parser.add_argument('--fullname', help='Default: "HPCCF $username"')
+    parser.add_argument('--password', '-p', action='store_true', default=False,
+                        help='Generate a password for the new user')
+    parser.add_argument('username')
+
+
+@subcommand('new-system',
+            add_user_new_system_args,
+            help='Create a new system user within the system ID range on the provided sites')
+def cmd_user_new_system(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+
+    if args.fullname is None:
+        args.fullname = f'HPCCF {args.username}'
+
+    password = None
+    if args.password:
+        password = generate_password()
+
+    try:
+        create_system_user(args.username,
+                           args.email,
+                           args.fullname,
+                           password=password)
+    except DuplicateUser as e:
+        console.print(f'[red]{e}')
+    else:
+        console.print(f'Created user {args.username} on all sites.')
+        if password is not None:
+            console.print(f'Password: {password}')
+            console.print('[red] Make sure to save this password in 1password!')
 
 
 def add_user_status_args(parser: argparse.ArgumentParser):
@@ -2487,7 +2688,7 @@ def cmd_user_generate_passwords(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
     hasher = get_mcf_hasher()
-   
+
     with args.file.open('w') as fp:
         for user in args.user:
             password = generate_password()
@@ -2748,7 +2949,7 @@ def cmd_group_new_system(args: argparse.Namespace):
 
 
 def add_group_new_class_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--instructors', '-i', nargs='+', required=True)
+    parser.add_argument('--sponsors', nargs='+', required=True)
     parser.add_argument('groupname')
 
 
@@ -2761,12 +2962,31 @@ def cmd_group_new_class(args: argparse.Namespace):
     console = Console()
 
     group = create_class_group(args.groupname, args.site)
-    for instructor in args.instructors:
+    for instructor in args.sponsors:
         if not query_user_exists(instructor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{instructor} is not a valid user on {args.site}, skipping.')
             continue
         add_group_member(args.site, instructor, group)
         add_group_sponsor(args.site, instructor, group)
+
+    console.print(group.pretty())
+
+
+@subcommand('new-lab',
+            add_site_args_req,
+            add_group_new_class_args,
+            help='Manually create a new lab group.')
+def cmd_group_new_lab(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    console = Console()
+
+    group : SiteGroup = create_lab_group(args.groupname, sitename=args.site)
+    for sponsor in args.sponsors:
+        if not query_user_exists(sponsor, sitename=args.site):
+            console.print(f':warning: [italic dark_orange]{sponsor} is not a valid user on {args.site}, skipping.')
+            continue
+        add_group_member(args.site, sponsor, group)
+        add_group_sponsor(args.site, sponsor, group)
 
     console.print(group.pretty())
 
@@ -2779,24 +2999,41 @@ def cmd_group_new_class(args: argparse.Namespace):
 
 
 def add_storage_query_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--user', '-u')
-    parser.add_argument('--group', '-g')
-    parser.add_argument('--name', '-n')
-    parser.add_argument('--collection', '-c')
-    parser.add_argument('--host')
-    parser.add_argument('--automount', '-a')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--user', '-u')
+    group.add_argument('--group', '-g')
+    group.add_argument('--name', '-n')
+    group.add_argument('--collection', '-c')
+    group.add_argument('--host')
+    group.add_argument('--automount', '-a')
     
 
 
-@subcommand('show', add_site_args_req, add_storage_query_args)
+@subcommand('show',
+            add_site_args_req,
+            add_storage_query_args)
 def cmd_storage_show(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
     storages : List[Storage] = []
     if args.user:
-        user = GlobalUser.objects.get(username=args.user)
-        sources = StorageMountSource.objects(owner=user, sitename=args.site)
+        storages = query_user_storages(sitename=args.site, user=args.user)
+    elif args.group:
+        storages = query_group_storages(sitename=args.site, group=args.group)
+    elif args.name:
+        storages = Storage.objects(name=args.name)
+    elif args.collection:
+        collection = NFSSourceCollection.objects.get(sitename=args.site, name=args.collection)
+        sources = StorageMountSource.objects(collection=collection)
+        storages = Storage.objects(source__in=sources)
+    elif args.host:
+        sources = StorageMountSource.objects(sitename=args.site, _host=args.host)
+        storages = Storage.objects(source__in=sources)
+    elif args.automount:
+        storages = query_automap_storages(sitename=args.site, tablename=args.automount)
+    else:
+        sources = StorageMountSource.objects(sitename=args.site)
         storages = Storage.objects(source__in=sources)
     
     for storage in storages:
@@ -2818,10 +3055,11 @@ def add_add_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--globus', type=bool, default=False)
 
 
-@subcommand('add',
+@subcommand('storage',
             add_site_args_req,
-            add_add_storage_args)
-def cmd_storage_add(args: argparse.Namespace):
+            add_add_storage_args,
+            help='Create a new Storage (source and mount)')
+def cmd_storage_new_storage(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2872,6 +3110,62 @@ def cmd_storage_add(args: argparse.Namespace):
                       mount=mount,
                       globus=args.globus)
     storage.save()
+
+
+def add_collection_args(parser: argparse.ArgumentParser, required: bool = False):
+    add_site_args_req(parser)
+    parser.add_argument('--host', required=required)
+    parser.add_argument('--prefix', required=required)
+    parser.add_argument('--quota', required=required, type=regex_argtype(DATA_QUOTA_REGEX))
+    parser.add_argument('--options', help='Export options')
+    parser.add_argument('--ranges', nargs='+', help='Export IP ranges')
+    parser.add_argument('--clone', default=None, help='Clone the existing named collection')
+
+
+def add_new_collection_args(parser: argparse.ArgumentParser):
+    add_collection_args(parser)
+    parser.add_argument('--name', required=True)
+
+
+@subcommand('collection',
+            add_new_collection_args,
+            help='Create a new storage Collection')
+def cmd_storage_new_collection(args: argparse.Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    connect_to_database(args.config.mongo)
+    query_site_exists(args.site, raise_exc=True)
+    col_opts = ['prefix', 'host', 'quota', 'options', 'ranges']
+
+    if args.clone is None and not all(vars(args)[arg] for arg in col_opts):
+        console.print('[red] Must specify all attributes when not cloning!')
+        return ExitCode.BAD_CMDLINE_ARGS
+
+    col_kwargs = {}
+
+    if args.clone:
+        donor = ZFSSourceCollection.objects.get(sitename=args.site, name=args.clone)
+        col_kwargs.update(donor.to_dict(raw=False))
+        del col_kwargs['_cls']
+        col_kwargs['sitename'] = args.site
+        col_kwargs['name'] = args.name
+
+    if args.host:
+        col_kwargs['_host'] = args.host
+    if args.prefix:
+        col_kwargs['prefix'] = args.prefix
+    if args.quota:
+        col_kwargs['_quota'] = args.quota
+    if args.options:
+        col_kwargs['_export_options'] = args.options
+    if args.ranges:
+        col_kwargs['_export_ranges'] = args.ranges
+
+    collection = ZFSSourceCollection(**col_kwargs)
+    collection.save()
+
+    console.print(highlight_yaml(collection.pretty()))
+
 
 
 @subcommand('to-puppet',

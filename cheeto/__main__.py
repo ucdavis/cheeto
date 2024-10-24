@@ -64,11 +64,11 @@ def main():
     monitor_commands = monitor_parser.add_subparsers()
     monitor.power(monitor_commands)
 
-    database_parser = commands.add_parser('database')
+    database_parser = commands.add_parser('database', aliases=['db'])
     database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
 
-    site_parser = database_commands.add_parser('site')
+    site_parser = database_commands.add_parser('site', aliases=['s'])
     site_parser.set_defaults(func = lambda _: site_parser.print_help())
     site_commands = site_parser.add_subparsers()
     database.cmd_site_add_global_slurm(site_commands)
@@ -81,7 +81,7 @@ def main():
     database.cmd_site_sync_old_puppet(site_commands)
     database.cmd_site_from_puppet(site_commands)
 
-    user_parser = database_commands.add_parser('user')
+    user_parser = database_commands.add_parser('user', aliases=['u'])
     user_parser.set_defaults(func = lambda _: user_parser.print_help())
     user_commands = user_parser.add_subparsers()
     database.cmd_user_query(user_commands)
@@ -93,8 +93,9 @@ def main():
     database.cmd_user_remove_access(user_commands)
     database.cmd_user_groups(user_commands)
     database.cmd_user_show(user_commands)
+    database.cmd_user_new_system(user_commands)
 
-    group_parser = database_commands.add_parser('group')
+    group_parser = database_commands.add_parser('group', aliases=['g'])
     group_parser.set_defaults(func = lambda _: group_parser.print_help())
     group_commands = group_parser.add_subparsers()
     database.cmd_group_show(group_commands)
@@ -109,19 +110,26 @@ def main():
     database.cmd_group_remove_slurmer(group_commands)
     database.cmd_group_new_system(group_commands)
     database.cmd_group_new_class(group_commands)
+    database.cmd_group_new_lab(group_commands)
 
-    storage_parser = database_commands.add_parser('storage')
+    storage_parser = database_commands.add_parser('storage', aliases=['st', 'store'])
     storage_parser.set_defaults(func = lambda _: storage_parser.print_help())
     storage_commands = storage_parser.add_subparsers()
-    database.cmd_storage_add(storage_commands)
     database.cmd_storage_to_puppet(storage_commands)
     database.cmd_storage_show(storage_commands)
+
+    new_storage_parser = storage_commands.add_parser('new', aliases=['n'])
+    new_storage_commands = new_storage_parser.add_subparsers()
+    database.cmd_storage_new_storage(new_storage_commands)
+    database.cmd_storage_new_collection(new_storage_commands)
+
 
     args = parser.parse_args()
     process_config(args)
     
     console = log.Console(stderr=True)
-    console.print(f'cheeto [green]v{__version__}[/green]')
+    if not args.quiet:
+        console.print(f'cheeto [green]v{__version__}[/green]')
 
     if not hasattr(args, 'log'):
         args.func(args)

@@ -10,10 +10,11 @@
 # pyright: reportMissingTypeArgument=true
 
 
-from argparse import Action, ArgumentParser, Namespace, _SubParsersAction
+from argparse import Action, ArgumentParser, Namespace, _SubParsersAction, ArgumentTypeError
 import os
 from functools import wraps
 from pathlib import Path
+import re
 from typing import Callable, Optional
 from typing_extensions import Concatenate, ParamSpec, Union
 
@@ -36,6 +37,19 @@ def add_common_args(parser):
                         help='Path to alternate config file')
     parser.add_argument('--profile', default='default',
                         help='Config profile to use')
+
+
+def regex_argtype(pattern: re.Pattern[str] | str):
+    _pattern = pattern
+    def inner(value: str):
+        if not isinstance(_pattern, re.Pattern):
+            pattern = re.compile(_pattern)
+        else:
+            pattern = _pattern
+        if not pattern.match(value):
+            raise ArgumentTypeError(f'Invalid value, should match: {pattern.pattern}')
+        return value
+    return inner
 
 
 def subcommand(subcommand_name: str,
