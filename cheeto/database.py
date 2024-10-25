@@ -1053,6 +1053,15 @@ def query_user_access(access: list[str],
         return global_users
 
 
+def query_user_status(statuses: list[str],
+                      sitename: str | None = None) -> list[User]:
+    global_users = GlobalUser.objects(status__in=statuses)
+    if sitename is not None:
+        return SiteUser.objects(parent__in=global_users, sitename=sitename)
+    else:
+        return global_users
+
+
 def tag_comment(comment: str):
     return f'[{TIMESTAMP_NOW}]: {comment}'
 
@@ -2591,6 +2600,8 @@ def cmd_user_show(args: argparse.Namespace):
         users.extend(query_user_type(args.type, sitename=args.site))
     elif args.access:
         users.extend(query_user_access(args.access, sitename=args.site))
+    elif args.status:
+        users.extend(query_user_status(args.status, sitename=args.site))
 
     console = Console()
     if args.list:
