@@ -25,6 +25,10 @@ from .config import get_config
 
 def process_config(args: argparse.Namespace):
     args.config = get_config(config_path=args.config, profile=args.profile)
+    if 'accounts.hpc' in args.config.mongo.uri:
+        pass
+        #print("Testing right now, don't use prod", file=sys.stderr)
+        #sys.exit(1)
     return args
 
 
@@ -123,6 +127,14 @@ def main():
     database.cmd_storage_new_storage(new_storage_commands)
     database.cmd_storage_new_collection(new_storage_commands)
 
+    slurm_parser = database_commands.add_parser('slurm', aliases=['sl'])
+    slurm_parser.set_defaults(func = lambda _: slurm_parser.print_help())
+    slurm_commands = slurm_parser.add_subparsers()
+
+    slurm_new_parser = slurm_commands.add_parser('new', aliases=['n'])
+    slurm_new_commands = slurm_new_parser.add_subparsers()
+    database.cmd_slurm_new_qos(slurm_new_commands)
+    database.cmd_slurm_new_assoc(slurm_new_commands)
 
     args = parser.parse_args()
     process_config(args)

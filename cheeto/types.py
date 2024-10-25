@@ -13,6 +13,7 @@ import dataclasses
 import datetime
 import logging
 from pathlib import Path
+import re
 from typing import Annotated, ClassVar, Type, Union, List, Self, Generator, Optional
 import sys
 
@@ -37,6 +38,12 @@ MIN_LABGROUP_ID = 3_900_000_000
 MAX_LABGROUP_ID = 3_910_000_000
 
 DATA_QUOTA_REGEX = r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'
+
+QOS_TRES_REGEX = (
+    r"^(?=.*\bcpus=(?P<cpus>inf|\d+)\b)"
+    r"(?=.*\bgpus=(?P<gpus>inf|\d+)\b)"
+    r"(?=.*\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b).*$"
+)
 
 DEFAULT_SHELL = '/usr/bin/bash'
 
@@ -200,6 +207,19 @@ MOUNT_OPTS = {
 
 def is_listlike(obj):
     return isinstance(obj, (Sequence, set)) and not isinstance(obj, (str, bytes, bytearray))
+
+
+def parse_qos_tres(tres: str | None):
+    if tres is None:
+        return {'cpus': None, 'gpus': None, 'mem': None}
+    parsed = re.match(QOS_TRES_REGEX, tres)
+    if parsed is None:
+        raise ValueError(f'Invalid TRES specification: {tres}')
+    parsed = parsed.groupdict()
+    for key in parsed.keys():
+        if parsed[key] == 'inf':
+            parsed[key] = None
+    return parsed
 
 
 class _BaseModel:

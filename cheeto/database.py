@@ -14,6 +14,8 @@ from functools import singledispatch
 import logging
 from operator import attrgetter
 from pathlib import Path
+import re
+
 from cheeto.encrypt import generate_password
 from typing import List, Optional, no_type_check, Self, Union
 
@@ -47,7 +49,7 @@ from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     GROUP_TYPES,
                     HIPPO_EVENT_ACTIONS, 
                     HIPPO_EVENT_STATUSES, MAX_LABGROUP_ID, MIN_LABGROUP_ID, 
-                    MOUNT_OPTS, 
+                    MOUNT_OPTS, QOS_TRES_REGEX, 
                     SlurmAccount, 
                     hippo_to_cheeto_access,  
                     UINT_MAX,
@@ -55,7 +57,7 @@ from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     USER_TYPES,
                     USER_STATUSES, 
                     ACCESS_TYPES,
-                    SlurmQOSValidFlags)
+                    SlurmQOSValidFlags, parse_qos_tres)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
                     _ctx_name, 
@@ -1561,7 +1563,7 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
                                        tablename='share')
 
     for share_name, share in shares.items():
-        owner = GlobalUser.objects.get(username=share.storage.owner)
+        owner = GlobalUser.objects.get(username=shaee.storage.owner)
         group = GlobalGroup.objects.get(groupname=share.storage.group)
 
         source_args = dict(name=share_name,
@@ -2595,7 +2597,7 @@ def cmd_user_show(args: argparse.Namespace):
         console.print(' '.join((u.username for u in users)))
     else:
         for user in users:
-            output = dumps_yaml(_show_user(user))
+            output = dumps_yaml(_show_user(user, verbose=args.verbose))
             console.print(highlight_yaml(output))
 
 
@@ -2989,6 +2991,81 @@ def cmd_group_new_lab(args: argparse.Namespace):
         add_group_sponsor(args.site, sponsor, group)
 
     console.print(group.pretty())
+
+
+#########################################
+#
+# slurm commands: cheeto database slurm ...
+#
+#########################################
+
+
+def add_slurm_qos_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group('QOS')
+    group.add_argument('--group-limits', '-g', type=regex_argtype(QOS_TRES_REGEX))
+    group.add_argument('--user-limits', '-u', type=regex_argtype(QOS_TRES_REGEX))
+    group.add_argument('--job-limits', '-j', type=regex_argtype(QOS_TRES_REGEX))
+    group.add_argument('--priority', default=0, type=int)
+    group.add_argument('--flags', nargs='+')
+    group.add_argument('--qosname', '-n', required=True)
+
+
+@subcommand('qos',
+            add_site_args_req,
+            add_slurm_qos_args,
+            help='Create a new QOS')
+def cmd_slurm_new_qos(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
+    user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
+    job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
+    
+    query_site_exists(args.site, raise_exc=True)
+
+    qos = create_slurm_qos(args.qosname,
+                           args.site,
+                           group_limits=group_limits,
+                           user_limits=user_limits,
+                           job_limits=job_limits,
+                           priority=args.priority,
+                           flags=args.flags)
+
+    console = Console()
+    console.print(highlight_yaml(qos.pretty()))
+
+
+def add_slurm_assoc_args(parser: argparse.ArgumentParser):
+    group = parser.add_argument_group('Association')
+    group.add_argument('--group', '-g', required=True)
+    group.add_argument('--partition', '-p', required=True)
+    group.add_argument('--qos', '-q', required=True)
+
+
+@subcommand('assoc',
+            add_site_args_req,
+            add_slurm_assoc_args,
+            help='Create a new association')
+def cmd_slurm_new_assoc(args: argparse.Namespace):
+    connect_to_database(args.config.mongo)
+    query_site_exists(args.site, raise_exc=True)
+    console = Console()
+
+    try:
+        assoc = create_slurm_association(args.site,
+                                         args.partition,
+                                         args.group,
+                                         args.qos)
+    except SiteSlurmPartition.DoesNotExist:
+        console.print(f'[red] Partition {args.partition} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+    except SiteGroup.DoesNotExist:
+        console.print(f'[red] Group {args.group} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+    except SiteSlurmQOS.DoesNotExist:
+        console.print(f'[red] QOS {args.qos} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+
+    console.print(highlight_yaml(assoc.pretty()))
 
 
 #########################################
