@@ -61,6 +61,25 @@ def _ctx_name():
     return inspect.stack()[1].function
 
 
+def make_ngrams(word: str,
+                min_size: int = 2,
+                prefix: bool = False,
+                stop_chars: list[str] = ['@']) -> list[str]:
+    length = len(word)
+    size_range = range(min_size, max(length, min_size) + 1)
+    if prefix:
+        return [
+            word[0:size]
+            for size in size_range
+        ]
+    return list(set(
+        word[i:i+size]
+        for size in size_range
+        for i in range(0, max(0, length-size) + 1)
+        if not word[i] == ' ' and not word[i+size-1] == ' '
+    ))
+
+
 def get_relative_path(lower_path: Path, upper_path: Path):
     diff = lower_path.relative_to(upper_path)
     levels = len(diff.parents)

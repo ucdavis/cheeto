@@ -26,9 +26,9 @@ from .config import get_config
 def process_config(args: argparse.Namespace):
     args.config = get_config(config_path=args.config, profile=args.profile)
     if 'accounts.hpc' in args.config.mongo.uri:
-        pass
-        #print("Testing right now, don't use prod", file=sys.stderr)
-        #sys.exit(1)
+        #pass
+        print("Testing right now, don't use prod", file=sys.stderr)
+        sys.exit(1)
     return args
 
 

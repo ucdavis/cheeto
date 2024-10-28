@@ -14,7 +14,7 @@ from functools import singledispatch
 import logging
 from operator import attrgetter
 from pathlib import Path
-import re
+import statistics as stat
 
 from cheeto.encrypt import generate_password
 from typing import List, Optional, no_type_check, Self, Union
@@ -60,7 +60,7 @@ from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     SlurmQOSValidFlags, parse_qos_tres)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
-                    _ctx_name, 
+                    _ctx_name, make_ngrams, 
                     size_to_megs,
                     removed,
                     remove_nones)
@@ -114,6 +114,7 @@ def SlurmQOSFlagField(**kwargs) -> StringField:
     return StringField(choices=SlurmQOSValidFlags,
                        **kwargs)
 
+
 class InvalidUser(RuntimeError):
     pass
 
@@ -121,9 +122,6 @@ class InvalidUser(RuntimeError):
 class DuplicateUser(ValueError):
     def __init__(self, username):
         super().__init__(f'User {username} already exists.')
-
-
-
 
 
 def handler(event):
@@ -218,8 +216,24 @@ class GlobalUser(BaseDocument):
     iam_synced = BooleanField(default=False)
 
     meta = {
-        'queryset_class': SyncQuerySet
+        'queryset_class': SyncQuerySet,
+        'indexes': [
+            {
+                'fields': ['$username', '$email', '$fullname'],
+                'default_language': 'english'
+            }
+        ]
     }
+
+    def full_ngrams(self):
+        return make_ngrams(self.username) + \
+               make_ngrams(self.fullname) + \
+               make_ngrams(self.email)
+
+    def prefix_ngrams(self):
+        return make_ngrams(self.username, prefix=True) + \
+               make_ngrams(self.fullname, prefix=True) + \
+               make_ngrams(self.email, prefix=True)
 
     @classmethod
     def from_puppet(cls, username: str, 
@@ -289,6 +303,33 @@ class GlobalUser(BaseDocument):
     #@property
     #def home_directory(self):
     #    return f'/home/{self.username}'
+
+
+class UserSearch(BaseDocument):
+    user = ReferenceField(GlobalUser, required=True, reverse_delete_rule=CASCADE)
+    full_ngrams = StringField(required=True)
+    prefix_ngrams = StringField(required=True)
+
+    meta = {
+        'indexes': [
+            {
+                'fields': ['$full_ngrams', '$prefix_ngrams'],
+                'default_language': 'english',
+                'weights': {
+                    'prefix_ngrams': 200,
+                    'full_ngrams': 100
+                }
+            }
+        ]
+    }
+
+    @classmethod
+    def update_index(cls, user: GlobalUser):
+        UserSearch.objects(user=user).update_one(
+            prefix_ngrams=' '.join(user.prefix_ngrams()),
+            full_ngrams=' '.join(user.full_ngrams()),
+            upsert=True
+        )
 
 
 global_user_t = Union[GlobalUser, str]
@@ -1010,11 +1051,20 @@ def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
         return True
 
 
-def query_user(username: str, sitename: str | None = None) -> User:
+def query_user(username: str | None = None,
+               uid: int | None = None,
+               sitename: str | None = None) -> User:
+    kwargs = {}
+    if username is not None:
+        kwargs['username'] = username
+    if uid is not None:
+        kwargs['uid'] = uid
+    if not kwargs:
+        raise DoesNotExist()
     if sitename is not None:
-        return SiteUser.objects.get(username=username, sitename=sitename)
+        return SiteUser.objects.get(sitename=sitename, **kwargs)
     else:
-        return GlobalUser.objects.get(username=username)
+        return GlobalUser.objects.get(**kwargs)
 
 
 def query_user_exists(username: str,
@@ -1095,9 +1145,8 @@ def set_user_type(username: str,
 def set_user_password(username: str,
                       password: str,
                       hasher: pyescrypt.Yescrypt):
-    user = GlobalUser.objects.get(username=username)
-    user.password = hash_yescrypt(hasher, password).decode('UTF-8')
-    user.save()
+    password = hash_yescrypt(hasher, password).decode('UTF-8')
+    GlobalUser.objects(username=username).update_one(set__password=password)
 
 
 @singledispatch
@@ -1472,6 +1521,8 @@ def create_user(username: str,
 
     global_user = GlobalUser(**user_kwargs)
     global_user.save()
+
+    UserSearch.update_index(global_user)
 
     if password is not None:
         hasher = get_mcf_hasher()
@@ -2541,13 +2592,18 @@ def process_user_args(args: argparse.Namespace):
 
 def add_show_user_args(parser: argparse.ArgumentParser):
     parser.add_argument('--username', '-u', help='Show the specific user')
+    parser.add_argument('--uid', type=int, help='Show the user with the specified UID')
     parser.add_argument('--type', '-t', nargs='+',
                         help=f'Show users of these types. Options: {USER_TYPES}')
     parser.add_argument('--access', '-a', nargs='+',
                         help=f'Show users with these accesses. Options: {ACCESS_TYPES}')
     parser.add_argument('--email')
     parser.add_argument('--status', nargs='+')
-    parser.add_argument('--uid')
+    parser.add_argument('--find', '-f', help='''Find a user with text search. Searches over username,
+                                             fullname, and email. If there are more than 5 results,
+                                             returns only results with a text score more than 2 standard
+                                             deviations above the mean. If there are no such results,
+                                             returns all results with text score greater than the mean.''')
     parser.add_argument('--list', '-l', default=False, action='store_true',
                         help='Only list usernames instead of full user info')
     parser.add_argument('--verbose', action='store_true', default=False)
@@ -2592,16 +2648,34 @@ def cmd_user_show(args: argparse.Namespace):
 
     if args.username:
         try:
-            users.append(query_user(args.username, sitename=args.site))
+            users.append(query_user(username=args.username, sitename=args.site))
         except DoesNotExist:
             scope = 'Global' if args.site is None else args.site
             logger.info(f'User {args.username} with scope {scope} does not exist.')
+    elif args.uid:
+        try:
+            users.append(query_user(uid=args.uid, sitename=args.site))
+        except DoesNotExist:
+            scope = 'Global' if args.site is None else args.site
+            logger.info(f'User {args.uid} with scope {scope} does not exist.')
     elif args.type:
         users.extend(query_user_type(args.type, sitename=args.site))
     elif args.access:
         users.extend(query_user_access(args.access, sitename=args.site))
     elif args.status:
         users.extend(query_user_status(args.status, sitename=args.site))
+    elif args.find:
+        query = ' '.join(make_ngrams(args.find))
+        results = UserSearch.objects.search_text(query).only('user').order_by('$text_score')[:10]
+        if len(results) > 4:
+            scores = [r.get_text_score() for r in results]
+            mean = stat.mean(scores)
+            stdev = stat.stdev(scores)
+            #print(mean, stdev, scores)
+            filtered = [r for r, s in zip(results, scores) if ((s - mean) / stdev) > 2]
+            results = filtered if filtered else [r for r, s in zip(results, scores) if s > mean]
+
+        users.extend((result.user for result in results))
 
     console = Console()
     if args.list:
