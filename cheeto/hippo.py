@@ -9,16 +9,15 @@
 
 import argparse
 import logging
-from pathlib import Path
 import shlex
 import socket
 import sys
 import traceback
-from typing import Optional, Tuple, Union, List
+from typing import Optional, List
 
 from rich.console import Console
 
-from .args import subcommand
+from .args import commands, ArgParser, arggroup
 from .config import HippoConfig
 from .database import (add_group_member, add_user_access, connect_to_database,
                        GlobalUser,
@@ -58,7 +57,6 @@ def hippoapi_client(config: HippoConfig, quiet: bool = False):
                                prefix='')
 
 
-
 class HippoEventHandler:
 
     event_name : str = 'Null'
@@ -72,13 +70,16 @@ class HippoEventHandler:
 #########################################
 
 
-def add_hippoapi_event_args(parser: argparse.ArgumentParser):
+@arggroup('HiPPO API', desc='HiPPO API event arguments')
+def event_args(parser: ArgParser):
     parser.add_argument('--post-back', '-p', default=False, action='store_true')
     parser.add_argument('--id', default=None, dest='event_id', type=int)
     parser.add_argument('--type', choices=list(HIPPO_EVENT_ACTIONS))
 
 
-@subcommand('process', add_hippoapi_event_args)
+@event_args.apply()
+@commands.register('hippo', 'process',
+                   help='Process Events from HiPPO API')
 def cmd_hippoapi_process(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
@@ -88,7 +89,9 @@ def cmd_hippoapi_process(args: argparse.Namespace):
                             post_back=args.post_back)
 
 
-@subcommand('events', add_hippoapi_event_args)
+@event_args.apply()
+@commands.register('hippo', 'events',
+                   help='List HiPPO event queue')
 def cmd_hippoapi_events(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     console = Console()

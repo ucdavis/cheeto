@@ -26,7 +26,7 @@ from rich import print as rprint
 from rich.console import Console
 from rich.syntax import Syntax
 
-from .args import subcommand
+from .args import commands, ArgParser, arggroup, EnumAction
 from .errors import ExitCode
 from .ldap import LDAPManager
 from .yaml import (MergeStrategy,
@@ -34,7 +34,6 @@ from .yaml import (MergeStrategy,
                    puppet_merge)
 from .types import *
 from .utils import (require_kwargs,
-                    EnumAction,
                     size_to_megs,
                     link_relative)
 
@@ -609,32 +608,34 @@ class SiteData(YamlRepo):
             yield group_name, group_record
 
 
-def add_validate_args(parser: argparse.ArgumentParser):
-    group = parser.add_argument_group('YAML Validation')
-    group.add_argument('--dump', default='/dev/stdout',
-                  help='Dump the validated YAML to the given file')
-    group.add_argument('--echo', action='store_true', default=False)
-    group.add_argument('files', nargs='+',
+@arggroup('YAML Validation')
+def validate_args(parser: ArgParser):
+    parser.add_argument('--dump', default='/dev/stdout',
+                        help='Dump the validated YAML to the given file')
+    parser.add_argument('--echo', action='store_true', default=False)
+    parser.add_argument('files', nargs='+',
                         help='YAML files to validate.')
-    group.add_argument('--merge',
+    parser.add_argument('--merge',
                         default=MergeStrategy.NONE,
                         type=MergeStrategy,
                         action=EnumAction,
                         help='Merge the given YAML files before validation.')
-    group.add_argument('--strict', action='store_true', default=False,
+    parser.add_argument('--strict', action='store_true', default=False,
                         help='Terminate on validation errors.')
-    group.add_argument('--partial',
+    parser.add_argument('--partial',
                         default=False,
                         action='store_true',
                         help='Allow partial loading (ie missing keys).')
-    group.add_argument('--postload-validate', default=False,
+    parser.add_argument('--postload-validate', default=False,
                        action='store_true')
     for func_name in _postload_validators.keys():
-        group.add_argument(f'--{func_name}', action='store_true', default=False)
+        parser.add_argument(f'--{func_name}', action='store_true', default=False)
 
 
 
-@subcommand('validate', add_validate_args)
+@validate_args.apply()
+@commands.register('puppet', 'validate',
+                   help='Validate a puppet.hpc-formatted YAML file')
 def validate_yamls(args: argparse.Namespace):
 
     console = Console(stderr=True)
@@ -680,35 +681,12 @@ class LDAPQueryParams(Enum):
     displayname = 'displayName'
 
 
-def add_create_nologin_user_args(parser: argparse.ArgumentParser):
-    qgroup = parser.add_argument_group('LDAP Query Parameters')
-    xgroup = qgroup.add_mutually_exclusive_group(required=True)
-    for param in LDAPQueryParams:
-        xgroup.add_argument(f'--{param.name}', metavar=param.value)
-    
-    lgroup = parser.add_argument_group('LDAP Server')
-    lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
-
-    parser.add_argument('--site-dir', 
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet accounts directory.')
-    parser.add_argument('--global-dir',
-                        type=Path,
-                        required=True,
-                        help='Global puppet accounts directory.')
-    parser.add_argument('--force',
-                        default=False,
-                        action='store_true',
-                        help='Overwrite existing global YAML file.')
-
-
 def flatten_and_decode(data: dict) -> dict:
     return {key: value[0].decode() for key, value in data.items()} #type: ignore
 
 
-@subcommand('create-nologin-user', 
-            add_create_nologin_user_args)
+@commands.register('puppet', 'create-nologin-user', 
+                    help='Create a nologin user')
 def create_nologin_user(args: argparse.Namespace):
     console = Console(stderr=True)
     logger = logging.getLogger(__name__)
@@ -773,7 +751,32 @@ def create_nologin_user(args: argparse.Namespace):
             logger.info(f'{yaml_filename} already linked to {args.site_dir}.')
 
 
-def add_repo_args(parser):
+@create_nologin_user.args()
+def add_create_nologin_user_args(parser: ArgParser):
+    qgroup = parser.add_argument_group('LDAP Query Parameters')
+    xgroup = qgroup.add_mutually_exclusive_group(required=True)
+    for param in LDAPQueryParams:
+        xgroup.add_argument(f'--{param.name}', metavar=param.value)
+    
+    lgroup = parser.add_argument_group('LDAP Server')
+    lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
+
+    parser.add_argument('--site-dir', 
+                        type=Path,
+                        required=True,
+                        help='Site-specific puppet accounts directory.')
+    parser.add_argument('--global-dir',
+                        type=Path,
+                        required=True,
+                        help='Global puppet accounts directory.')
+    parser.add_argument('--force',
+                        default=False,
+                        action='store_true',
+                        help='Overwrite existing global YAML file.')
+
+
+@arggroup('YAML Repo Args')
+def repo_args(parser: ArgParser):
     parser.add_argument('--site-dir', 
                         type=Path,
                         required=True,
@@ -794,7 +797,9 @@ def add_repo_args(parser):
                         default=30)
 
 
-@subcommand('sync-ldap', add_repo_args)
+@repo_args.apply()
+@commands.register('puppet', 'sync-ldap',
+                   help='Sync to LDAP')
 def sync_ldap(args: argparse.Namespace):
     try:
         _sync_ldap(args)

@@ -8,6 +8,7 @@
 # Date   : 09.08.2024
 
 import argparse
+from argparse import Namespace
 from collections import defaultdict
 from collections.abc import Iterable
 from functools import singledispatch
@@ -24,7 +25,10 @@ from mongoengine import *
 from mongoengine import signals
 from mongoengine.queryset.visitor import Q as Qv
 
-from .args import regex_argtype, subcommand
+from .args import (arggroup,
+                   regex_argtype,
+                   commands,
+                   ArgParser)
 from .config import MongoConfig, Config
 from .encrypt import get_mcf_hasher, hash_yescrypt
 from .errors import ExitCode
@@ -41,7 +45,7 @@ from .puppet import (MIN_PIGROUP_GID,
                      PuppetUserRecord,
                      SlurmQOS as PuppetSlurmQOS,
                      SlurmQOSTRES as PuppetSlurmQOSTRES,
-                     add_repo_args,
+                     repo_args,
                      SiteData)
 from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     DISABLED_SHELLS, 
@@ -1051,6 +1055,16 @@ def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
         return True
 
 
+def query_sitename(site: str):
+    try:
+        Site.objects.get(sitename=site)
+    except:
+        site = Site.objects.get(fqdn=site)
+        return site.sitename
+    else:
+        return site
+
+
 def query_user(username: str | None = None,
                uid: int | None = None,
                sitename: str | None = None) -> User:
@@ -2024,44 +2038,45 @@ def purge_database():
 #########################################
 
 
-def add_site_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--site', '-s', default=None)
+@arggroup('Site')
+def site_args(parser: ArgParser, required: bool = False):
+    parser.add_argument('--site',
+                        '-s',
+                        default=None,
+                        required=required,
+                        help='Sitename or site FQDN')
 
 
-def add_site_args_req(parser: argparse.ArgumentParser):
-    parser.add_argument('--site', '-s', default=None, required=True)
+@site_args.postprocessor
+def parse_site_arg(args: Namespace):
+    args.site = query_sitename(args.site)
 
 
-def parse_site_arg(site: str):
-    try:
-        Site.objects.get(sitename=site)
-    except:
-        site = Site.objects.get(fqdn=site)
-        return site.sitename
-    else:
-        return site
-
-
-@subcommand('add', add_site_args)
+@commands.register('site', 'add',
+                   help='Add a new site')
 def site_add(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
 
 
-@subcommand('add-global-slurm',
-            add_site_args,
-            lambda parser: parser.add_argument('groups', nargs='+')) #type: ignore
-def cmd_site_add_global_slurm(args: argparse.Namespace):
-    logger = logging.getLogger(__name__)
+@site_args.apply()
+@commands.register('database', 'site', 'add-global-slurm',
+                   help='Add a group for which users are made slurmers') #type: ignore
+def add_global_slurm(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     for group in args.groups:
         add_site_slurmer(args.site, group)
 
 
-@subcommand('to-puppet',
-            add_site_args_req,
-            lambda parser: parser.add_argument('puppet_yaml', type=Path))
-def cmd_site_write_to_puppet(args: argparse.Namespace):
+@add_global_slurm.args()
+def _(parser: ArgParser):
+    parser.add_argument('groups', nargs='+')
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'to-puppet',
+                   help='Dump site in puppet.hpc YAML format')
+def write_to_puppet(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2069,12 +2084,15 @@ def cmd_site_write_to_puppet(args: argparse.Namespace):
     puppet_map.save_yaml(args.puppet_yaml)
 
 
-@subcommand('sync-old-puppet',
-            add_site_args_req,
-            lambda parser: parser.add_argument('repo', type=Path),
-            lambda parser: parser.add_argument('--base-branch', default='main'),
-            lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
-def cmd_site_sync_old_puppet(args: argparse.Namespace):
+@write_to_puppet.args()
+def _(parser: ArgParser):
+    parser.add_argument('puppet_yaml', type=Path)
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'sync-old-puppet',
+                    help='Fully sync site from database to puppet.hpc YAML repo')
+def sync_old_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     site = Site.objects.get(sitename=args.site)
@@ -2098,20 +2116,37 @@ def cmd_site_sync_old_puppet(args: argparse.Namespace):
         add(args.repo.absolute())
 
 
-@subcommand('to-ldap',
-            add_site_args_req,
-            lambda parser: parser.add_argument('--force', '-f', default=False, action='store_true'))
-def cmd_site_sync_to_ldap(args: argparse.Namespace):
+@sync_old_puppet.args()
+def _(parser: ArgParser):
+    parser.add_argument('repo', type=Path)
+    parser.add_argument('--base-branch', default='main')
+    parser.add_argument('--push-merge', default=False, action='store_true')
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'to-ldap',
+                   help='Sync site to LDAP server')
+def sync_to_ldap(args: argparse.Namespace):
     ldap_sync(args.site, args.config, force=args.force)
 
 
-@subcommand('to-sympa',
-            add_site_args_req,
-            lambda parser: parser.add_argument('output_txt', type=Path),
-            lambda parser: parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu']))
-def cmd_site_write_sympa(args: argparse.Namespace):
+@sync_to_ldap.args()
+def _(parser: ArgParser):
+    parser.add_argument('--force', '-f', default=False, action='store_true')
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'to-sympa',
+                   help='Dump site emails in Sympa format')
+def site_write_sympa(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _site_write_sympa(args.site, args.output_txt, set(args.ignore))
+
+
+@site_write_sympa.args()
+def _(parser: ArgParser):
+    parser.add_argument('output_txt', type=Path)
+    parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu'])
 
 
 def _site_write_sympa(sitename: str, output: Path, ignore: set):
@@ -2122,12 +2157,16 @@ def _site_write_sympa(sitename: str, output: Path, ignore: set):
                 print(user.email, file=fp)
 
 
-@subcommand('root-key',
-            add_site_args_req,
-            lambda parser: parser.add_argument('output_txt', type=Path))
-def cmd_site_write_root_key(args: argparse.Namespace):
+@site_args.apply(required=True)
+@commands.register('datanase', 'site', 'root-key')
+def site_write_root_key(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     _site_write_root_key(args.site, args.output_txt)
+
+
+@site_write_root_key.args()
+def _(parser: ArgParser):
+    parser.add_argument('output_txt', type=Path)
 
 
 def _site_write_root_key(sitename: str, output: Path):
@@ -2141,12 +2180,10 @@ def _site_write_root_key(sitename: str, output: Path):
                     print(key, file=fp)
 
 
-@subcommand('sync-new-puppet',
-            add_site_args_req,
-            lambda parser: parser.add_argument('repo', type=Path),
-            lambda parser: parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu']),
-            lambda parser: parser.add_argument('--push-merge', default=False, action='store_true'))
-def cmd_site_sync_new_puppet(args: argparse.Namespace):
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'sync-new-puppet',
+                   help='Sync to new puppet.hpc format')
+def site_sync_new_puppet(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     site = Site.objects.get(sitename=args.site)
@@ -2168,40 +2205,47 @@ def cmd_site_sync_new_puppet(args: argparse.Namespace):
         add(root_key_path, storage_path, sympa_path)
 
 
-@subcommand('list')
-def cmd_site_list(args: argparse.Namespace):
+@site_sync_new_puppet.args()
+def _(parser: ArgParser):
+    parser.add_argument('repo', type=Path)
+    parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu'])
+    parser.add_argument('--push-merge', default=False, action='store_true')
+
+
+@commands.register('database', 'site', 'list')
+def site_list(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
     for site in Site.objects():
         print(site.sitename, site.fqdn)
 
 
-@subcommand('show',
-            lambda parser: parser.add_argument('sitename'))
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'show')
 def site_show(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
 
-    site = Site.objects.get(sitename=args.sitename)
+    site = Site.objects.get(sitename=args.site)
     console = Console()
     console.print(site.fqdn)
-    total_users = SiteUser.objects(sitename=args.sitename).count()
-    reg_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='user')).count()
-    admin_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='admin')).count()
-    system_users = SiteUser.objects(sitename=args.sitename, parent__in=GlobalUser.objects(type='system')).count()
-
-#########################################
-#
-# load commands: cheeto database load ...
-#
-#########################################
+    total_users = SiteUser.objects(sitename=args.site).count()
+    reg_users = SiteUser.objects(sitename=args.site, parent__in=GlobalUser.objects(type='user')).count()
+    admin_users = SiteUser.objects(sitename=args.site, parent__in=GlobalUser.objects(type='admin')).count()
+    system_users = SiteUser.objects(sitename=args.site, parent__in=GlobalUser.objects(type='system')).count()
 
 
-def add_database_load_args(parser: argparse.ArgumentParser):
+
+@arggroup('Load')
+def database_load_args(parser: ArgParser):
     parser.add_argument('--system-groups', action='store_true', default=False)
     parser.add_argument('--nfs-yamls', nargs='+', type=Path)
 
 
-@subcommand('from-puppet', add_repo_args, add_site_args, add_database_load_args)
+@repo_args.apply()
+@site_args.apply(required=True)
+@database_load_args.apply()
+@commands.register('database', 'site', 'load',
+                   help='Load database from puppet.hpc YAML')
 def cmd_site_from_puppet(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     
@@ -2423,7 +2467,8 @@ def cmd_site_from_puppet(args: argparse.Namespace):
 #########################################
 
 
-def add_user_args(parser: argparse.ArgumentParser):
+@arggroup('User')
+def user_args(parser: ArgParser):
     parser.add_argument('--user', '-u', nargs='+', required=True)
 
 
@@ -2432,25 +2477,6 @@ def process_user_args(args: argparse.Namespace):
         return SiteUser.objects(sitename=args.site, username__in=args.user)
     else:
         return GlobalUser.objects(username__in=args.user)
-
-
-def add_show_user_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--username', '-u', help='Show the specific user')
-    parser.add_argument('--uid', type=int, help='Show the user with the specified UID')
-    parser.add_argument('--type', '-t', nargs='+',
-                        help=f'Show users of these types. Options: {USER_TYPES}')
-    parser.add_argument('--access', '-a', nargs='+',
-                        help=f'Show users with these accesses. Options: {ACCESS_TYPES}')
-    parser.add_argument('--email')
-    parser.add_argument('--status', nargs='+')
-    parser.add_argument('--find', '-f', help='''Find a user with text search. Searches over username,
-                                             fullname, and email. If there are more than 5 results,
-                                             returns only results with a text score more than 2 standard
-                                             deviations above the mean. If there are no such results,
-                                             returns all results with text score greater than the mean.''')
-    parser.add_argument('--list', '-l', default=False, action='store_true',
-                        help='Only list usernames instead of full user info')
-    parser.add_argument('--verbose', action='store_true', default=False)
 
 
 def _show_siteuser(user: SiteUser, verbose: bool = False) -> dict:
@@ -2480,11 +2506,10 @@ def _show_user(user: User, verbose: bool = False) -> dict:
         else _show_siteuser(user, verbose=verbose)
 
 
-@subcommand('show',
-            add_show_user_args,
-            add_site_args,
-            help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
-def cmd_user_show(args: argparse.Namespace):
+@site_args.apply(required=True)
+@commands.register('database', 'user', 'show',
+                   help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
+def user_show(args: Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2530,18 +2555,29 @@ def cmd_user_show(args: argparse.Namespace):
             console.print(highlight_yaml(output))
 
 
-def add_user_new_system_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--email', default='hpc-help@ucdavis.edu')
-    parser.add_argument('--fullname', help='Default: "HPCCF $username"')
-    parser.add_argument('--password', '-p', action='store_true', default=False,
-                        help='Generate a password for the new user')
-    parser.add_argument('username')
+@user_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--username', '-u', help='Show the specific user')
+    parser.add_argument('--uid', type=int, help='Show the user with the specified UID')
+    parser.add_argument('--type', '-t', nargs='+',
+                        help=f'Show users of these types. Options: {USER_TYPES}')
+    parser.add_argument('--access', '-a', nargs='+',
+                        help=f'Show users with these accesses. Options: {ACCESS_TYPES}')
+    parser.add_argument('--email')
+    parser.add_argument('--status', nargs='+')
+    parser.add_argument('--find', '-f', help='''Find a user with text search. Searches over username,
+                                             fullname, and email. If there are more than 5 results,
+                                             returns only results with a text score more than 2 standard
+                                             deviations above the mean. If there are no such results,
+                                             returns all results with text score greater than the mean.''')
+    parser.add_argument('--list', '-l', default=False, action='store_true',
+                        help='Only list usernames instead of full user info')
+    parser.add_argument('--verbose', action='store_true', default=False)
 
 
-@subcommand('new-system',
-            add_user_new_system_args,
-            help='Create a new system user within the system ID range on the provided sites')
-def cmd_user_new_system(args: argparse.Namespace):
+@commands.register('database', 'user', 'new-system',
+                   help='Create a new system user within the system ID range on the provided sites')
+def user_new_system(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
@@ -2566,17 +2602,25 @@ def cmd_user_new_system(args: argparse.Namespace):
             console.print('[red] Make sure to save this password in 1password!')
 
 
-def add_user_status_args(parser: argparse.ArgumentParser):
+@user_new_system.args()
+def _(parser: ArgParser):
+    parser.add_argument('--email', default='hpc-help@ucdavis.edu')
+    parser.add_argument('--fullname', help='Default: "HPCCF $username"')
+    parser.add_argument('--password', '-p', action='store_true', default=False,
+                        help='Generate a password for the new user')
     parser.add_argument('username')
-    parser.add_argument('status', choices=list(USER_STATUSES))
-    parser.add_argument('--reason', '-r', required=True)
 
 
-@subcommand('set-status',
+
+
+
+
+
+@site_args.apply(required=True)
+@commands.register('set-status',
             add_user_status_args,
-            add_site_args,
             help='Set the status for a user, globally or per-site if --site is provided')
-def cmd_user_set_status(args: argparse.Namespace):
+def user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
@@ -2585,6 +2629,13 @@ def cmd_user_set_status(args: argparse.Namespace):
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
         logger.info(f'User {args.username} with scope {scope} does not exist.')
+
+
+@user_set_status.args()
+def _(parser: ArgParser):
+    parser.add_argument('username')
+    parser.add_argument('status', choices=list(USER_STATUSES))
+    parser.add_argument('--reason', '-r', required=True)
 
 
 def add_user_password_args(parser: argparse.ArgumentParser):
@@ -2813,7 +2864,7 @@ def cmd_group_new_class(args: argparse.Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
 
-    group = create_class_group(args.groupname, args.site)
+    group : SiteGroup = create_class_group(args.groupname, args.site)
     for instructor in args.sponsors:
         if not query_user_exists(instructor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{instructor} is not a valid user on {args.site}, skipping.')

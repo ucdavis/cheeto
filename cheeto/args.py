@@ -94,12 +94,14 @@ class CmdTree:
     def parse_args(self, *args, **kwargs):
         return self._root.parse_args(*args, **kwargs)
 
-    def run(self, args: Namespace | None = None):
+    def run(self, args: Namespace | None = None) -> int:
         '''Parse args and execute the registered functions.
         '''
         if args is None:
             args = self.parse_args()
-        return args.func(args)
+        if (retcode := args.func(args)) is None:
+            return 0
+        return retcode
 
     def _get_subparser_action(self, parser: ArgumentParser) -> _SubParsersAction | None:
         '''Extraction the subparser Action from the given parser.

@@ -8,30 +8,18 @@
 # Author : Omen Wild <omen@ucdavis.edu>
 # Date   : 29.03.2023
 
-import argparse
+from argparse import Namespace
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
 
-from .args import subcommand
+from .args import commands, ArgParser, arggroup
 from .yaml import parse_yaml, puppet_merge
 
 
-def add_render_args(parser):
-    parser.add_argument('--site-dir',
-                        type=Path)
-    parser.add_argument('--authorized-keys', '-k',
-                        default='/etc/ssh/users/root.pub',
-                        type=Path)
-    parser.add_argument('--output-dir', '-o',
-                        default='nocloud-net',
-                        type=Path)
-    parser.add_argument('--config-basename',
-                        default='config.yaml')
-
-
-@subcommand('render', add_render_args)
-def render(args: argparse.Namespace):
+@commands.register('nocloud', 'render',
+                   help='Render nocloud templates for cobbler')
+def render(args: Namespace):
     site_dir = args.site_dir
     common_dir = site_dir.parent
 
@@ -77,3 +65,17 @@ def render(args: argparse.Namespace):
 
         user_data_f = nocloud_host_dir / "user-data"
         user_data_f.write_text(contents)
+
+
+@render.args()
+def add_render_args(parser: ArgParser):
+    parser.add_argument('--site-dir',
+                        type=Path)
+    parser.add_argument('--authorized-keys', '-k',
+                        default='/etc/ssh/users/root.pub',
+                        type=Path)
+    parser.add_argument('--output-dir', '-o',
+                        default='nocloud-net',
+                        type=Path)
+    parser.add_argument('--config-basename',
+                        default='config.yaml')

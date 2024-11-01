@@ -7,8 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.04.2023
 
-import argparse
-from collections import namedtuple
+from argparse import FileType, Namespace
 import csv
 from enum import Enum, auto
 from io import StringIO
@@ -22,10 +21,10 @@ from rich.console import Console
 from rich.progress import track
 import sh
 
-from .args import subcommand
+from .args import commands, ArgParser
 from .types import *
 from .database import (connect_to_database,
-                       add_site_args, parse_site_arg,
+                       site_args,
                        slurm_association_state as build_db_association_state,
                        slurm_qos_state as build_db_qos_state)
 from .errors import ExitCode
@@ -477,30 +476,10 @@ def generate_commands(slurm_associations: dict,
     return command_queue
 
 
-def add_sync_args(parser):
-    parser.add_argument('--sudo', action='store_true', default=False,
-                        help='Run sacctmgr commands with sudo.')
-    parser.add_argument('--apply', action='store_true', default=False,
-                        help='Execute and apply the Slurm changes.')
-    parser.add_argument('--slurm-associations', type=argparse.FileType('r'),
-                        help='Read slurm associations from the specified file '
-                             'instead of parsing from a `sacctmgr show -P assoc` call.')
-    parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
-                        help='Read slurm QoSes from the specified file '
-                             'instead of parsing from a `sacctmgr show -P qos` call.')
-    parser.add_argument('--source', choices=['db', 'yaml'], default='yaml')
-    parser.add_argument('-i', dest='yaml_files', nargs='+',
-                        help='YAML inputs for when source is yaml')
-    parser.add_argument('--dump-commands', type=Path, default=None)
-
-
-@subcommand('show-qos')
-def show_qos(args: argparse.Namespace):
-    pass
-
-
-@subcommand('sync', add_sync_args, add_site_args)
-def sync(args: argparse.Namespace):
+@site_args.apply()
+@commands.register('slurm', 'sync',
+                   help='Sync Slurm associations from database or YAMLs to controller')
+def sync(args: Namespace):
     console = Console(stderr=True)
 
     if args.source == 'yaml':
@@ -585,7 +564,22 @@ def sync(args: argparse.Namespace):
     print(json.dumps(report, indent=2)) 
 
 
-
+@sync.args('Sync')
+def sync_args(parser: ArgParser):
+    parser.add_argument('--sudo', action='store_true', default=False,
+                        help='Run sacctmgr commands with sudo.')
+    parser.add_argument('--apply', action='store_true', default=False,
+                        help='Execute and apply the Slurm changes.')
+    parser.add_argument('--slurm-associations', type=FileType('r'),
+                        help='Read slurm associations from the specified file '
+                             'instead of parsing from a `sacctmgr show -P assoc` call.')
+    parser.add_argument('--slurm-qoses', type=FileType('r'),
+                        help='Read slurm QoSes from the specified file '
+                             'instead of parsing from a `sacctmgr show -P qos` call.')
+    parser.add_argument('--source', choices=['db', 'yaml'], default='yaml')
+    parser.add_argument('-i', dest='yaml_files', nargs='+',
+                        help='YAML inputs for when source is yaml')
+    parser.add_argument('--dump-commands', type=Path, default=None)
 
 
 def audit_partitions(args):
