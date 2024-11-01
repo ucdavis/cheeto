@@ -468,12 +468,14 @@ def handle_site_user(sitename: str, user: site_user_t) -> site_user_t:
 
 
 def handle_site_users(sitename: str, users: Iterable[site_user_t]):
+    logger = logging.getLogger(_ctx_name())
     to_query = []
     for user in users:
-        if type(user) is str:
-            to_query.append(user)
-        else:
+        if type(user) is SiteUser:
             yield user
+        else:
+            to_query.append(user)
+    logger.debug(f'to_query: {to_query}')
     for user in SiteUser.objects(sitename=sitename, username__in=to_query):
         yield user
 
@@ -748,10 +750,10 @@ def handle_site_group(sitename: str, group: site_group_t) -> site_group_t:
 def handle_site_groups(sitename: str, groups: Iterable[site_group_t]):
     to_query = []
     for group in groups:
-        if type(group) is str:
-            to_query.append(group)
-        else:
+        if type(group) is SiteGroup:
             yield group
+        else:
+            to_query.append(group)
     for group in SiteGroup.objects(sitename=sitename, groupname__in=to_query):
         yield group
 
@@ -1349,8 +1351,10 @@ def group_add_user_element(sitename: str,
                            users: Iterable[site_user_t],
                            field: str):
     logger = logging.getLogger(__name__)
-    groups = handle_site_groups(sitename, groups)
+    groups = list(handle_site_groups(sitename, groups))
     users = list(handle_site_users(sitename, users))
+    logger.info(groups)
+    logger.info(users)
     for group in groups:
         logger.info(f'{_ctx_name()}: {group.groupname}: add {list(map(attrgetter("username"), users))} to {field}')
         group.update(**{f'add_to_set__{field}': users})

@@ -19,7 +19,8 @@ def Console(*args, **kwargs):
 
 
 def setup(log_file: TextIO,
-          quiet: bool = False):
+          quiet: bool = False,
+          level=logging.INFO):
 
     handlers = [RichHandler(console=Console(file=log_file))]
 
@@ -28,8 +29,8 @@ def setup(log_file: TextIO,
                                     markup=True))
 
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(message)s',
+        level=level,
+        format='%(funcName)20s: %(message)s',
         #format='%(asctime)s %(levelname)10s [%(filename)s:%(lineno)s - %(funcName)20s()] %(message)s',
         datefmt="[%x %X]",
         handlers=handlers
