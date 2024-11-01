@@ -20,70 +20,15 @@ from . import nocloud
 from . import puppet
 from . import slurm
 
-from .config import get_config
-
-
-def process_config(args: argparse.Namespace):
-    args.config = get_config(config_path=args.config, profile=args.profile)
-    if 'accounts.hpc' in args.config.mongo.uri:
-        #pass
-        print("Testing right now, don't use prod", file=sys.stderr)
-        sys.exit(1)
-    return args
-
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.set_defaults(func = lambda _: parser.print_help())
     parser.add_argument('--version', action='version', version=f'cheeto {__version__}')
-    commands = parser.add_subparsers()
-
-    config_parser = commands.add_parser('config')
-    config_commands = config_parser.add_subparsers()
-    config.show(config_commands)
-    config.write(config_commands)
-
-    hippo_parser = commands.add_parser('hippo')
-    hippo_parser.set_defaults(func = lambda _: hippo_parser.print_help())
-    hippo_commands = hippo_parser.add_subparsers()
-    hippo.cmd_hippoapi_process(hippo_commands)
-    hippo.cmd_hippoapi_events(hippo_commands)
-
-    puppet_parser = commands.add_parser('puppet')
-    puppet_commands = puppet_parser.add_subparsers()
-    puppet.validate_yamls(puppet_commands)
-    puppet.create_nologin_user(puppet_commands)
-    puppet.sync_ldap(puppet_commands)
-
-    nocloud_parser = commands.add_parser('nocloud')
-    nocloud_commands = nocloud_parser.add_subparsers()
-    nocloud.render(nocloud_commands)
-
-    slurm_parser = commands.add_parser('slurm')
-    slurm_commands = slurm_parser.add_subparsers()
-    slurm.sync(slurm_commands)
-    slurm.show_qos(slurm_commands)
-
-    monitor_parser = commands.add_parser('monitor')
-    monitor_commands = monitor_parser.add_subparsers()
-    monitor.power(monitor_commands)
 
     database_parser = commands.add_parser('database', aliases=['db'])
     database_parser.set_defaults(func = lambda _: database_parser.print_help())
     database_commands = database_parser.add_subparsers()
 
     site_parser = database_commands.add_parser('site', aliases=['s'])
-    site_parser.set_defaults(func = lambda _: site_parser.print_help())
-    site_commands = site_parser.add_subparsers()
-    database.cmd_site_add_global_slurm(site_commands)
-    database.cmd_site_write_to_puppet(site_commands)
-    database.cmd_site_sync_to_ldap(site_commands)
-    database.cmd_site_write_sympa(site_commands)
-    database.cmd_site_write_root_key(site_commands)
-    database.cmd_site_list(site_commands)
-    database.cmd_site_sync_new_puppet(site_commands)
-    database.cmd_site_sync_old_puppet(site_commands)
-    database.cmd_site_from_puppet(site_commands)
 
     user_parser = database_commands.add_parser('user', aliases=['u'])
     user_parser.set_defaults(func = lambda _: user_parser.print_help())
@@ -134,19 +79,12 @@ def main():
     database.cmd_slurm_new_qos(slurm_new_commands)
     database.cmd_slurm_new_assoc(slurm_new_commands)
 
-    args = parser.parse_args()
-    process_config(args)
     
     console = log.Console(stderr=True)
     if not args.quiet:
         console.print(f'cheeto [green]v{__version__}[/green]')
 
-    if not hasattr(args, 'log'):
-        args.func(args)
-    else:
-        with args.log.open('a') as log_fp:
-            log.setup(log_fp, quiet=args.quiet)
-            return args.func(args) or 0
+
 
 
 if __name__ == '__main__':
