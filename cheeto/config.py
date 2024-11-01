@@ -7,8 +7,10 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 11.10.2024
 
-import argparse
+from argparse import Namespace
+import atexit
 import logging
+import os
 import pathlib
 import sys
 from typing import List, Optional, Union, Mapping
@@ -16,7 +18,8 @@ from typing import List, Optional, Union, Mapping
 from marshmallow.exceptions import ValidationError
 from marshmallow_dataclass import dataclass
 
-from .args import subcommand
+from . import log
+from .args import commands, ArgParser
 from .errors import ExitCode
 from .yaml import parse_yaml
 from .types import *
@@ -122,12 +125,48 @@ def get_config(config_path: Optional[pathlib.Path] = None,
         )
 
 
-def add_show_args(parser):
-    pass
+@commands.root.args('Config', common=True)
+def common_args(parser: ArgParser):
+    parser.add_argument('--log',
+                       type=Path,
+                       default=Path(os.devnull),
+                       help='Log to file.')
+    parser.add_argument('--quiet',
+                       default=False,
+                       action='store_true')
+    parser.add_argument('--config',
+                       type=Path,
+                       default=DEFAULT_CONFIG_PATH,
+                       help='Path to alternate config file')
+    parser.add_argument('--profile',
+                       default='default',
+                       help='Config profile to use')
 
 
-@subcommand('show', add_show_args)
-def show(args: argparse.Namespace):
+@common_args.postprocessor
+def parse_config(args: Namespace):
+    args.config = get_config(config_path=args.config, profile=args.profile)
+    if 'accounts.hpc' in args.config.mongo.uri:
+        #pass
+        print("Testing right now, don't use prod", file=sys.stderr)
+        sys.exit(1)
+
+
+@common_args.postprocessor
+def setup_log(args: Namespace):
+    if args.log:
+        log_file = args.log.open('a')
+        log.setup(log_file, quiet=args.quiet)
+        
+        def close():
+            if log_file and not log_file.closed:
+                log_file.close()
+        atexit.register(close)
+
+
+@commands.register('config', 'show',
+                   help='Parse and show the config file')
+def show(args: Namespace):
     logger = logging.getLogger(__name__)
 
     if args.config is None:
@@ -136,12 +175,9 @@ def show(args: argparse.Namespace):
         print(Config.Schema().dumps(args.config))
 
 
-def add_write_args(parser):
-    pass
-
-
-@subcommand('write', add_write_args)
-def write(args: argparse.Namespace):
+@commands.register('config', 'write',
+                   help='Write a skeleton config file')
+def write(args: Namespace):
     logger = logging.getLogger(__name__)
 
     config = Config(ldap = dict(
