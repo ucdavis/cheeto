@@ -2472,8 +2472,8 @@ def cmd_site_from_puppet(args: argparse.Namespace):
 
 
 @arggroup('User')
-def user_args(parser: ArgParser):
-    parser.add_argument('--user', '-u', nargs='+', required=True)
+def user_args(parser: ArgParser, required: bool = False):
+    parser.add_argument('--user', '-u', nargs='+', required=required)
 
 
 def process_user_args(args: argparse.Namespace):
@@ -2615,29 +2615,24 @@ def _(parser: ArgParser):
     parser.add_argument('username')
 
 
-
-
-
-
-
+@user_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('set-status',
-            add_user_status_args,
-            help='Set the status for a user, globally or per-site if --site is provided')
+@commands.register('database', 'user', 'set-status',
+                   help='Set the status for a user, globally or per-site if --site is provided')
 def user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     connect_to_database(args.config.mongo)
 
-    try:
-        set_user_status(args.username, args.status, args.reason, sitename=args.site)
-    except DoesNotExist:
-        scope = 'Global' if args.site is None else args.site
-        logger.info(f'User {args.username} with scope {scope} does not exist.')
+    for username in args.user:
+        try:
+            set_user_status(username, args.status, args.reason, sitename=args.site)
+        except DoesNotExist:
+            scope = 'Global' if args.site is None else args.site
+            logger.info(f'User {args.username} with scope {scope} does not exist.')
 
 
 @user_set_status.args()
 def _(parser: ArgParser):
-    parser.add_argument('username')
     parser.add_argument('status', choices=list(USER_STATUSES))
     parser.add_argument('--reason', '-r', required=True)
 
