@@ -48,6 +48,7 @@ blinker = "^1.8.2"
 airium = {version = "^0.2.6", extras = ["parse"]}
 pyescrypt = "^0.1.0"
 xkcdpass = "^1.19.9"
+ponderosa = "^0.4.1"
 
 [build-system]
 requires = ["poetry-core"]

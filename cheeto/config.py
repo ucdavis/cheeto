@@ -18,7 +18,7 @@ from typing import List, Optional, Union, Mapping
 from marshmallow.exceptions import ValidationError
 from marshmallow_dataclass import dataclass
 
-from . import log
+from . import log, __version__
 from .args import commands, ArgParser
 from .errors import ExitCode
 from .yaml import parse_yaml
@@ -125,7 +125,7 @@ def get_config(config_path: Optional[pathlib.Path] = None,
         )
 
 
-@commands.root.args('Config', common=True)
+@commands.root.args('common config', common=True)
 def common_args(parser: ArgParser):
     parser.add_argument('--log',
                        type=Path,
@@ -143,7 +143,14 @@ def common_args(parser: ArgParser):
                        help='Config profile to use')
 
 
-@common_args.postprocessor
+@common_args.postprocessor(priority=0)
+def print_version(args: Namespace):
+    console = log.Console(stderr=True)
+    if not args.quiet:
+        console.print(f'cheeto [green]v{__version__}[/green]')
+
+
+@common_args.postprocessor(priority=100)
 def parse_config(args: Namespace):
     args.config = get_config(config_path=args.config, profile=args.profile)
     if 'accounts.hpc' in args.config.mongo.uri:
@@ -152,7 +159,7 @@ def parse_config(args: Namespace):
         sys.exit(1)
 
 
-@common_args.postprocessor
+@common_args.postprocessor(priority=200)
 def setup_log(args: Namespace):
     if args.log:
         log_file = args.log.open('a')

@@ -1472,7 +1472,9 @@ def get_next_lab_id() -> int:
     return max(ids) + 1
 
 
-def create_home_storage(sitename: str, user: global_user_t):
+def create_home_storage(sitename: str,
+                        user: global_user_t,
+                        source: NFSMountSource | None = None):
     logger = logging.getLogger(__name__)
     if type(user) is str:
         user = GlobalUser.objects.get(username=user)
@@ -1487,6 +1489,15 @@ def create_home_storage(sitename: str, user: global_user_t):
                             owner=user,
                             group=group,
                             collection=collection)
+    if source is None:
+        source = ZFSMountSource(name=user.username,
+                                sitename=sitename,
+                                owner=user,
+                                group=group,
+                                collection=collection)
+        source.save()
+    else:
+        source.update(collection=collection)
     source.save()
 
     mount = Automount(sitename=sitename,
@@ -2042,13 +2053,44 @@ def purge_database():
 #########################################
 
 
+@commands.register('database',
+                   aliases=['db'],
+                   help='Operations on the cheeto MongoDB')
+def database_cmd(args: argparse.Namespace):
+    pass
+
+@database_cmd.args(common=True)
+def database_args(parser: ArgParser):
+    pass
+
+@database_args.postprocessor(priority=50)
+def _(args: Namespace):
+    args.db = connect_to_database(args.config.mongo)
+
+
+@commands.register('database', 'site',
+                   aliases=['s'],
+                   help='Operations on sites')
+def site_cmd(args: argparse.Namespace):
+    pass
+
+
 @arggroup('Site')
-def site_args(parser: ArgParser, required: bool = False):
-    parser.add_argument('--site',
-                        '-s',
-                        default=None,
-                        required=required,
-                        help='Sitename or site FQDN')
+def site_args(parser: ArgParser,
+              required: bool = False,
+              single: bool = True):
+    args = ('--site', '-s')
+    if single:
+        parser.add_argument(*args,
+                            default=None,
+                            required=required,
+                            help='Sitename or site FQDN')
+    else:
+        parser.add_argument(*args,
+                            nargs='+',
+                            default='all',
+                            required=required,
+                            help='Sitename or site FQDN; "all" for all sites')
 
 
 @site_args.postprocessor
@@ -2056,7 +2098,7 @@ def parse_site_arg(args: Namespace):
     args.site = query_sitename(args.site)
 
 
-@commands.register('site', 'add',
+@commands.register('database', 'site', 'add',
                    help='Add a new site')
 def site_add(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
@@ -2066,8 +2108,6 @@ def site_add(args: argparse.Namespace):
 @commands.register('database', 'site', 'add-global-slurm',
                    help='Add a group for which users are made slurmers') #type: ignore
 def add_global_slurm(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
     for group in args.groups:
         add_site_slurmer(args.site, group)
 
@@ -2081,9 +2121,6 @@ def _(parser: ArgParser):
 @commands.register('database', 'site', 'to-puppet',
                    help='Dump site in puppet.hpc YAML format')
 def write_to_puppet(args: argparse.Namespace):
-    logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
-
     puppet_map = site_to_puppet(args.site)
     puppet_map.save_yaml(args.puppet_yaml)
 
@@ -2097,8 +2134,6 @@ def _(parser: ArgParser):
 @commands.register('database', 'site', 'sync-old-puppet',
                     help='Fully sync site from database to puppet.hpc YAML repo')
 def sync_old_puppet(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
     site = Site.objects.get(sitename=args.site)
     repo = GitRepo(args.repo, base_branch=args.base_branch)
     prefix = (args.repo / 'domains' / site.fqdn).absolute()
@@ -2143,7 +2178,6 @@ def _(parser: ArgParser):
 @commands.register('database', 'site', 'to-sympa',
                    help='Dump site emails in Sympa format')
 def site_write_sympa(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     _site_write_sympa(args.site, args.output_txt, set(args.ignore))
 
 
@@ -2162,9 +2196,8 @@ def _site_write_sympa(sitename: str, output: Path, ignore: set):
 
 
 @site_args.apply(required=True)
-@commands.register('datanase', 'site', 'root-key')
+@commands.register('database', 'site', 'root-key')
 def site_write_root_key(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     _site_write_root_key(args.site, args.output_txt)
 
 
@@ -2188,8 +2221,6 @@ def _site_write_root_key(sitename: str, output: Path):
 @commands.register('database', 'site', 'sync-new-puppet',
                    help='Sync to new puppet.hpc format')
 def site_sync_new_puppet(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
     site = Site.objects.get(sitename=args.site)
     repo = GitRepo(args.repo)
     prefix = (args.repo / 'domains' / site.fqdn).absolute()
@@ -2218,8 +2249,6 @@ def _(parser: ArgParser):
 
 @commands.register('database', 'site', 'list')
 def site_list(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
     for site in Site.objects():
         print(site.sitename, site.fqdn)
 
@@ -2227,8 +2256,6 @@ def site_list(args: argparse.Namespace):
 @site_args.apply(required=True)
 @commands.register('database', 'site', 'show')
 def site_show(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
     site = Site.objects.get(sitename=args.site)
     console = Console()
     console.print(site.fqdn)
@@ -2258,7 +2285,6 @@ def cmd_site_from_puppet(args: argparse.Namespace):
                          key_dir=args.key_dir,
                          load=False)
     nfs_data = puppet_merge(*(parse_yaml(f) for f in args.nfs_yamls)).get('nfs', None)
-    connect_to_database(args.config.mongo)
 
     with site_data.lock(args.timeout):
         site_data.load()
@@ -2471,9 +2497,22 @@ def cmd_site_from_puppet(args: argparse.Namespace):
 #########################################
 
 
+@commands.register('database', 'user',
+                   aliases=['u'],
+                   help='Operations on users')
+def user_cmd(args: argparse.Namespace):
+    pass
+
+
 @arggroup('User')
-def user_args(parser: ArgParser, required: bool = False):
-    parser.add_argument('--user', '-u', nargs='+', required=required)
+def user_args(parser: ArgParser,
+              required: bool = False,
+              single: bool = False):
+    args = ('--user', '-u')
+    if single:
+        parser.add_argument(*args, required=required)
+    else:
+        parser.add_argument(*args, nargs='+', required=required)
 
 
 def process_user_args(args: argparse.Namespace):
@@ -2511,11 +2550,11 @@ def _show_user(user: User, verbose: bool = False) -> dict:
 
 
 @site_args.apply(required=True)
+@user_args.apply()
 @commands.register('database', 'user', 'show',
                    help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
 def user_show(args: Namespace):
     logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
 
     users: list[User] = []
 
@@ -2561,7 +2600,6 @@ def user_show(args: Namespace):
 
 @user_show.args()
 def _(parser: ArgParser):
-    parser.add_argument('--username', '-u', help='Show the specific user')
     parser.add_argument('--uid', type=int, help='Show the user with the specified UID')
     parser.add_argument('--type', '-t', nargs='+',
                         help=f'Show users of these types. Options: {USER_TYPES}')
@@ -2582,7 +2620,6 @@ def _(parser: ArgParser):
 @commands.register('database', 'user', 'new-system',
                    help='Create a new system user within the system ID range on the provided sites')
 def user_new_system(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     if args.fullname is None:
@@ -2621,7 +2658,6 @@ def _(parser: ArgParser):
                    help='Set the status for a user, globally or per-site if --site is provided')
 def user_set_status(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
 
     for username in args.user:
         try:
@@ -2637,16 +2673,9 @@ def _(parser: ArgParser):
     parser.add_argument('--reason', '-r', required=True)
 
 
-def add_user_password_args(parser: argparse.ArgumentParser):
-    parser.add_argument('-u', '--user', required=True)
-    parser.add_argument('-p', '--password', required=True)
-
-
-@subcommand('set-password',
-            add_user_password_args,
-            help='Set a (plaintext) password for a user; hashes it with yescrypt.')
-def cmd_user_set_password(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
+@commands.register('database', 'user', 'set-password',
+                   help='Set a (plaintext) password for a user; hashes it with yescrypt.')
+def set_password(args: argparse.Namespace):
     hasher = get_mcf_hasher()
     console = Console()
 
@@ -2661,12 +2690,16 @@ def cmd_user_set_password(args: argparse.Namespace):
         return ExitCode.DOES_NOT_EXIST
 
 
-@subcommand('generate-passwords',
-            add_user_args,
-            lambda p: p.add_argument('--file', type=Path, default='/dev/stdout'),
-            help='Generate passwords for the given users and output the results in CSV')
-def cmd_user_generate_passwords(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
+@set_password.args()
+def password_args(parser: ArgParser):
+    parser.add_argument('-u', '--user', required=True)
+    parser.add_argument('-p', '--password', required=True)
+
+
+@user_args.apply(required=True)
+@commands.register('database', 'user', 'generate-passwords',
+                   help='Generate passwords for the given users and output the results in CSV')
+def generate_passwords(args: argparse.Namespace):
     console = Console()
     hasher = get_mcf_hasher()
 
@@ -2681,46 +2714,48 @@ def cmd_user_generate_passwords(args: argparse.Namespace):
                 fp.write(f'{user} {password}\n')
 
 
-def add_user_access_args(parser: argparse.ArgumentParser):
+@generate_passwords.args()
+def _(parser: ArgParser):
+    parser.add_argument('--file', type=Path, default='/dev/stdout')
+
+
+
+@arggroup()
+def access_args(parser: ArgParser):
     parser.add_argument('access', choices=list(ACCESS_TYPES))
 
 
-@subcommand('add-access',
-            add_user_access_args,
-            add_user_args,
-            add_site_args,
-            help='Add an access type to user(s), globally or per-site if --site is provided')
-def cmd_user_add_access(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
+@site_args.apply()
+@user_args.apply(required=True)
+@access_args.apply()
+@commands.register('database', 'user', 'add-access',
+                   help='Add an access type to user(s), globally or per-site if --site is provided')
+def user_add_access(args: argparse.Namespace):
     for user in process_user_args(args):
         add_user_access(user, args.access)
 
 
-@subcommand('remove-access',
-            add_user_access_args,
-            add_user_args,
-            add_site_args,
-            help='Remove an access type from user(s), globally or per-site if --site is provided')
-def cmd_user_remove_access(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-
+@user_args.apply(required=True)
+@site_args.apply()
+@access_args.apply()
+@commands.register('database', 'user', 'remove-access',
+                   help='Remove an access type from user(s), globally or per-site if --site is provided')
+def user_remove_access(args: argparse.Namespace):
     for user in process_user_args(args):
         remove_user_access(user, args.access)
 
 
-def add_user_type_args(parser: argparse.ArgumentParser):
+@arggroup()
+def user_type_args(parser: ArgParser):
     parser.add_argument('type', choices=list(USER_TYPES))
 
 
-@subcommand('set-type',
-            add_user_args,
-            add_user_type_args,
-            help='Set the type of user(s)')
-def cmd_user_set_type(args: argparse.Namespace):
+@user_args.apply(required=True)
+@user_type_args.apply()
+@commands.register('database', 'user', 'set-type',
+                   help='Set the type of user(s)')
+def user_set_type(args: Namespace):
     logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
-
     for user in args.user:
         try:
             set_user_type(user, args.type)
@@ -2728,16 +2763,12 @@ def cmd_user_set_type(args: argparse.Namespace):
             logger.info(f'User {args.username} does not exist.')
 
 
-def add_user_membership_args(parser: argparse.ArgumentParser):
-    parser.add_argument('users', nargs='+')
 
-
-@subcommand('groups',
-            add_user_args,
-            add_site_args_req,
-            help='Output the user(s) group memberships in YAML format')
+@user_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'user', 'groups',
+                   help='Output the user(s) group memberships in YAML format')
 def cmd_user_groups(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     output = {}
@@ -2753,93 +2784,122 @@ def cmd_user_groups(args: argparse.Namespace):
 #
 #########################################
 
+@commands.register('database', 'group',
+                   aliases=['g', 'grp'],
+                   help='Operations on groups')
+def group_cmd(args: argparse.Namespace):
+    pass
 
-def add_show_group_args(parser: argparse.ArgumentParser):
-    parser.add_argument('groupname')
+
+@arggroup('Group')
+def group_args(parser: ArgParser,
+               required: bool = False,
+               single: bool = False):
+    args = ('--groups', '-g')
+    if single:
+        parser.add_argument(*args, required=required)
+    else:
+        parser.add_argument(*args, nargs='+', required=required)
 
 
-@subcommand('show', add_show_group_args, add_site_args)
-def cmd_group_show(args: argparse.Namespace):
+@group_args.apply(required=True, single=True)
+@site_args.apply()
+@commands.register('database', 'group', 'show',
+                   help='Show group data.')
+def group_show(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
 
     try:
         if args.site is not None:
-            group = SiteGroup.objects.get(groupname=args.groupname, sitename=args.site)
+            group = SiteGroup.objects.get(groupname=args.groups, sitename=args.site)
         else:
-            group = GlobalGroup.objects.get(groupname=args.groupname)
+            group = GlobalGroup.objects.get(groupname=args.groups)
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
-        logger.info(f'Group {args.groupname} with scope {scope} does not exist.')
+        logger.info(f'Group {args.group} with scope {scope} does not exist.')
     else:
         console = Console()
         output = group.pretty()
         console.print(highlight_yaml(output))
 
 
-def add_group_add_member_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--users', '-u', nargs='+', required=True)
-    parser.add_argument('--groups', '-g', nargs='+', required=True)
-
-
-@subcommand('add-member', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@user_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'group', 'add-member',
+                   help='Add user(s) to group(s)')
 def cmd_group_add_member(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_members')
 
 
-@subcommand('remove-member', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@user_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'group', 'remove-member',
+                   help='Remove user(s) from group(s)')
 def cmd_group_remove_member(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_members')
 
 
-@subcommand('add-sponsor', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'add-sponsor',
+                   help='Add user(s) to group(s) as sponsors')
 def cmd_group_add_sponsor(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_sponsors')
 
 
-@subcommand('remove-sponsor', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'remove-sponsor',
+                   help='Remove user(s) from group(s) as sponsors')
 def cmd_group_remove_sponsor(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_sponsors')
 
 
-@subcommand('add-sudoer', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'add-sudoer',
+                   help='Add user(s) to group(s) as sudoers')
 def cmd_group_add_sudoer(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_sudoers')
 
 
-@subcommand('remove-sudoer', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'remove-sudoer',
+                   help='Remove user(s) from group(s) as sudoers')
 def cmd_group_remove_sudoer(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_sudoers')
 
 
-@subcommand('add-slurmer', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'add-slurmer',
+                   help='Add user(s) to group(s) as slurmers')
 def cmd_group_add_slurmer(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_add_user_element(args.site, args.groups, args.users, '_slurmers')
 
 
-@subcommand('remove-slurmer', add_group_add_member_args, add_site_args_req)
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'group', 'remove-slurmer',
+                   help='Remove user(s) from group(s) as slurmers')
 def cmd_group_remove_slurmer(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_remove_user_element(args.site, args.groups, args.users, '_slurmers')
 
 
-def add_group_new_system_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--sites', nargs='+', default='all')
-    parser.add_argument('groupname')
-
-
-@subcommand('new-system',
-            add_group_new_system_args,
-            help='Create a new system group within the system ID range on the provided sites')
+@group_args.apply(required=True, single=True)
+@site_args.apply(single=False)
+@commands.register('database', 'group', 'new-system',
+                   help='Create a new system group within the system ID range on the provided sites')
 def cmd_group_new_system(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     if args.sites == 'all':
@@ -2847,20 +2907,19 @@ def cmd_group_new_system(args: argparse.Namespace):
     else:
         sites = args.sites
 
-    create_system_group(args.groupname, sitenames=sites)
+    create_system_group(args.group, sitenames=sites)
 
 
-def add_group_new_class_args(parser: argparse.ArgumentParser):
-    parser.add_argument('--sponsors', nargs='+', required=True)
-    parser.add_argument('groupname')
+@arggroup()
+def sponsor_args(parser: ArgParser, required: bool = False):
+    parser.add_argument('--sponsors', nargs='+', required=required)
 
 
-@subcommand('new-class',
-            add_site_args_req,
-            add_group_new_class_args,
-            help='Create a new class group within the class ID range and add instructors as sponsors')
+@site_args.apply(required=True)
+@sponsor_args.apply(required=True)
+@commands.register('database', 'group', 'new-class',
+                   help='Create a new class group within the class ID range and add instructors as sponsors')
 def cmd_group_new_class(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     group : SiteGroup = create_class_group(args.groupname, args.site)
@@ -2874,12 +2933,11 @@ def cmd_group_new_class(args: argparse.Namespace):
     console.print(group.pretty())
 
 
-@subcommand('new-lab',
-            add_site_args_req,
-            add_group_new_class_args,
-            help='Manually create a new lab group.')
+@site_args.apply(required=True)
+@sponsor_args.apply(required=True)
+@commands.register('database', 'group', 'new-lab',
+                   help='Create a new lab group')
 def cmd_group_new_lab(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     group : SiteGroup = create_lab_group(args.groupname, sitename=args.site)
@@ -2899,23 +2957,27 @@ def cmd_group_new_lab(args: argparse.Namespace):
 #
 #########################################
 
-
-def add_slurm_qos_args(parser: argparse.ArgumentParser):
-    group = parser.add_argument_group('QOS')
-    group.add_argument('--group-limits', '-g', type=regex_argtype(QOS_TRES_REGEX))
-    group.add_argument('--user-limits', '-u', type=regex_argtype(QOS_TRES_REGEX))
-    group.add_argument('--job-limits', '-j', type=regex_argtype(QOS_TRES_REGEX))
-    group.add_argument('--priority', default=0, type=int)
-    group.add_argument('--flags', nargs='+')
-    group.add_argument('--qosname', '-n', required=True)
+@commands.register('database', 'slurm',
+                   help='Operations on Slurm')
+def slurm_cmd(args: argparse.Namespace):
+    pass
 
 
-@subcommand('qos',
-            add_site_args_req,
-            add_slurm_qos_args,
-            help='Create a new QOS')
+@arggroup('Slurm QOS')
+def slurm_qos_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--group-limits', '-g', type=regex_argtype(QOS_TRES_REGEX))
+    parser.add_argument('--user-limits', '-u', type=regex_argtype(QOS_TRES_REGEX))
+    parser.add_argument('--job-limits', '-j', type=regex_argtype(QOS_TRES_REGEX))
+    parser.add_argument('--priority', default=0, type=int)
+    parser.add_argument('--flags', nargs='+')
+    parser.add_argument('--qosname', '-n', required=True)
+
+
+@site_args.apply(required=True)
+@slurm_qos_args.apply()
+@commands.register('database', 'slurm', 'new', 'qos',
+                   help='Create a new QOS')
 def cmd_slurm_new_qos(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
     user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
     job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
@@ -2934,19 +2996,18 @@ def cmd_slurm_new_qos(args: argparse.Namespace):
     console.print(highlight_yaml(qos.pretty()))
 
 
-def add_slurm_assoc_args(parser: argparse.ArgumentParser):
-    group = parser.add_argument_group('Association')
-    group.add_argument('--group', '-g', required=True)
-    group.add_argument('--partition', '-p', required=True)
-    group.add_argument('--qos', '-q', required=True)
+@arggroup('Slurm Association')
+def slurm_assoc_args(parser: argparse.ArgumentParser):
+    parser.add_argument('--group', '-g', required=True)
+    parser.add_argument('--partition', '-p', required=True)
+    parser.add_argument('--qos', '-q', required=True)
 
 
-@subcommand('assoc',
-            add_site_args_req,
-            add_slurm_assoc_args,
-            help='Create a new association')
+@site_args.apply(required=True)
+@slurm_assoc_args.apply()
+@commands.register('database', 'slurm', 'new', 'assoc',
+                   help='Create a new association')
 def cmd_slurm_new_assoc(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     query_site_exists(args.site, raise_exc=True)
     console = Console()
 
@@ -2975,7 +3036,15 @@ def cmd_slurm_new_assoc(args: argparse.Namespace):
 #########################################
 
 
-def add_storage_query_args(parser: argparse.ArgumentParser):
+@commands.register('database', 'storage',
+                   aliases=['st', 'store'],
+                   help='Operations on storage')
+def storage_cmd(args: argparse.Namespace):
+    pass
+
+
+@arggroup('Storage')
+def storage_query_args(parser: argparse.ArgumentParser):
     group = parser.add_mutually_exclusive_group()
     group.add_argument('--user', '-u')
     group.add_argument('--group', '-g')
@@ -2986,11 +3055,11 @@ def add_storage_query_args(parser: argparse.ArgumentParser):
     
 
 
-@subcommand('show',
-            add_site_args_req,
-            add_storage_query_args)
+@site_args.apply(required=True)
+@storage_query_args.apply()
+@commands.register('database', 'storage', 'show',
+                   help='Show storage information')
 def cmd_storage_show(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     console = Console()
 
     storages : List[Storage] = []
@@ -3017,7 +3086,8 @@ def cmd_storage_show(args: argparse.Namespace):
         console.print(highlight_yaml(storage.pretty()))
 
 
-def add_add_storage_args(parser: argparse.ArgumentParser):
+@arggroup('Storage')
+def new_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--name', required=True)
     parser.add_argument('--owner', required=True)
     parser.add_argument('--group', required=True)
@@ -3032,13 +3102,12 @@ def add_add_storage_args(parser: argparse.ArgumentParser):
     parser.add_argument('--globus', type=bool, default=False)
 
 
-@subcommand('storage',
-            add_site_args_req,
-            add_add_storage_args,
-            help='Create a new Storage (source and mount)')
+@new_storage_args.apply()
+@site_args.apply(required=True)
+@commands.register('database', 'storage', 'new', 'storage',
+                   help='Create a new Storage (source and mount)')
 def cmd_storage_new_storage(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
-    connect_to_database(args.config.mongo)
 
     if args.collection is None:
         args.collection = args.table
@@ -3089,8 +3158,8 @@ def cmd_storage_new_storage(args: argparse.Namespace):
     storage.save()
 
 
-def add_collection_args(parser: argparse.ArgumentParser, required: bool = False):
-    add_site_args_req(parser)
+@arggroup('Collection')
+def collection_args(parser: argparse.ArgumentParser, required: bool = False):
     parser.add_argument('--host', required=required)
     parser.add_argument('--prefix', required=required)
     parser.add_argument('--quota', required=required, type=regex_argtype(DATA_QUOTA_REGEX))
@@ -3099,18 +3168,13 @@ def add_collection_args(parser: argparse.ArgumentParser, required: bool = False)
     parser.add_argument('--clone', default=None, help='Clone the existing named collection')
 
 
-def add_new_collection_args(parser: argparse.ArgumentParser):
-    add_collection_args(parser)
-    parser.add_argument('--name', required=True)
-
-
-@subcommand('collection',
-            add_new_collection_args,
-            help='Create a new storage Collection')
-def cmd_storage_new_collection(args: argparse.Namespace):
+@collection_args.apply()
+@site_args.apply(required=True)
+@commands.register('database', 'storage', 'new', 'collection',
+                   help='Create a new storage Collection')
+def cmd_new_collection(args: argparse.Namespace):
     logger = logging.getLogger(__name__)
     console = Console()
-    connect_to_database(args.config.mongo)
     query_site_exists(args.site, raise_exc=True)
     col_opts = ['prefix', 'host', 'quota', 'options', 'ranges']
 
@@ -3144,13 +3208,21 @@ def cmd_storage_new_collection(args: argparse.Namespace):
     console.print(highlight_yaml(collection.pretty()))
 
 
+@cmd_new_collection.args()
+def _(parser: argparse.ArgumentParser):
+    parser.add_argument('--name', required=True)
 
-@subcommand('to-puppet',
-            add_site_args_req, 
-            lambda parser: parser.add_argument('puppet_yaml', type=Path))
+
+@site_args.apply(required=True)
+@commands.register('database', 'storage', 'to-puppet',
+                   help='Output storage data to Puppet YAML')
 def cmd_storage_to_puppet(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
     _storage_to_puppet(args.site, args.puppet_yaml)
+
+
+@cmd_storage_to_puppet.args()
+def _(parser: argparse.ArgumentParser):
+    parser.add_argument('puppet_yaml', type=Path)
 
 
 def _storage_to_puppet(sitename: str, output: Path):
@@ -3197,7 +3269,6 @@ def _storage_to_puppet(sitename: str, output: Path):
 
 
 def ldap_sync(sitename: str, config: Config, force: bool = False):
-    connect_to_database(config.mongo)
     ldap_mgr = LDAPManager(config.ldap, pool_keepalive=15, pool_lifetime=30)
     site = Site.objects.get(sitename=sitename)
 
