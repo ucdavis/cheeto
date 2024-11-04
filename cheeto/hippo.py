@@ -17,31 +17,29 @@ from typing import Optional, List
 
 from rich.console import Console
 
-from .args import commands, ArgParser, arggroup
 from .config import HippoConfig
-from .database import (add_group_member, add_user_access, connect_to_database,
+from .database import (add_group_member,
+                       add_user_access,
                        GlobalUser,
                        SiteUser,
                        GlobalGroup,
                        SiteGroup,
-                       HippoEvent, create_group_from_sponsor, create_home_storage, query_user_exists, set_user_status)
-
-from .errors import ExitCode
+                       HippoEvent,
+                       create_group_from_sponsor,
+                       create_home_storage,
+                       query_user_exists, 
+                       set_user_status)
 from .hippoapi.api.event_queue import (event_queue_pending_events,
                                        event_queue_update_status)
 from .hippoapi.client import AuthenticatedClient
-from .hippoapi.models import (QueuedEventAccountModel,
-                              QueuedEventModel,
+from .hippoapi.models import (QueuedEventModel,
                               QueuedEventDataModel,
                               QueuedEventUpdateModel)
-
+from .templating import PKG_TEMPLATES
 from .types import *
 from .utils import (_ctx_name,
                     human_timestamp,
-                    require_kwargs,
-                    TIMESTAMP_NOW,
-                    sanitize_timestamp)
-
+                    TIMESTAMP_NOW)
 
 
 def hippoapi_client(config: HippoConfig, quiet: bool = False):
@@ -62,50 +60,6 @@ class HippoEventHandler:
     event_name : str = 'Null'
 
     
-
-#########################################
-#
-# hippoapi commands: cheeto database hippoapi ...
-#
-#########################################
-
-
-@arggroup('HiPPO API', desc='HiPPO API event arguments')
-def event_args(parser: ArgParser):
-    parser.add_argument('--post-back', '-p', default=False, action='store_true')
-    parser.add_argument('--id', default=None, dest='event_id', type=int)
-    parser.add_argument('--type', choices=list(HIPPO_EVENT_ACTIONS))
-
-
-@event_args.apply()
-@commands.register('hippo', 'process',
-                   help='Process Events from HiPPO API')
-def cmd_hippoapi_process(args: argparse.Namespace):
-    connect_to_database(args.config.mongo)
-    console = Console()
-    process_hippoapi_events(args.config.hippo,
-                            event_type=args.type,
-                            event_id=args.event_id,
-                            post_back=args.post_back)
-
-
-@event_args.apply()
-@commands.register('hippo', 'events',
-                   help='List HiPPO event queue')
-def cmd_hippoapi_events(args: argparse.Namespace):
-    logger = logging.getLogger(__name__)
-    console = Console()
-    connect_to_database(args.config.mongo)
-    with hippoapi_client(args.config.hippo) as client:
-        events = event_queue_pending_events.sync(client=client)
-   
-    if not events:
-        return
-
-    for event in filter_events(events, event_type=args.type, event_id=args.event_id):
-        console.print(event)
-
-
 def filter_events(events: List[QueuedEventModel],
                   event_type: Optional[str] = None,
                   event_id: Optional[str] = None):
@@ -118,9 +72,6 @@ def filter_events(events: List[QueuedEventModel],
                 yield event
             elif event.action == event_type:
                 yield event
-
-
-
 
 
 def process_hippoapi_events(config: HippoConfig,

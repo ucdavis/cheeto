@@ -16,7 +16,7 @@ packages = [
 ]
 
 [tool.poetry.scripts]
-cheeto = "cheeto.__main__:main"
+cheeto = "cheeto.cmds.__main__:main"
 
 [tool.poetry.group.dev]
 optional = true

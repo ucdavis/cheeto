@@ -11,12 +11,9 @@
 
 
 from argparse import (Action,
-                      ArgumentTypeError,
-                      RawDescriptionHelpFormatter)
+                      ArgumentTypeError)
 from enum import Enum
 import re
-
-from ponderosa import CmdTree, ArgParser, arggroup
 
 from . import __version__
 from .templating import PKG_TEMPLATES
@@ -69,8 +66,3 @@ class EnumAction(Action):
         # Convert value back into an Enum
         enum = self._enum[values]
         setattr(namespace, self.dest, enum)
-
-
-commands = CmdTree(description=banner,
-                   formatter_class=RawDescriptionHelpFormatter)
-

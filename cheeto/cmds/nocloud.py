@@ -12,9 +12,10 @@ from argparse import Namespace
 from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader
+from ponderosa import ArgParser
 
-from .args import commands, ArgParser, arggroup
-from .yaml import parse_yaml, puppet_merge
+from . import commands
+from ..yaml import parse_yaml, puppet_merge
 
 
 @commands.register('nocloud', 'render',
