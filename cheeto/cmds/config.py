@@ -29,8 +29,14 @@ from ..errors import ExitCode
 def common_args(parser: ArgParser):
     parser.add_argument('--log',
                        type=Path,
-                       default=Path(os.devnull),
-                       help='Log to file.')
+                       nargs='?',
+                       default=None,
+                       const=Path('/dev/stderr'),
+                       help='Activate logger, either to stderr (just --log) or to a file (--log <file>)')
+    parser.add_argument('--log-level',
+                        default='WARNING',
+                        choices=list(logging.getLevelNamesMapping().keys()),
+                        help='Set the log level')
     parser.add_argument('--quiet', '-q',
                        default=False,
                        action='store_true')
@@ -58,12 +64,19 @@ def parse_config(args: Namespace):
         #print("Testing right now, don't use prod", file=sys.stderr)
         #sys.exit(1)
 
+@common_args.postprocessor(priority=-100)
+def separator(args: Namespace):
+    if not args.quiet:
+        console = log.Console(stderr=True)
+        console.rule(style='[green]')
+
 
 @common_args.postprocessor(priority=200)
 def setup_log(args: Namespace):
-    if args.log:
+    if args.log is not None:
         log_file = args.log.open('a')
-        log.setup(log_file, quiet=args.quiet)
+        log.setup(log_file, level=logging.getLevelNamesMapping()[args.log_level])
+        logging.getLogger(__name__).info(f'Logging to {args.log}')
         
         def close():
             if log_file and not log_file.closed:
