@@ -7,12 +7,11 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 17.02.2023
 
-import argparse
 from dataclasses import is_dataclass
 from datetime import datetime
-from enum import Enum
 import inspect
 from pathlib import Path
+import re
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
 
@@ -59,6 +58,10 @@ def removed(d: dict, key: Any):
 
 def _ctx_name():
     return inspect.stack()[1].function
+
+
+def slugify(s: str) -> str:
+    return re.sub(r'[^\w]+', '-', s).strip('-').lower()
 
 
 def make_ngrams(word: str,

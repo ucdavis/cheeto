@@ -7,15 +7,12 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 23.05.2023
 
+from enum import Enum
 import logging
 from typing import TextIO
 
 from rich.console import Console as _Console
 from rich.logging import RichHandler
-
-
-def Console(*args, **kwargs):
-    return _Console(*args, soft_wrap=True, **kwargs)
 
 
 def setup(log_file: TextIO,
@@ -27,3 +24,32 @@ def setup(log_file: TextIO,
         handlers=[RichHandler(console=Console(file=log_file))]
     )
 
+
+class Emotes(Enum):
+    ERROR = '💀'
+    WARN = '🚩'
+    INFO = '🔔'
+    DEBUG = '🐛'
+    SUCCESS = '✅'
+    FAIL = '❌'
+    WAIT = '⏳'
+    DONE = '🎉'
+    STOP = '🛑'
+    START = '🏁'
+    QUESTION = '❓'
+    EXCLAMATION = '❗'
+
+
+class Console(_Console):
+
+    def __init__(self, *args, stderr=True, **kwargs):
+        super().__init__(*args, soft_wrap=True, stderr=stderr, **kwargs)
+
+    def error(self, *args, **kwargs):
+        self.print(Emotes.ERROR.value, *args, style='italic bold red', **kwargs)
+
+    def warn(self, *args, **kwargs):
+        self.print(Emotes.WARN.value, *args, style='italic dark_orange', **kwargs)
+
+    def info(self, *args, **kwargs):
+        self.print(Emotes.INFO.value, *args, style='italic blue', **kwargs)

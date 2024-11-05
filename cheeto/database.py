@@ -15,8 +15,9 @@ from operator import attrgetter
 from pathlib import Path
 import statistics as stat
 
-from typing import List, Optional, no_type_check, Self, Union
+from typing import List, Mapping, Optional, no_type_check, Self, Union
 
+from bson.dbref import DBRef
 import pyescrypt
 from mongoengine import *
 from mongoengine import signals
@@ -50,7 +51,7 @@ from .types import (DATA_QUOTA_REGEX, DEFAULT_SHELL,
                     USER_TYPES,
                     USER_STATUSES, 
                     ACCESS_TYPES,
-                    SlurmQOSValidFlags, parse_qos_tres)
+                    SlurmQOSValidFlags, is_listlike, parse_qos_tres)
 from .utils import (TIMESTAMP_NOW,
                     __pkg_dir__,
                     _ctx_name, make_ngrams, 
@@ -161,9 +162,64 @@ class BaseDocument(Document):
     def __repr__(self):
         return dumps_yaml(self.to_dict(raw=True, strip_id=False, strip_empty=False))
 
-    def pretty(self) -> str:
-        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
-        return dumps_yaml(data)
+    def _pretty(self, formatters: Mapping[str, str] | None = None,
+                      lift: list[str] | None = None,
+                      skip: tuple | None = None,
+                      order: list[str] | None = None) -> str:
+        if formatters is None:
+            formatters = {}
+        if skip is None:
+            skip = tuple()
+        data = apply_formatters(self, formatters, skip)
+        if lift:
+            lift_values(data, lift)
+        if order is None:
+            order = []
+        _data = {key: data[key] for key in order if key in data}
+        _data.update({key: data[key] for key in sorted(data.keys()) if key not in order})
+        return _data
+
+    def pretty(self, formatters: Mapping[str, str] | None = None,
+                     lift: list[str] | None = None,
+                     skip: tuple | None = None,
+                     order: list[str] | None = None) -> str:
+        return dumps_yaml(self._pretty(formatters=formatters,
+                                       lift=lift,
+                                       skip=skip,
+                                       order=order))
+
+
+def apply_formatters(doc: BaseDocument,
+                     formatters: Mapping[str, str],
+                     skip: tuple) -> dict:
+    formatted = {}
+    for key in doc._data.keys():
+        if key in skip or key in ('_id', 'id'):
+            continue
+        value = getattr(doc, key)
+        if is_listlike(value):
+            value = list(value)
+        if value is not False and not value:
+            formatted[key] = None
+        elif key in formatters:
+            if is_listlike(value):
+                formatted[key] = sorted([formatters[key].format(data=d) for d in value])
+            else:
+                formatted[key] = formatters[key].format(data=value)
+        elif key not in formatters and isinstance(value, (BaseDocument, EmbeddedDocument)):
+            formatted[key] = apply_formatters(value, formatters, skip)
+        else:
+            formatted[key] = value
+    return {key.lstrip('_'): value for key, value in formatted.items() if value is not None}
+
+
+def lift_values(data: dict, keys: list[str]) -> list:
+    for to_lift in keys:
+        if to_lift in data and isinstance(data[to_lift], dict):
+            for key, value in data[to_lift].items():
+                if key not in data:
+                    data[key] = value
+            del data[to_lift]
 
 
 class SyncQuerySet(QuerySet):
@@ -295,9 +351,10 @@ class GlobalUser(BaseDocument):
             access = hippo_to_cheeto_access(hippo_data.access_types) #type: ignore
         )
 
-    #@property
-    #def home_directory(self):
-    #    return f'/home/{self.username}'
+    def _pretty(self, *args, **kwargs):
+        if 'order' not in kwargs:
+            kwargs['order'] = ['username', 'email', 'fullname', 'uid', 'gid', 'type', 'status', 'access']
+        return super()._pretty(*args, **kwargs)
 
 
 class UserSearch(BaseDocument):
@@ -450,6 +507,11 @@ class SiteUser(BaseDocument):
         if not raw:
             data['parent'] = self.parent.to_dict(strip_id=strip_id, raw=raw, strip_empty=strip_empty, **kwargs) #type: ignore
         return data
+    
+    def _pretty(self, *args, **kwargs):
+        if 'order' not in kwargs:
+            kwargs['order'] = ['username', 'email', 'fullname', 'uid', 'gid', 'type', 'status', 'access']
+        return super()._pretty(*args, **kwargs)
 
 
 site_user_t = SiteUser | str
@@ -665,19 +727,19 @@ class SiteGroup(BaseDocument):
 
     @property
     def members(self):
-        return {m.username for m in self._members} #type: ignore
+        return sorted({m.username for m in self._members}) #type: ignore
 
     @property
     def sponsors(self):
-        return {s.username for s in self._sponsors} #type: ignore
+        return sorted({s.username for s in self._sponsors}) #type: ignore
 
     @property
     def sudoers(self):
-        return {s.username for s in self._sudoers} #type: ignore
+        return sorted({s.username for s in self._sudoers}) #type: ignore
 
     @property
     def slurmers(self):
-        return {s.username for s in self._slurmers} #type: ignore
+        return sorted({s.username for s in self._slurmers}) #type: ignore
 
     @classmethod
     def from_puppet(cls, groupname: str,
@@ -698,7 +760,7 @@ class SiteGroup(BaseDocument):
             data['parent'] = self.parent.to_dict(raw=False) #type: ignore
             data.pop('_members', None)
             if 'members' in data:
-                data['members'] = self.members
+                data['members'] = self.members #type: ignore
             data.pop('_sponsors', None)
             if 'sponsors' in data:
                 data['sponsors'] = self.sponsors
@@ -709,31 +771,16 @@ class SiteGroup(BaseDocument):
             if 'slurmers' in data:
                 data['slurmers'] = self.slurmers
         return data
-
-    def pretty(self):
-        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
-        for key, value in data['parent'].items():
-            if key not in data:
-                data[key] = value
-        del data['parent']
-        
-        out = {}
-        out['groupname'] = data['groupname']
-        out['sitename'] = data['sitename']
-        out['gid'] = data['gid']
-        out['type' ] = data['type']
-        if 'slurm' in data:
-            out['slurm'] = data['slurm']
-        if 'members' in data:
-            out['members'] = data['members']
-        if 'sponsors' in data:
-            out['sponsors'] = data['sponsors']
-
-        for key, value in data.items():
-            if key not in out:
-                out[key] = value
-
-        return dumps_yaml(out)
+    
+    def _pretty(self, *args, **kwargs):
+        formatters = {'_members': '{data.username}',
+                      '_sponsors': '{data.username}',
+                      '_sudoers': '{data.username}',
+                      '_slurmers': '{data.username}'}
+        if 'formatters' in kwargs:
+            formatters.update(kwargs['formatters'])
+        kwargs['formatters'] = formatters
+        return super()._pretty(*args, **kwargs)
 
 
 site_group_t = Union[SiteGroup, str]
@@ -1065,8 +1112,8 @@ def query_sitename(site: str):
         return site
 
 
-def query_user(username: str | None = None,
-               uid: int | None = None,
+def query_user(username: str | list[str] | None = None,
+               uid: int | list[int] | None = None,
                sitename: str | None = None) -> User:
     kwargs = {}
     if username is not None:
@@ -1365,10 +1412,10 @@ def group_add_user_element(sitename: str,
     logger = logging.getLogger(__name__)
     groups = list(handle_site_groups(sitename, groups))
     users = list(handle_site_users(sitename, users))
-    logger.info(groups)
-    logger.info(users)
+    #logger.info(groups)
+    #logger.info(users)
     for group in groups:
-        logger.info(f'{_ctx_name()}: {group.groupname}: add {list(map(attrgetter("username"), users))} to {field}')
+        logger.info(f'{group.groupname}: add {list(map(attrgetter("username"), users))} to {field}')
         group.update(**{f'add_to_set__{field}': users})
 
 
@@ -1380,7 +1427,7 @@ def group_remove_user_element(sitename: str,
     groups = handle_site_groups(sitename, groups)
     users = list(handle_site_users(sitename, users))
     for group in groups:
-        logger.info(f'{_ctx_name()}: {group.groupname}: remove {list(map(attrgetter("username"), users))} from {field}')
+        logger.info(f'{group.groupname}: remove {list(map(attrgetter("username"), users))} from {field}')
         group.update(**{f'pull_all__{field}': users})
 
 
@@ -1598,12 +1645,28 @@ def create_system_user(username: str,
                 access=['login-ssh', 'compute-ssh'])
 
 
+def create_class_user(username: str,
+                      email: str,
+                      fullname: str,
+                      password: str | None = None,
+                      sitename: str | None = None):
+    uid = get_next_class_id()
+    create_user(username,
+                email,
+                uid,
+                fullname,
+                type='class',
+                password=password,
+                access=['login-ssh', 'compute-ssh'],
+                sitenames=[sitename])
+
+
 def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
     logger = logging.getLogger(__name__)
     global_group = GlobalGroup(groupname=groupname,
                                type='system',
                                gid=get_next_system_id())
-    global_group.save()
+    global_group.save(force_insert=True)
     logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
 
     if sitenames is not None:

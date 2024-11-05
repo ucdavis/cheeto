@@ -60,9 +60,8 @@ def print_version(args: Namespace):
 def parse_config(args: Namespace):
     args.config = get_config(config_path=args.config, profile=args.profile)
     if 'accounts.hpc' in args.config.mongo.uri:
-        pass
-        #print("Testing right now, don't use prod", file=sys.stderr)
-        #sys.exit(1)
+        print("Testing right now, don't use prod!", file=sys.stderr)
+        sys.exit(1)
 
 @common_args.postprocessor(priority=-100)
 def separator(args: Namespace):

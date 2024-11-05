@@ -10,6 +10,7 @@
 from argparse import Namespace
 
 from ponderosa import ArgParser, arggroup
+from pymongo.errors import DuplicateKeyError
 
 from . import commands
 from .puppet import repo_args
@@ -18,8 +19,9 @@ from ..database import *
 from ..encrypt import generate_password
 from ..errors import ExitCode
 from ..git import GitRepo
+from ..log import Emotes
 from ..puppet import  SiteData
-from ..utils import _ctx_name
+from ..utils import _ctx_name, slugify
 from ..yaml import highlight_yaml, parse_yaml, puppet_merge
 
 
@@ -51,7 +53,7 @@ def site_cmd(args: Namespace):
     pass
 
 
-@arggroup('Site')
+@arggroup('site')
 def site_args(parser: ArgParser,
               required: bool = False,
               single: bool = True):
@@ -482,7 +484,7 @@ def user_cmd(args: Namespace):
     pass
 
 
-@arggroup('User')
+@arggroup('user')
 def user_args(parser: ArgParser,
               required: bool = False,
               single: bool = False):
@@ -501,11 +503,11 @@ def process_user_args(args: Namespace):
 
 
 def _show_siteuser(user: SiteUser, verbose: bool = False) -> dict:
-    user_data = user.to_dict(strip_empty=True)
-    if not verbose:
-        user_data['parent'] = removed(user_data['parent'], 'ssh_key')
-        del user_data['sitename']
-        del user_data['parent']['gid']
+    if verbose:
+        user_data = user._pretty()
+    else:
+        user_data = user._pretty(lift=['parent'],
+                                 skip=('ssh_key', 'sitename', 'password', 'iam_synced', 'gid'))
     user_data['groups'] = list(query_user_groups(user.sitename, user.username))
     if 'slurm' in user.access:
         if verbose:
@@ -517,7 +519,10 @@ def _show_siteuser(user: SiteUser, verbose: bool = False) -> dict:
 
 
 def _show_globaluser(user: GlobalUser, verbose: bool = False) -> dict:
-    user_data = user.to_dict()
+    if verbose:
+        user_data = user._pretty()
+    else:
+        user_data = user._pretty(skip=('ssh_key', 'sitename', 'password', 'iam_synced', 'gid'))
     user_data['sites'] = [su.sitename for su in SiteUser.objects(username=user.username)]
     return user_data
 
@@ -527,21 +532,22 @@ def _show_user(user: User, verbose: bool = False) -> dict:
         else _show_siteuser(user, verbose=verbose)
 
 
-@site_args.apply(required=True)
-@user_args.apply()
+@site_args.apply()
+@user_args.apply(single=True)
 @commands.register('database', 'user', 'show',
                    help='Show user data, with Slurm associations if they exist and user has `slurm` access type')
 def user_show(args: Namespace):
     logger = logging.getLogger(__name__)
+    console = Console()
 
     users: list[User] = []
 
-    if args.username:
+    if args.user:
         try:
-            users.append(query_user(username=args.username, sitename=args.site))
+            users.append(query_user(username=args.user, sitename=args.site))
         except DoesNotExist:
             scope = 'Global' if args.site is None else args.site
-            logger.info(f'User {args.username} with scope {scope} does not exist.')
+            logger.info(f'User {args.user} with scope {scope} does not exist.')
     elif args.uid:
         try:
             users.append(query_user(uid=args.uid, sitename=args.site))
@@ -557,23 +563,30 @@ def user_show(args: Namespace):
     elif args.find:
         query = ' '.join(make_ngrams(args.find))
         results = UserSearch.objects.search_text(query).only('user').order_by('$text_score')[:10]
-        if len(results) > 4:
+        if not args.no_filter and len(results) > 4:
             scores = [r.get_text_score() for r in results]
+            console.warn(f'More than 5 results for search "{args.find}", filtering...')
             mean = stat.mean(scores)
             stdev = stat.stdev(scores)
             #print(mean, stdev, scores)
             filtered = [r for r, s in zip(results, scores) if ((s - mean) / stdev) > 2]
             results = filtered if filtered else [r for r, s in zip(results, scores) if s > mean]
+        
+        if args.site:
+            users.extend(SiteUser.objects(parent__in=[r.user for r in results], sitename=args.site))
+        else:
+            users.extend((result.user for result in results))
+    else:
+        if args.site:
+            users.extend(SiteUser.objects(sitename=args.site))
 
-        users.extend((result.user for result in results))
-
-    console = Console()
     if args.list:
         console.print(' '.join((u.username for u in users)))
     else:
         for user in users:
             output = dumps_yaml(_show_user(user, verbose=args.verbose))
             console.print(highlight_yaml(output))
+            #console.print(_show_user(user, verbose=args.verbose))
 
 
 @user_show.args()
@@ -590,6 +603,8 @@ def _(parser: ArgParser):
                                              returns only results with a text score more than 2 standard
                                              deviations above the mean. If there are no such results,
                                              returns all results with text score greater than the mean.''')
+    parser.add_argument('--no-filter', action='store_true', default=False,
+                        help='Do not filter search results')
     parser.add_argument('--list', '-l', default=False, action='store_true',
                         help='Only list usernames instead of full user info')
     parser.add_argument('--verbose', action='store_true', default=False)
@@ -785,7 +800,7 @@ def group_args(parser: ArgParser,
                    help='Show group data.')
 def group_show(args: Namespace):
     logger = logging.getLogger(__name__)
-
+    console = Console()
     try:
         if args.site is not None:
             group = SiteGroup.objects.get(groupname=args.groups, sitename=args.site)
@@ -793,10 +808,12 @@ def group_show(args: Namespace):
             group = GlobalGroup.objects.get(groupname=args.groups)
     except DoesNotExist:
         scope = 'Global' if args.site is None else args.site
-        logger.info(f'Group {args.group} with scope {scope} does not exist.')
+        console.warn(f'Group {args.groups} with scope {scope} does not exist.')
     else:
-        console = Console()
-        output = group.pretty()
+        output = group.pretty(formatters={'_sponsors': '{data.username} <{data.email}>'}, 
+                              lift=['parent'], 
+                              order=['groupname', 'gid', 'type', 'members', 'sponsors', 'sudoers', 'slurmers', 'slurm'], 
+                              skip=('id', 'sitename', 'iam_synced'))
         console.print(highlight_yaml(output))
 
 
@@ -899,15 +916,65 @@ def sponsor_args(parser: ArgParser, required: bool = False):
 def cmd_group_new_class(args: Namespace):
     console = Console()
 
-    group : SiteGroup = create_class_group(args.groupname, args.site)
-    for instructor in args.sponsors:
-        if not query_user_exists(instructor, sitename=args.site):
-            console.print(f':warning: [italic dark_orange]{instructor} is not a valid user on {args.site}, skipping.')
+    sponsors = []
+    for sponsor in args.sponsors:
+        try:
+            sponsors.append(query_user(username=sponsor, sitename=args.site))
+        except DoesNotExist:
+            console.warn(f'{sponsor} is not a valid user on {args.site}, skipping.')
             continue
-        add_group_member(args.site, instructor, group)
-        add_group_sponsor(args.site, instructor, group)
+    if not sponsors:
+        console.error(f'No valid sponsors found, exiting.')
+        return ExitCode.DOES_NOT_EXIST
+    else:
+        lead_sponsor = sponsors[0]
+        console.info(f'Using {lead_sponsor.username} as the lead sponsor.')
 
-    console.print(group.pretty())
+    prefix = slugify(args.name)
+    groupname = f'{prefix}-class'
+    try:
+        group : SiteGroup = create_class_group(groupname, args.site)
+    except (DuplicateKeyError, NotUniqueError):
+        console.warn(f'{groupname} already exists on {args.site}, we will add sponsors and students.')
+        group : SiteGroup = SiteGroup.objects.get(groupname=groupname, sitename=args.site)
+
+    for sponsor in sponsors:
+        add_group_member(args.site, sponsor, group)
+        add_group_sponsor(args.site, sponsor, group)
+
+    passwords = []
+    for student_num in range(1, args.n_students + 1):
+        student = f'{prefix}-user-{student_num:03d}'
+        if query_user_exists(student, sitename=args.site):
+            console.warn(f'{student} already exists on {args.site}, skipping.')
+            continue
+        passwords.append((student, password := generate_password()))
+        create_class_user(student,
+                          lead_sponsor.email,
+                          student,
+                          password=password,
+                          sitename=args.site)
+        add_group_member(args.site, student, group)
+    
+    group.reload()
+    console.info(f'Class Information')
+    console.print(dumps_yaml(group._pretty(user_format='{user.username} <{user.parent.email}> (uid={user.parent.uid})')))
+    if str(args.password_file) == '/dev/stdout':
+        console.info(f'Class Passwords')
+    else:
+        console.info(f'Class Passwords written to {args.file}')
+    with args.password_file.open('w') as fp:
+        for student, password in passwords:
+            fp.write(f'{student} {password}\n')
+
+
+@cmd_group_new_class.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', required=True,
+                        help='Class name that will be used as prefix for group name and class accounts')
+    parser.add_argument('--n-students', type=int, default=0,
+                        help='Number of class accounts to create')
+    parser.add_argument('--password-file', type=Path, default='/dev/stdout')
 
 
 @site_args.apply(required=True)
