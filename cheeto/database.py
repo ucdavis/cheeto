@@ -190,9 +190,9 @@ class HippoEvent(BaseDocument):
 
 class GlobalUser(BaseDocument):
     username = POSIXNameField(required=True, primary_key=True)
+    uid = POSIXIDField(required=True, unique=True)
+    gid = POSIXIDField(required=True, unique=True)
     email = EmailField(required=True)
-    uid = POSIXIDField(required=True)
-    gid = POSIXIDField(required=True)
     fullname = StringField(required=True)
     shell = ShellField(required=True)
     home_directory = StringField(required=True)
@@ -212,6 +212,10 @@ class GlobalUser(BaseDocument):
             {
                 'fields': ['$username', '$email', '$fullname'],
                 'default_language': 'english'
+            },
+            {
+                'fields': ['username', 'uid', 'gid'],
+                'unique': True
             }
         ]
     }
@@ -473,14 +477,21 @@ def handle_site_users(sitename: str, users: Iterable[site_user_t]):
 
 class GlobalGroup(BaseDocument):
     groupname = POSIXNameField(required=True, primary_key=True)
-    gid = POSIXIDField(required=True)
+    gid = POSIXIDField(required=True, unique=True)
     type = GroupTypeField(required=True, default='group')
+    user = ReferenceField(GlobalUser, reverse_delete_rule=CASCADE)
 
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
 
     meta = {
-        'queryset_class': SyncQuerySet
+        'queryset_class': SyncQuerySet,
+        'indexes': [
+            {
+                'fields': ['groupname', 'gid'],
+                'unique': True
+            }
+        ]
     }
     
     @classmethod
@@ -1536,7 +1547,7 @@ def create_user(username: str,
         user_kwargs['ssh_key'] = ssh_key
 
     global_user = GlobalUser(**user_kwargs)
-    global_user.save()
+    global_user.save(force_insert=True)
 
     UserSearch.update_index(global_user)
 
@@ -1546,21 +1557,22 @@ def create_user(username: str,
 
     global_group = GlobalGroup(groupname=username,
                                gid=global_user.gid,
-                               type='user')
-    global_group.save()
+                               type='user',
+                               user=global_user)
+    global_group.save(force_insert=True)
 
     if sitenames is not None:
         for sitename in sitenames:
             site_user = SiteUser(username=username,
                                  sitename=sitename,
                                  parent=global_user)
-            site_user.save()
+            site_user.save(force_insert=True)
 
             site_group = SiteGroup(groupname=username,
                                    sitename=sitename,
                                    parent=global_group,
                                    _members=[site_user])
-            site_group.save()
+            site_group.save(force_insert=True)
 
 
 def create_system_user(username: str,
@@ -1590,7 +1602,7 @@ def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
             site_group = SiteGroup(groupname=groupname,
                                    sitename=sitename,
                                    parent=global_group)
-            site_group.save()
+            site_group.save(force_insert=True)
             logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
 
 
@@ -1600,13 +1612,13 @@ def create_class_group(groupname: str, sitename: str) -> SiteGroup:
     global_group = GlobalGroup(groupname=groupname,
                                type='class',
                                gid=get_next_class_id())
-    global_group.save()
+    global_group.save(force_insert=True)
     logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
 
     site_group = SiteGroup(groupname=groupname,
                            sitename=sitename,
                            parent=global_group)
-    site_group.save()
+    site_group.save(force_insert=True)
     logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
 
     return site_group
@@ -1616,13 +1628,13 @@ def create_lab_group(groupname: str, sitename: str | None = None):
     gg = GlobalGroup(groupname=groupname,
                      type='group',
                      gid=get_next_lab_id())
-    gg.save()
+    gg.save(fofce_insert=True)
 
     if sitename is not None:
         sg = SiteGroup(groupname=groupname,
                        sitename=sitename,
                        parent=gg)
-        sg.save()
+        sg.save(force_insert=True)
         return sg
     else:
         return gg
