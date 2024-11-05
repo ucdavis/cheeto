@@ -1447,27 +1447,36 @@ def add_site_group(sitename: str, group: site_group_t):
 
 
 def get_next_system_id() -> int:
-    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_SYSTEM_UID, 
+    ids = set((u.uid for u in GlobalUser.objects(uid__gte=MIN_SYSTEM_UID, 
                                                  uid__lt=MIN_SYSTEM_UID+100000000))) \
-        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_SYSTEM_UID, 
+        | set((g.gid for g in GlobalGroup.objects(gid__gte=MIN_SYSTEM_UID, 
                                                   gid__lt=MIN_SYSTEM_UID+100000000)))
-    return max(ids) + 1
+    if not ids:
+        return MIN_SYSTEM_UID
+    else:
+        return max(ids) + 1
 
 
 def get_next_class_id() -> int:
-    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_CLASS_ID, 
+    ids = set((u.uid for u in GlobalUser.objects(uid__gte=MIN_CLASS_ID, 
                                                  uid__lt=MIN_CLASS_ID+100000000))) \
-        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_CLASS_ID, 
+        | set((g.gid for g in GlobalGroup.objects(gid__gte=MIN_CLASS_ID, 
                                                   gid__lt=MIN_CLASS_ID+100000000)))
-    return max(ids) + 1
+    if not ids:
+        return MIN_CLASS_ID
+    else:
+        return max(ids) + 1
 
 
 def get_next_lab_id() -> int:
-    ids = set((u.uid for u in GlobalUser.objects(uid__gt=MIN_LABGROUP_ID, 
+    ids = set((u.uid for u in GlobalUser.objects(uid__gte=MIN_LABGROUP_ID, 
                                                  uid__lt=MAX_LABGROUP_ID))) \
-        | set((g.gid for g in GlobalGroup.objects(gid__gt=MIN_LABGROUP_ID, 
+        | set((g.gid for g in GlobalGroup.objects(gid__gte=MIN_LABGROUP_ID, 
                                                   gid__lt=MAX_LABGROUP_ID)))
-    return max(ids) + 1
+    if not ids:
+        return MIN_LABGROUP_ID
+    else:
+        return max(ids) + 1
 
 
 def create_home_storage(sitename: str,
