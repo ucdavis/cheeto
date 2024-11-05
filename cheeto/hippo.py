@@ -15,6 +15,7 @@ import sys
 import traceback
 from typing import Optional, List
 
+from jinja2 import Environment, FileSystemLoader
 from rich.console import Console
 
 from .config import HippoConfig

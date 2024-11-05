@@ -835,13 +835,13 @@ testing = ["pytest", "pytest-benchmark"]
 
 [[package]]
 name = "ponderosa"
-version = "0.4.1"
+version = "0.5.1"
 description = ""
 optional = false
 python-versions = "<4.0,>=3.12"
 files = [
-    {file = "ponderosa-0.4.1-py3-none-any.whl", hash = "sha256:de04dac4da10df355b3cf92a4b20dc088ca10deb6e3a28e171a29d7586caa478"},
-    {file = "ponderosa-0.4.1.tar.gz", hash = "sha256:4b4d90059d07b253b03db4992e653b45de30c0a1714d6c6e4194326f5a61e5c3"},
+    {file = "ponderosa-0.5.1-py3-none-any.whl", hash = "sha256:4b9bfb0bcc6d8cfe548a59df7d2f6fa0de3e9a938707b883291cad1c334920f1"},
+    {file = "ponderosa-0.5.1.tar.gz", hash = "sha256:f7db0da29d6cf03f03bd8e788f02aae1c58b5540c6dbceeea7c401c076d8a8d0"},
 ]
 
 [package.extras]
@@ -1401,4 +1401,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.12"
-content-hash = "c5e3da1d59e55984a6bf38057c0f867ea342a8e9c8f2b5b0a5c0036b7a82f0d2"
+content-hash = "4abe50cd01bd5d55e9de93b194f7041f22d03fa5985d1aba18c7bc371c459354"

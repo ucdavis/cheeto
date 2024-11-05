@@ -35,7 +35,7 @@ def database_args(parser: ArgParser):
 
 @database_args.postprocessor(priority=50)
 def _(args: Namespace):
-    args.db = connect_to_database(args.config.mongo)
+    args.db = connect_to_database(args.config.mongo, quiet=args.quiet)
 
 
 #########################################
@@ -172,7 +172,8 @@ def _site_write_sympa(sitename: str, output: Path, ignore: set):
 
 
 @site_args.apply(required=True)
-@commands.register('database', 'site', 'root-key')
+@commands.register('database', 'site', 'root-key',
+                   help='Write admin public keys for a site to a file')
 def site_write_root_key(args: Namespace):
     _site_write_root_key(args.site, args.output_txt)
 
@@ -223,14 +224,15 @@ def _(parser: ArgParser):
     parser.add_argument('--push-merge', default=False, action='store_true')
 
 
-@commands.register('database', 'site', 'list')
+@commands.register('database', 'site', 'list',
+                   help='List all sites and their FQDNs')
 def site_list(args: Namespace):
     for site in Site.objects():
         print(site.sitename, site.fqdn)
 
 
-@site_args.apply(required=True)
-@commands.register('database', 'site', 'show')
+#@site_args.apply(required=True)
+#@commands.register('database', 'site', 'show')
 def site_show(args: Namespace):
     site = Site.objects.get(sitename=args.site)
     console = Console()
@@ -242,7 +244,7 @@ def site_show(args: Namespace):
 
 
 
-@arggroup('Load')
+@arggroup('load')
 def database_load_args(parser: ArgParser):
     parser.add_argument('--system-groups', action='store_true', default=False)
     parser.add_argument('--nfs-yamls', nargs='+', type=Path)
@@ -623,7 +625,7 @@ def user_new_system(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--email', default='hpc-help@ucdavis.edu')
     parser.add_argument('--fullname', help='Default: "HPCCF $username"')
-    parser.add_argument('--password', '-p', action='store_true', default=False,
+    parser.add_argument('--password', action='store_true', default=False,
                         help='Generate a password for the new user')
     parser.add_argument('username')
 
@@ -669,7 +671,7 @@ def set_password(args: Namespace):
 @set_password.args()
 def password_args(parser: ArgParser):
     parser.add_argument('-u', '--user', required=True)
-    parser.add_argument('-p', '--password', required=True)
+    parser.add_argument('--password', required=True)
 
 
 @user_args.apply(required=True)
@@ -974,8 +976,8 @@ def cmd_slurm_new_qos(args: Namespace):
 @arggroup('Slurm Association')
 def slurm_assoc_args(parser: ArgParser):
     parser.add_argument('--group', '-g', required=True)
-    parser.add_argument('--partition', '-p', required=True)
-    parser.add_argument('--qos', '-q', required=True)
+    parser.add_argument('--partition', required=True)
+    parser.add_argument('--qos', required=True)
 
 
 @site_args.apply(required=True)

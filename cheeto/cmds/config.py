@@ -31,19 +31,19 @@ def common_args(parser: ArgParser):
                        type=Path,
                        default=Path(os.devnull),
                        help='Log to file.')
-    parser.add_argument('--quiet',
+    parser.add_argument('--quiet', '-q',
                        default=False,
                        action='store_true')
     parser.add_argument('--config',
                        type=Path,
                        default=DEFAULT_CONFIG_PATH,
                        help='Path to alternate config file')
-    parser.add_argument('--profile',
+    parser.add_argument('--profile', '-p',
                        default='default',
                        help='Config profile to use')
 
 
-@common_args.postprocessor(priority=0)
+@common_args.postprocessor(priority=1000)
 def print_version(args: Namespace):
     console = log.Console(stderr=True)
     if not args.quiet:
@@ -55,7 +55,7 @@ def parse_config(args: Namespace):
     args.config = get_config(config_path=args.config, profile=args.profile)
     if 'accounts.hpc' in args.config.mongo.uri:
         pass
-        print("Testing right now, don't use prod", file=sys.stderr)
+        #print("Testing right now, don't use prod", file=sys.stderr)
         #sys.exit(1)
 
 

@@ -16,7 +16,7 @@ from ponderosa import ArgParser, arggroup
 
 from . import commands
 from ..database import connect_to_database
-from ..hippo import (process_hippoapi_events,
+from ..hippo import (hippoapi_client, process_hippoapi_events,
                      event_queue_pending_events,
                      filter_events,
                      HIPPO_EVENT_ACTIONS)
@@ -25,7 +25,7 @@ from ..log import Console
 
 @arggroup('HiPPO API', desc='HiPPO API event arguments')
 def event_args(parser: ArgParser):
-    parser.add_argument('--post-back', '-p', default=False, action='store_true')
+    parser.add_argument('--post', default=False, action='store_true')
     parser.add_argument('--id', default=None, dest='event_id', type=int)
     parser.add_argument('--type', choices=list(HIPPO_EVENT_ACTIONS))
 
@@ -39,7 +39,7 @@ def cmd_hippoapi_process(args: Namespace):
     process_hippoapi_events(args.config.hippo,
                             event_type=args.type,
                             event_id=args.event_id,
-                            post_back=args.post_back)
+                            post_back=args.post)
 
 
 @event_args.apply()
