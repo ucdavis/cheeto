@@ -1486,14 +1486,14 @@ def remove_group_slurmer(sitename: str,
     group_remove_user_element(sitename, [group], [user], '_slurmers')
 
 
-def add_site_slurmer(sitename: str, group: site_group_t):
+def add_site_global_slurmer(sitename: str, group: site_group_t):
     if type(group) is str:
         group = SiteGroup.objects.get(sitename=sitename, groupname=group)
     Site.objects(sitename=sitename).update_one(add_to_set__global_slurmers=group)
     Site.objects.get(sitename=sitename).save()
 
 
-def add_site_group(sitename: str, group: site_group_t):
+def add_site_global_group(sitename: str, group: site_group_t):
     if type(group) is str:
         group = SiteGroup.objects.get(sitename=sitename, groupname=group)
     Site.objects.get(sitename=sitename).update_one(add_to_set__global_groups=group)
@@ -1572,6 +1572,20 @@ def create_home_storage(sitename: str,
                       source=source,
                       mount=mount)
     storage.save()
+
+
+def add_site_user(sitename: str, user: global_user_t):
+    logger = logging.getLogger(__name__)
+    if type(user) is str:
+        user = GlobalUser.objects.get(username=user)
+    group = SiteGroup.objects.get(groupname=user.username,
+                                  sitename=sitename)
+    site_user = SiteUser(username=user.username,
+                         sitename=sitename,
+                         parent=user,
+                         _groups=[group])
+    site_user.save(force_insert=True)
+    logger.info(f'Created SiteUser {user.username} on site {sitename}')
 
 
 def create_user(username: str,
@@ -1665,6 +1679,7 @@ def create_class_user(username: str,
                 sitenames=[sitename])
 
 
+
 def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
     logger = logging.getLogger(__name__)
     global_group = GlobalGroup(groupname=groupname,
@@ -1704,7 +1719,7 @@ def create_lab_group(groupname: str, sitename: str | None = None):
     gg = GlobalGroup(groupname=groupname,
                      type='group',
                      gid=get_next_lab_id())
-    gg.save(fofce_insert=True)
+    gg.save(force_insert=True)
 
     if sitename is not None:
         sg = SiteGroup(groupname=groupname,
@@ -1714,6 +1729,14 @@ def create_lab_group(groupname: str, sitename: str | None = None):
         return sg
     else:
         return gg
+
+
+def add_site_group(group: global_group_t, sitename: str):
+    if type(group) is str:
+        group = GlobalGroup.objects.get(groupname=group)
+    SiteGroup(groupname=group.groupname,
+              sitename=sitename,
+              parent=group).save(force_insert=True)
 
 
 def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
@@ -2168,11 +2191,14 @@ def _storage_to_puppet(sitename: str, output: Path):
 
 
 def ldap_sync(sitename: str, config: Config, force: bool = False):
+    logger = logging.getLogger(__name__)
     ldap_mgr = LDAPManager(config.ldap, pool_keepalive=15, pool_lifetime=30)
     site = Site.objects.get(sitename=sitename)
 
     for user in SiteUser.objects(sitename=sitename):
-        ldap_sync_globaluser(user.parent, ldap_mgr, force=force)
+        if ldap_sync_globaluser(user.parent, ldap_mgr, force=force):
+            user.ldap_synced = False
+            user.save()
 
     for group in SiteGroup.objects(sitename=sitename):
         ldap_sync_group(group, ldap_mgr, force=force)
@@ -2181,6 +2207,7 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
         ldap_sync_siteuser(user, ldap_mgr, force=force)
 
     for storage in query_automap_storages(sitename, 'home'):
+        logger.info(f'sync home storage {storage.name}') 
         host = f'{storage.host}${{HOST_SUFFIX}}'
         ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.owner,
                                                              'home',
@@ -2228,8 +2255,8 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
         return
 
     ldap_group = mgr.query_group(group.groupname, group.sitename)
-    to_remove = ldap_group.members - group.members
-    to_add = group.members - ldap_group.members
+    to_remove = ldap_group.members - set(group.members)
+    to_add = set(group.members) - ldap_group.members
 
     mgr.remove_users_from_group(to_remove, group.groupname, group.sitename)
     mgr.add_user_to_group(to_add, group.groupname, group.sitename)
@@ -2245,7 +2272,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
     logger = logging.getLogger(__name__)
     if not force and user.ldap_synced:
         logger.info(f'{_ctx_name()}: GlobalUser {user.username} does not need to be synced.')
-        return
+        return False
     logger.info(f'{_ctx_name()}: sync {user.username}')
 
     if force:
@@ -2273,6 +2300,8 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
     else:
         user.ldap_synced = True
         user.save()
+    
+    return True
 
 
 def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):

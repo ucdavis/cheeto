@@ -447,10 +447,10 @@ class LDAPManager:
         
         status = entry.entry_commit_changes()
         if status is False and entry.entry_status == STATUS_PENDING_CHANGES:
-            self.logger.error(f'add_automount: failed to commit {entry}')
+            self.logger.error(f'failed to commit {entry}')
             raise LDAPCommitFailed(f'failed to commit {dn}')
 
-        self.logger.info(f'add_automount: {entry}')
+        self.logger.info(f'{entry}')
         return True
 
     def add_home_automount(self,

@@ -87,7 +87,7 @@ def site_add(args: Namespace):
                    help='Add a group for which users are made slurmers') #type: ignore
 def add_global_slurm(args: Namespace):
     for group in args.groups:
-        add_site_slurmer(args.site, group)
+        add_site_global_slurmer(args.site, group)
 
 
 @add_global_slurm.args()
@@ -611,7 +611,7 @@ def _(parser: ArgParser):
     parser.add_argument('--verbose', action='store_true', default=False)
 
 
-@commands.register('database', 'user', 'new-system',
+@commands.register('database', 'user', 'new', 'system',
                    help='Create a new system user within the system ID range on the provided sites')
 def user_new_system(args: Namespace):
     console = Console()
@@ -648,7 +648,7 @@ def _(parser: ArgParser):
 
 @user_args.apply(required=True)
 @site_args.apply()
-@commands.register('database', 'user', 'set-status',
+@commands.register('database', 'user', 'set', 'status',
                    help='Set the status for a user, globally or per-site if --site is provided')
 def user_set_status(args: Namespace):
     logger = logging.getLogger(__name__)
@@ -667,7 +667,7 @@ def _(parser: ArgParser):
     parser.add_argument('--reason', '-r', required=True)
 
 
-@commands.register('database', 'user', 'set-password',
+@commands.register('database', 'user', 'set', 'password',
                    help='Set a (plaintext) password for a user; hashes it with yescrypt.')
 def set_password(args: Namespace):
     hasher = get_mcf_hasher()
@@ -722,7 +722,7 @@ def access_args(parser: ArgParser):
 @site_args.apply()
 @user_args.apply(required=True)
 @access_args.apply()
-@commands.register('database', 'user', 'add-access',
+@commands.register('database', 'user', 'add', 'access',
                    help='Add an access type to user(s), globally or per-site if --site is provided')
 def user_add_access(args: Namespace):
     for user in process_user_args(args):
@@ -732,11 +732,20 @@ def user_add_access(args: Namespace):
 @user_args.apply(required=True)
 @site_args.apply()
 @access_args.apply()
-@commands.register('database', 'user', 'remove-access',
+@commands.register('database', 'user', 'remove', 'access',
                    help='Remove an access type from user(s), globally or per-site if --site is provided')
 def user_remove_access(args: Namespace):
     for user in process_user_args(args):
         remove_user_access(user, args.access)
+
+
+@user_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'user', 'add', 'site',
+                   help='Add user(s) to site')
+def user_add_site(args):
+    for user in args.user:
+        add_site_user(args.site, user)
 
 
 @arggroup()
@@ -746,7 +755,7 @@ def user_type_args(parser: ArgParser):
 
 @user_args.apply(required=True)
 @user_type_args.apply()
-@commands.register('database', 'user', 'set-type',
+@commands.register('database', 'user', 'set', 'type',
                    help='Set the type of user(s)')
 def user_set_type(args: Namespace):
     logger = logging.getLogger(__name__)
@@ -821,7 +830,7 @@ def group_show(args: Namespace):
 @group_args.apply(required=True)
 @user_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('database', 'group', 'add-member',
+@commands.register('database', 'group', 'add', 'member',
                    help='Add user(s) to group(s)')
 def cmd_group_add_member(args: Namespace):
     group_add_user_element(args.site, args.groups, args.users, '_members')
@@ -830,7 +839,7 @@ def cmd_group_add_member(args: Namespace):
 @group_args.apply(required=True)
 @user_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('database', 'group', 'remove-member',
+@commands.register('database', 'group', 'remove', 'member',
                    help='Remove user(s) from group(s)')
 def cmd_group_remove_member(args: Namespace):
     group_remove_user_element(args.site, args.groups, args.user, '_members')
@@ -839,7 +848,7 @@ def cmd_group_remove_member(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'add-sponsor',
+@commands.register('database', 'group', 'add', 'sponsor',
                    help='Add user(s) to group(s) as sponsors')
 def cmd_group_add_sponsor(args: Namespace):
     group_add_user_element(args.site, args.groups, args.user, '_sponsors')
@@ -848,7 +857,7 @@ def cmd_group_add_sponsor(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'remove-sponsor',
+@commands.register('database', 'group', 'remove', 'sponsor',
                    help='Remove user(s) from group(s) as sponsors')
 def cmd_group_remove_sponsor(args: Namespace):
     group_remove_user_element(args.site, args.groups, args.user, '_sponsors')
@@ -857,7 +866,7 @@ def cmd_group_remove_sponsor(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'add-sudoer',
+@commands.register('database', 'group', 'add', 'sudoer',
                    help='Add user(s) to group(s) as sudoers')
 def cmd_group_add_sudoer(args: Namespace):
     group_add_user_element(args.site, args.groups, args.user, '_sudoers')
@@ -866,7 +875,7 @@ def cmd_group_add_sudoer(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'remove-sudoer',
+@commands.register('database', 'group', 'remove', 'sudoer',
                    help='Remove user(s) from group(s) as sudoers')
 def cmd_group_remove_sudoer(args: Namespace):
     group_remove_user_element(args.site, args.groups, args.user, '_sudoers')
@@ -875,7 +884,7 @@ def cmd_group_remove_sudoer(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'add-slurmer',
+@commands.register('database', 'group', 'add', 'slurmer',
                    help='Add user(s) to group(s) as slurmers')
 def cmd_group_add_slurmer(args: Namespace):
     group_add_user_element(args.site, args.groups, args.user, '_slurmers')
@@ -884,15 +893,24 @@ def cmd_group_add_slurmer(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('database', 'group', 'remove-slurmer',
+@commands.register('database', 'group', 'remove', 'slurmer',
                    help='Remove user(s) from group(s) as slurmers')
 def cmd_group_remove_slurmer(args: Namespace):
     group_remove_user_element(args.site, args.groups, args.user, '_slurmers')
 
 
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'group', 'add', 'site',
+                   help='Add a Global group to a site')
+def cmd_group_add_site(args: Namespace):
+    for group in args.groups:
+        add_site_group(group, args.site)
+
+
 @group_args.apply(required=True, single=True)
 @site_args.apply(single=False)
-@commands.register('database', 'group', 'new-system',
+@commands.register('database', 'group', 'new', 'system',
                    help='Create a new system group within the system ID range on the provided sites')
 def cmd_group_new_system(args: Namespace):
     console = Console()
@@ -912,7 +930,7 @@ def sponsor_args(parser: ArgParser, required: bool = False):
 
 @site_args.apply(required=True)
 @sponsor_args.apply(required=True)
-@commands.register('database', 'group', 'new-class',
+@commands.register('database', 'group', 'new', 'class',
                    help='Create a new class group within the class ID range and add instructors as sponsors')
 def cmd_group_new_class(args: Namespace):
     console = Console()
@@ -981,7 +999,7 @@ def _(parser: ArgParser):
 @site_args.apply(required=True)
 @group_args.apply(required=True, single=True)
 @sponsor_args.apply(required=True)
-@commands.register('database', 'group', 'new-lab',
+@commands.register('database', 'group', 'new', 'lab',
                    help='Create a new lab group')
 def cmd_group_new_lab(args: Namespace):
     console = Console()
