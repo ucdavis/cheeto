@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Generator, List, Optional, Tuple
 
-from airium import Airium
+import marko
 import sh
 
 from jinja2 import Environment, FileSystemLoader
@@ -47,27 +47,107 @@ class Mailx:
 
 class Email:
 
-    def __init__(self, **kwargs):
-        self.airium_kwargs = kwargs
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **template_kwargs):
+        if to is None:
+            raise ValueError('Email must have at least one recipient.')
+        self.to = to
+        self.cc = [] if cc is None else cc
+        self.template_kwargs = template_kwargs
+        self.env = Environment(loader=FileSystemLoader(PKG_TEMPLATES / 'emails'))
+    
+    @property
+    def subject(self) -> str:
+        raise NotImplemented()
 
+    @property
     def header(self) -> str:
         raise NotImplemented()
 
     def paragraphs(self) -> Generator[str, None, None]:
-        raise NotImplemented()
+        template = self.env.get_template(self.template)
+        md = template.render(**self.template_kwargs)
+        for element in marko.parse(md).children:
+            if (text := marko.render(element).strip()):
+                yield text
+    
+    @property
+    def emails(self):
+        return self.to
+    
+    @property
+    def ccEmails(self):
+        return self.cc
 
 
-class NewAccountReady(Email):
+class NewAccountEmail(Email):
 
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'account-ready.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        sitename = self.template_kwargs['sitename']
+        return f'UCD HPC: Account Ready on {sitename.capitalize()}'
+    
+    @property
     def header(self) -> str:
-        return 'Account Ready'
+        return 'Your account has been processed'
 
-    def paragraphs(self,
-                   sitename: str,
-                   username: str,
-                   site_fqdn: str,
-                   slurm_account: str,
-                   slurm_partitions: List[str],
-                   storages: List[Tuple[str, str]]) -> Generator[str, None, None]:
-        a = Airium(**self.airium_kwargs)
 
+class UpdateSSHKeyEmail(Email):
+    
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'key-updated.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        return 'UCD HPC: SSH Key Updated'
+    
+    @property
+    def header(self) -> str:
+        return 'Your SSH key update has been processed'
+
+
+class NewSponsorEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'new-sponsor.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        sitename = self.template_kwargs['sitename']
+        return f'UCD HPC: New Sponsored Group on {sitename.capitalize()}'
+    
+    @property
+    def header(self) -> str:
+        group = self.template_kwargs['group']
+        return f'Your new group <strong>{group}</strong> has been created'
+
+
+class NewMembershipEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'new-membership.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        sitename = self.template_kwargs['sitename']
+        return f'UCD HPC: New Group Membership on {sitename.capitalize()}'
+    
+    @property
+    def header(self) -> str:
+        return 'Your new group membership has been processed'

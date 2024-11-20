@@ -67,15 +67,15 @@ def POSIXNameField(**kwargs):
                        max_length=32,
                        **kwargs)
 
-def POSIXIDField(**kwargs):
-    return LongField(min_value=0, 
-                     max_value=UINT_MAX,
-                     **kwargs)
+def POSIXIDField(**kwargs) -> IntField:
+    return IntField(min_value=0, 
+                    max_value=UINT_MAX,
+                    **kwargs)
 
-def UInt32Field(**kwargs) -> LongField:
-    return LongField(min_value=0,
-                     max_value=UINT_MAX,
-                     **kwargs)
+def UInt32Field(**kwargs) -> IntField:
+    return IntField(min_value=0,
+                    max_value=UINT_MAX,
+                    **kwargs)
 
 def UserTypeField(**kwargs): 
     return StringField(choices=USER_TYPES,
@@ -165,7 +165,8 @@ class BaseDocument(Document):
     def _pretty(self, formatters: Mapping[str, str] | None = None,
                       lift: list[str] | None = None,
                       skip: tuple | None = None,
-                      order: list[str] | None = None) -> str:
+                      order: list[str] | None = None,
+                      extra: dict | None = None) -> str:
         if formatters is None:
             formatters = {}
         if skip is None:
@@ -175,6 +176,8 @@ class BaseDocument(Document):
             lift_values(data, lift)
         if order is None:
             order = []
+        if extra is not None:
+            data.update(extra)
         _data = {key: data[key] for key in order if key in data}
         _data.update({key: data[key] for key in sorted(data.keys()) if key not in order})
         return _data
@@ -234,7 +237,7 @@ class SyncQuerySet(QuerySet):
 
 
 class HippoEvent(BaseDocument):
-    hippo_id = LongField(required=True, unique=True)
+    hippo_id = IntField(required=True, unique=True)
     action = StringField(required=True,
                          choices=HIPPO_EVENT_ACTIONS)
     n_tries = IntField(required=True, default=0)
@@ -562,11 +565,10 @@ class GlobalGroup(BaseDocument):
             groupname = groupname,
             gid = puppet_record.gid
         )
-
-    def pretty(self):
-        data = self.to_dict(raw=False, strip_id=True, strip_empty=True, rekey=True)
-        data['sites'] = [sg.sitename for sg in SiteGroup.objects(groupname=self.groupname)]
-        return dumps_yaml(data)
+    
+    def _pretty(self, *args, **kwargs):
+        extra = {'sites': [sg.sitename for sg in SiteGroup.objects(groupname=self.groupname)]}
+        return super()._pretty(*args, **kwargs, extra=extra)
 
 
 global_group_t = Union[GlobalGroup, str]
@@ -777,7 +779,7 @@ class SiteGroup(BaseDocument):
                       '_sponsors': '{data.username}',
                       '_sudoers': '{data.username}',
                       '_slurmers': '{data.username}'}
-        if 'formatters' in kwargs:
+        if 'formatters' in kwargs and kwargs['formatters'] is not None:
             formatters.update(kwargs['formatters'])
         kwargs['formatters'] = formatters
         return super()._pretty(*args, **kwargs)
@@ -836,7 +838,7 @@ class NFSSourceCollection(BaseDocument):
             {
                 'fields': ['sitename', 'name', '_cls'],
                 'name': 'primary',
-      'unique': True
+                'unique': True
             }
         ]
     }
@@ -1254,10 +1256,10 @@ def create_group_from_sponsor(sponsor_user: SiteUser):
                            sitename=sponsor_user.sitename,
                            parent=global_group,
                            _members=[sponsor_user],
-                           _sponsors=[sponsor_user],
-                           _sudoers=[sponsor_user])
+                           _sponsors=[sponsor_user])
     site_group.save()
     logger.info(f'Created SiteGroup from sponsor {sponsor_user.username}: {site_group.to_dict()}')
+    return site_group
 
 
 def query_group_slurm_associations(sitename: str, group: site_group_t):
@@ -1273,12 +1275,17 @@ def query_group_slurm_associations(sitename: str, group: site_group_t):
             yield (user.username, assoc.group.groupname, assoc.partition.partitionname), assoc.qos.qosname
 
 
-def query_user_groups(sitename: str, user: site_user_t):
+def query_user_groups(sitename: str,
+                      user: site_user_t,
+                      types: list[str] = GROUP_TYPES):
     if type(user) is str:
         user = SiteUser.objects.get(sitename=sitename, username=user)
-    qs = SiteGroup.objects(_members=user, sitename=sitename).only('groupname')
+    
+    qs = SiteGroup.objects(_members=user,
+                           sitename=sitename)
     for group in qs:
-        yield group.groupname
+        if group.parent.type in types:
+            yield group.groupname
 
 
 def query_user_slurmership(sitename: str, user: site_user_t):
@@ -1538,11 +1545,6 @@ def create_home_storage(sitename: str,
     automap = AutomountMap.objects.get(sitename=sitename,
                                        tablename='home')
 
-    source = ZFSMountSource(name=user.username,
-                            sitename=sitename,
-                            owner=user,
-                            group=group,
-                            collection=collection)
     if source is None:
         source = ZFSMountSource(name=user.username,
                                 sitename=sitename,
@@ -1552,15 +1554,17 @@ def create_home_storage(sitename: str,
         source.save()
     else:
         source.update(collection=collection)
-    source.save()
 
     mount = Automount(sitename=sitename,
                       name=user.username,
                       map=automap)
     try:
         mount.save()
+    except NotUniqueError as e:
+        logger.warning(f'{_ctx_name()}: mount {mount.to_dict()} already exists')
+        mount = Automount.objects.get(sitename=sitename, name=user.username, map=automap)
     except Exception as e:
-        logger.error(f'{_ctx_name()}: could not save mount {mount}')
+        logger.error(f'{_ctx_name()}: could not save mount: {mount.to_dict()}')
         source.delete()
         raise
 
@@ -1994,6 +1998,12 @@ def user_to_puppet(user: SiteUser,
         tags.add('sudo-tag')
     if user.type == 'system':
         tags.add('system-tag')
+
+    shell = user.shell
+    if shell in DISABLED_SHELLS:
+        shell = '/usr/bin/bash'
+    if user.status in ('inactive', 'disabled'):
+        shell = '/usr/sbin/nologin-account-disabled'
 
     try:
         home_storage = query_user_home_storage(user.sitename, user)

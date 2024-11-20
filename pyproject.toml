@@ -40,15 +40,15 @@ python-ldap = "^3.4.4"
 ldap3 = {git = "https://github.com/ucdavis/ldap3.git", rev = "dev"}
 gssapi = "^1.9.0"
 pymongo = "^4.10.1"
-mongoengine = "^0.29.1"
+mongoengine = {git = "https://github.com/MongoEngine/mongoengine", rev = "4d3ab60"}
 attrs = "^24.2.0"
 httpx = "^0.27.0"
 python-dateutil = "^2.9.0.post0"
 blinker = "^1.8.2"
-airium = {version = "^0.2.6", extras = ["parse"]}
 pyescrypt = "^0.1.0"
 xkcdpass = "^1.19.9"
 ponderosa = "^0.5.1"
+marko = "^2.1.2"
 
 [build-system]
 requires = ["poetry-core"]

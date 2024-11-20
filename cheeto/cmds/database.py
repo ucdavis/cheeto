@@ -539,6 +539,7 @@ def _show_user(user: User, verbose: bool = False) -> dict:
 def user_show(args: Namespace):
     logger = logging.getLogger(__name__)
     console = Console()
+    stdout = Console(stderr=False)  
 
     users: list[User] = []
 
@@ -581,11 +582,11 @@ def user_show(args: Namespace):
             users.extend(SiteUser.objects(sitename=args.site))
 
     if args.list:
-        console.print(' '.join((u.username for u in users)))
+        stdout.print(' '.join((u.username for u in users)))
     else:
         for user in users:
             output = dumps_yaml(_show_user(user, verbose=args.verbose))
-            console.print(highlight_yaml(output))
+            stdout.print(highlight_yaml(output))
             #console.print(_show_user(user, verbose=args.verbose))
 
 
@@ -646,7 +647,7 @@ def _(parser: ArgParser):
 
 
 @user_args.apply(required=True)
-@site_args.apply(required=True)
+@site_args.apply()
 @commands.register('database', 'user', 'set-status',
                    help='Set the status for a user, globally or per-site if --site is provided')
 def user_set_status(args: Namespace):
@@ -832,7 +833,7 @@ def cmd_group_add_member(args: Namespace):
 @commands.register('database', 'group', 'remove-member',
                    help='Remove user(s) from group(s)')
 def cmd_group_remove_member(args: Namespace):
-    group_remove_user_element(args.site, args.groups, args.users, '_members')
+    group_remove_user_element(args.site, args.groups, args.user, '_members')
 
 
 @group_args.apply(required=True)
@@ -841,7 +842,7 @@ def cmd_group_remove_member(args: Namespace):
 @commands.register('database', 'group', 'add-sponsor',
                    help='Add user(s) to group(s) as sponsors')
 def cmd_group_add_sponsor(args: Namespace):
-    group_add_user_element(args.site, args.groups, args.users, '_sponsors')
+    group_add_user_element(args.site, args.groups, args.user, '_sponsors')
 
 
 @group_args.apply(required=True)
@@ -850,7 +851,7 @@ def cmd_group_add_sponsor(args: Namespace):
 @commands.register('database', 'group', 'remove-sponsor',
                    help='Remove user(s) from group(s) as sponsors')
 def cmd_group_remove_sponsor(args: Namespace):
-    group_remove_user_element(args.site, args.groups, args.users, '_sponsors')
+    group_remove_user_element(args.site, args.groups, args.user, '_sponsors')
 
 
 @group_args.apply(required=True)
@@ -859,7 +860,7 @@ def cmd_group_remove_sponsor(args: Namespace):
 @commands.register('database', 'group', 'add-sudoer',
                    help='Add user(s) to group(s) as sudoers')
 def cmd_group_add_sudoer(args: Namespace):
-    group_add_user_element(args.site, args.groups, args.users, '_sudoers')
+    group_add_user_element(args.site, args.groups, args.user, '_sudoers')
 
 
 @group_args.apply(required=True)
@@ -868,7 +869,7 @@ def cmd_group_add_sudoer(args: Namespace):
 @commands.register('database', 'group', 'remove-sudoer',
                    help='Remove user(s) from group(s) as sudoers')
 def cmd_group_remove_sudoer(args: Namespace):
-    group_remove_user_element(args.site, args.groups, args.users, '_sudoers')
+    group_remove_user_element(args.site, args.groups, args.user, '_sudoers')
 
 
 @group_args.apply(required=True)
@@ -877,7 +878,7 @@ def cmd_group_remove_sudoer(args: Namespace):
 @commands.register('database', 'group', 'add-slurmer',
                    help='Add user(s) to group(s) as slurmers')
 def cmd_group_add_slurmer(args: Namespace):
-    group_add_user_element(args.site, args.groups, args.users, '_slurmers')
+    group_add_user_element(args.site, args.groups, args.user, '_slurmers')
 
 
 @group_args.apply(required=True)
@@ -886,7 +887,7 @@ def cmd_group_add_slurmer(args: Namespace):
 @commands.register('database', 'group', 'remove-slurmer',
                    help='Remove user(s) from group(s) as slurmers')
 def cmd_group_remove_slurmer(args: Namespace):
-    group_remove_user_element(args.site, args.groups, args.users, '_slurmers')
+    group_remove_user_element(args.site, args.groups, args.user, '_slurmers')
 
 
 @group_args.apply(required=True, single=True)
@@ -978,13 +979,14 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@group_args.apply(required=True, single=True)
 @sponsor_args.apply(required=True)
 @commands.register('database', 'group', 'new-lab',
                    help='Create a new lab group')
 def cmd_group_new_lab(args: Namespace):
     console = Console()
 
-    group : SiteGroup = create_lab_group(args.groupname, sitename=args.site)
+    group : SiteGroup = create_lab_group(args.groups, sitename=args.site)
     for sponsor in args.sponsors:
         if not query_user_exists(sponsor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{sponsor} is not a valid user on {args.site}, skipping.')
@@ -1070,7 +1072,7 @@ def cmd_slurm_new_assoc(args: Namespace):
         console.print(f'[red] QOS {args.qos} does not exist.')
         return ExitCode.DOES_NOT_EXIST
 
-    console.print(highlight_yaml(assoc.pretty()))
+    console.print(assoc.pretty())
 
 
 #########################################

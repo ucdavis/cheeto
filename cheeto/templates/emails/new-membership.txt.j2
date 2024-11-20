@@ -1,19 +1,13 @@
-Your account and group association on **{{ sitename}}** has been
+Your new group association on **{{ sitename }}** has been
 processed and should be live within 30 minutes.
 
-You can access the cluster from the machine on which you generated your SSH key with the following command:
-
-```
-    ssh {{username}}@{{sitefqdn}}
-```
-
-You are a member of the following Unix groups:
+You are now a member of the following Unix groups:
 {%- for group in groups %}
 - _{{group}}_
 {%- endfor %}
 
 {% if slurm_accounts -%}
-You have access to the following Slurm accounts and their associated partitions,
+You now have access to the following Slurm accounts and their associated partitions,
 which you can use to submit jobs by passing `-A [ACCOUNT] -p [PARTITION]` to `sbatch`
 and other Slurm commands:
 {%- for account, partitions in slurm_accounts.items() %}
@@ -24,7 +18,7 @@ and other Slurm commands:
 {%- endfor %}
 {%- endif %}
 
-Your home directory has a quota of 20GB to allow for your configuration files and code.
+As a reminder, your home directory has a quota of 20GB to allow for your configuration files and code.
 
 {%- if group_storages %}
 You have access to the following group storages, which you should use for larger data:
