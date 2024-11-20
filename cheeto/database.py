@@ -1598,17 +1598,21 @@ def create_user(username: str,
                 password: str | None = None,
                 ssh_key: list[str] | None = None,
                 access: list[str] | None = None,
-                sitenames: list[str] | None = None):
+                sitenames: list[str] | None = None,
+                gid: int | None = None):
     logger = logging.getLogger(__name__)
 
     if query_user_exists(username, raise_exc=False):
         raise DuplicateUser(username)
     
+    if gid is None:
+        gid = uid
+    
     user_kwargs = dict(
         username=username,
         email=email,
         uid=uid,
-        gid=uid,
+        gid=gid,
         fullname=fullname,
         type=type,
         shell=shell,

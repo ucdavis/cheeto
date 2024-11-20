@@ -522,7 +522,7 @@ def _show_globaluser(user: GlobalUser, verbose: bool = False) -> dict:
     if verbose:
         user_data = user._pretty()
     else:
-        user_data = user._pretty(skip=('ssh_key', 'sitename', 'password', 'iam_synced', 'gid'))
+        user_data = user._pretty(skip=('ssh_key', 'sitename', 'password', 'iam_synced'))
     user_data['sites'] = [su.sitename for su in SiteUser.objects(username=user.username)]
     return user_data
 
