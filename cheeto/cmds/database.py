@@ -13,6 +13,7 @@ from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
 from . import commands
+from ..database import _storage_to_puppet
 from .puppet import repo_args
 from ..args import regex_argtype
 from ..database import *

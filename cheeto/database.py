@@ -1754,7 +1754,7 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
                                        tablename='share')
 
     for share_name, share in shares.items():
-        owner = GlobalUser.objects.get(username=shaee.storage.owner)
+        owner = GlobalUser.objects.get(username=share.storage.owner)
         group = GlobalGroup.objects.get(groupname=share.storage.group)
 
         source_args = dict(name=share_name,
