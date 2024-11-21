@@ -72,7 +72,7 @@ def site_args(parser: ArgParser,
                             help='Sitename or site FQDN; "all" for all sites')
 
 
-@site_args.postprocessor
+@site_args.postprocessor()
 def parse_site_arg(args: Namespace):
     args.site = query_sitename(args.site)
 

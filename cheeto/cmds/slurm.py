@@ -14,6 +14,7 @@ import json
 from ponderosa import ArgParser
 from rich.console import Console
 from rich.progress import track
+import sh
 
 from . import commands
 from .database import (connect_to_database,
