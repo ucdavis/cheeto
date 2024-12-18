@@ -74,13 +74,22 @@ def site_args(parser: ArgParser,
 
 @site_args.postprocessor()
 def parse_site_arg(args: Namespace):
-    args.site = query_sitename(args.site)
+    if args.site is not None:
+        args.site = query_sitename(args.site)
 
 
-@commands.register('database', 'site', 'add',
+@commands.register('database', 'site', 'new',
                    help='Add a new site')
-def site_add(args: Namespace):
+def site_new(args: Namespace):
     logger = logging.getLogger(__name__)
+    create_site(args.sitename, args.fqdn)
+
+
+@site_new.args()
+def _(parser: ArgParser):
+    parser.add_argument('--sitename', '-s', required=True)
+    parser.add_argument('--fqdn', required=True)
+
 
 
 @site_args.apply()
@@ -345,7 +354,9 @@ def cmd_site_from_puppet(args: Namespace):
             global_record = GlobalUser.from_puppet(user_name, user_record, ssh_key=ssh_key)
             global_record.save()
             global_group = GlobalGroup(groupname=user_name,
-                                       gid=user_record.gid)
+                                       gid=user_record.gid,
+                                       type='user',
+                                       user=global_record)
             global_group.save()
 
             site_record = SiteUser.from_puppet(user_name,

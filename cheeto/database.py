@@ -18,6 +18,7 @@ import statistics as stat
 from typing import List, Mapping, Optional, no_type_check, Self, Union
 
 from bson.dbref import DBRef
+from mongoengine.context_managers import run_in_transaction
 import pyescrypt
 from mongoengine import *
 from mongoengine import signals
@@ -1090,6 +1091,14 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
                    tls=config.tls)
 
 
+def create_site(sitename: str,
+                fqdn: str):
+    if query_site_exists(sitename=sitename):
+        raise ValueError(f'Site {sitename} already exists.')
+    site = Site(sitename=sitename, fqdn=fqdn)
+    site.save()
+
+
 def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
     logger = logging.getLogger(__name__)
     try:
@@ -1578,13 +1587,21 @@ def add_site_user(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is str:
         user = GlobalUser.objects.get(username=user)
-    group = SiteGroup.objects.get(groupname=user.username,
-                                  sitename=sitename)
-    site_user = SiteUser(username=user.username,
-                         sitename=sitename,
-                         parent=user,
-                         _groups=[group])
-    site_user.save(force_insert=True)
+    group = GlobalGroup.objects.get(groupname=user.username)
+
+    with run_in_transaction():
+        site_user = SiteUser(username=user.username,
+                             sitename=sitename,
+                             parent=user,
+                             _groups=[group])
+        site_user.save(force_insert=True)
+
+        site_group = SiteGroup(groupname=user.username,
+                               sitename=sitename,
+                               parent=group,
+                               _members=[site_user])
+        site_group.save(force_insert=True)
+
     logger.info(f'Created SiteUser {user.username} on site {sitename}')
 
 
