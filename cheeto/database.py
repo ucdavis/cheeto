@@ -2172,10 +2172,14 @@ def purge_database():
 
 
 def _storage_to_puppet(sitename: str, output: Path):
-    zfs = dict(group=defaultdict(list), user=defaultdict(list))
-    nfs = dict(group=defaultdict(list), user=defaultdict(list))
+    zfs = dict(group=defaultdict(list),
+               user=defaultdict(list),
+               share=defaultdict(list))
+    nfs = dict(group=defaultdict(list),
+               user=defaultdict(list),
+               share=defaultdict(list))
 
-    for s in query_automap_storages(sitename, 'group'):
+    def add_storage(s, key, perms='2770'):
         data = dict(name=s.name,
                     owner=s.owner, 
                     group=s.group, 
@@ -2184,24 +2188,14 @@ def _storage_to_puppet(sitename: str, output: Path):
                     export_ranges=s.source.export_ranges)
         if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
             data['quota'] = s.quota
-            data['permissions'] = '2770'
-            zfs['group'][s.host].append(data)
+            data['permissions'] = perms
+            zfs[key][s.host].append(data)
         else:
-            nfs['group'][s.host].append(data)
+            nfs[key][s.host].append(data)
 
-    for s in query_automap_storages(sitename, 'home'):
-        data = dict(name=s.name,
-                    owner=s.owner, 
-                    group=s.group, 
-                    path=str(s.host_path),
-                    export_options=s.source.export_options, 
-                    export_ranges=s.source.export_ranges)
-        if s.source._cls == 'StorageMountSource.NFSMountSource.ZFSMountSource':
-            data['quota'] = s.quota
-            data['permissions'] = '0770'
-            zfs['user'][s.host].append(data)
-        else:
-            nfs['user'][s.host].append(data)
+    for table, key, perms in (('home', 'user', '0770'), ('group', 'group', '2770'), ('share', 'share', '2770')):
+        for s in query_automap_storages(sitename, table):
+            add_storage(s, key, perms)
 
     puppet = {'zfs': zfs}
     if nfs:
