@@ -948,7 +948,8 @@ class MountOptionsMixin(Document):
 class AutomountMap(BaseDocument, MountOptionsMixin):
     sitename = StringField(required=True)
     prefix = StringField(required=True)
-    tablename = StringField(required=True, unique_with=['sitename', 'prefix'])
+    tablename = StringField(required=True,
+                            unique_with=['sitename', 'prefix'])
 
 
 class StorageMount(BaseDocument, MountOptionsMixin):
@@ -2193,7 +2194,9 @@ def _storage_to_puppet(sitename: str, output: Path):
         else:
             nfs[key][s.host].append(data)
 
-    for table, key, perms in (('home', 'user', '0770'), ('group', 'group', '2770'), ('share', 'share', '2770')):
+    for table, key, perms in (('home', 'user', '0770'),
+                              ('group', 'group', '2770'),
+                              ('share', 'share', '2775')):
         for s in query_automap_storages(sitename, table):
             add_storage(s, key, perms)
 
