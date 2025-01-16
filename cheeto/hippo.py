@@ -190,6 +190,7 @@ def handle_updatesshkey_event(event: QueuedEventDataModel,
             user = SiteUser.objects.get(username=username, sitename=sitename)
             global_user = user.parent
             global_user.ssh_key = [ssh_key]
+            global_user.ldap_synced = False
             global_user.save()
 
             logger.info(f'Add login-ssh access to user {username}, site {sitename}')
