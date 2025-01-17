@@ -260,6 +260,7 @@ def site_show(args: Namespace):
 def database_load_args(parser: ArgParser):
     parser.add_argument('--system-groups', action='store_true', default=False)
     parser.add_argument('--nfs-yamls', nargs='+', type=Path)
+    parser.add_argument('--mount-source-site')
 
 
 @repo_args.apply()
@@ -276,13 +277,13 @@ def cmd_site_from_puppet(args: Namespace):
                          load=False)
     nfs_data = puppet_merge(*(parse_yaml(f) for f in args.nfs_yamls)).get('nfs', None)
 
+    if args.mount_source_site is not None:
+        query_site_exists(args.mount_source_site, raise_exc=True)
+
     with site_data.lock(args.timeout):
         site_data.load()
 
-        site = Site(sitename=args.site,
-                    fqdn=args.site_dir.name)
-        logger.info(f'Updating Site: {site}')
-        site.save()
+        site = Site.objects.get(sitename=args.site)
 
         # Do automount tables
         if nfs_data:
@@ -290,18 +291,20 @@ def cmd_site_from_puppet(args: Namespace):
             export_ranges = nfs_data['exports'].get('clients', None)
             for tablename, config in nfs_data['storage'].items():
                 autofs = config['autofs']
-                col_args = dict(sitename=args.site,
-                                name=tablename,
-                                _host=autofs.get('nas', None),
-                                prefix=autofs.get('path', None),
-                                _export_options=export_options,
-                                _export_ranges=export_ranges,
-                                _quota=config.get('zfs', {}).get('quota', None))
-                collection = ZFSSourceCollection(**{k:v for k, v in col_args.items() if v is not None})
-                try:
-                    collection.save()
-                except NotUniqueError:
-                    pass
+
+                if args.mount_source_site is None:
+                    col_args = dict(sitename=args.site,
+                                    name=tablename,
+                                    _host=autofs.get('nas', None),
+                                    prefix=autofs.get('path', None),
+                                    _export_options=export_options,
+                                    _export_ranges=export_ranges,
+                                    _quota=config.get('zfs', {}).get('quota', None))
+                    collection = ZFSSourceCollection(**{k:v for k, v in col_args.items() if v is not None})
+                    try:
+                        collection.save()
+                    except NotUniqueError:
+                        pass
 
                 if (raw_opts := config['autofs'].get('options', False)):
                     options = raw_opts.strip('-').split(',')
@@ -340,8 +343,13 @@ def cmd_site_from_puppet(args: Namespace):
 
         group_memberships = defaultdict(set)
         group_sudoers = defaultdict(set)
-        home_collection = ZFSSourceCollection.objects.get(sitename=args.site,
-                                                          name='home')
+        
+        if args.mount_source_site is None:
+            home_collection = ZFSSourceCollection.objects.get(sitename=args.site,
+                                                              name='home')
+        else:
+            home_collection = ZFSSourceCollection.objects.get(sitename=args.mount_source_site,
+                                                              name='home')
         home_automap = AutomountMap.objects.get(sitename=args.site,
                                                 tablename='home')
         for user_name, user_record in site_data.iter_users():
@@ -404,32 +412,36 @@ def cmd_site_from_puppet(args: Namespace):
                 continue
 
             us = user_record.storage
-            if us and us.autofs:
-                source = NFSMountSource(name=user_name,
-                                        sitename=args.site,
-                                        _host=us.autofs.nas,
-                                        _host_path=str(Path(us.autofs.path) / user_name),
-                                        owner=global_record,
-                                        group=global_group,
-                                        collection=home_collection)
-            elif us and not us.autofs and us.zfs and us.zfs.quota:
-                source = ZFSMountSource(name=user_name,
-                                        sitename=args.site,
-                                        owner=global_record,
-                                        group=global_group,
-                                        _quota=us.zfs.quota,
-                                        collection=home_collection)
+            if args.mount_source_site is None:
+                if us and us.autofs:
+                    source = NFSMountSource(name=user_name,
+                                            sitename=args.site,
+                                            _host=us.autofs.nas,
+                                            _host_path=str(Path(us.autofs.path) / user_name),
+                                            owner=global_record,
+                                            group=global_group,
+                                            collection=home_collection)
+                elif us and not us.autofs and us.zfs and us.zfs.quota:
+                    source = ZFSMountSource(name=user_name,
+                                            sitename=args.site,
+                                            owner=global_record,
+                                            group=global_group,
+                                            _quota=us.zfs.quota,
+                                            collection=home_collection)
+                else:
+                    source = ZFSMountSource(name=user_name,
+                                            sitename=args.site,
+                                            owner=global_record,
+                                            group=global_group,
+                                            collection=home_collection)
+                try:
+                    source.save()
+                except NotUniqueError:
+                    source = StorageMountSource.objects.get(sitename=args.site,
+                                                            name=user_name)
             else:
-                source = ZFSMountSource(name=user_name,
-                                        sitename=args.site,
-                                        owner=global_record,
-                                        group=global_group,
-                                        collection=home_collection)
-            try:
-                source.save()
-            except NotUniqueError:
-                source = StorageMountSource.objects.get(sitename=args.site,
-                                                        name=user_name)
+                source = NFSMountSource.objects.get(name=user_name,
+                                                    sitename=args.mount_source_site)
 
             options = us.autofs.split_options() if us is not None and us.autofs is not None else None
             mount = Automount(sitename=args.site,

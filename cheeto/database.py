@@ -1762,11 +1762,13 @@ def add_site_group(group: global_group_t, sitename: str):
 
 
 def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
-                           sitename: str):
+                           sitename: str,
+                           mount_source_site: str | None = None):
     logger = logging.getLogger(__name__)
     logger.info(f'Load share storages on site {sitename}')
 
-    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+    collection = ZFSSourceCollection.objects.get(sitename=sitename if mount_source_site is None \
+                                                          else mount_source_site,
                                                  name='share')
     automap = AutomountMap.objects.get(sitename=sitename,
                                        tablename='share')
@@ -1774,57 +1776,68 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
     for share_name, share in shares.items():
         owner = GlobalUser.objects.get(username=share.storage.owner)
         group = GlobalGroup.objects.get(groupname=share.storage.group)
-
-        source_args = dict(name=share_name,
-                           sitename=sitename,
-                           _host_path=share.storage.autofs.path,
-                           _host=share.storage.autofs.nas,
-                           owner=owner,
-                           group=group,
-                           collection=collection)
-        source_type = NFSMountSource
-
         if share.storage.zfs:
             source_type = ZFSMountSource
-            source_args['_quota'] = share.storage.zfs.quota
+        else:
+            source_type = NFSMountSource
 
-        source = source_type(**source_args)
+        with run_in_transaction():
 
-        try:
-            source.save()
-        except NotUniqueError:
-            source = source_type.objects.get(sitename=sitename,
-                                             name=share.storage.autofs.path)
+            if mount_source_site is None:
 
-        mount = Automount(sitename=sitename,
-                          name=share_name,
-                          map=automap,
-                          _options=share.storage.autofs.split_options())
-        try:
-            mount.save()
-        except NotUniqueError:
-            mount = Automount.objects.get(sitename=sitename,
-                                          name=share_name,
-                                          map=automap)
+                source_args = dict(name=share_name,
+                                   sitename=sitename,
+                                   _host_path=share.storage.autofs.path,
+                                   _host=share.storage.autofs.nas,
+                                   owner=owner,
+                                   group=group,
+                                   collection=collection)
 
-        storage = Storage(name=share_name,
-                          source=source,
-                          mount=mount)
+                if source_type is ZFSMountSource:
+                    source_args['_quota'] = share.storage.zfs.quota
 
-        try:
-            storage.save()
-        except NotUniqueError:
-            pass
+                source = source_type(**source_args)
+
+                try:
+                    source.save()
+                except NotUniqueError:
+                    source = source_type.objects.get(sitename=sitename,
+                                                     name=share.storage.autofs.path)
+            else:
+                source = source_type.objects.get(sitename=mount_source_site,
+                                                 name=share.storage.autofs.path)
+
+            mount = Automount(sitename=sitename,
+                              name=share_name,
+                              map=automap,
+                              _options=share.storage.autofs.split_options())
+            try:
+                mount.save()
+            except NotUniqueError:
+                mount = Automount.objects.get(sitename=sitename,
+                                              name=share_name,
+                                              map=automap)
+
+            storage = Storage(name=share_name,
+                              source=source,
+                              mount=mount)
+
+            try:
+                storage.save()
+            except NotUniqueError:
+                pass
 
 
 def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
                                     groupname: str,
-                                    sitename: str):
+                                    sitename: str,
+                                    mount_source_site: str | None = None):
 
     logger = logging.getLogger(__name__)
     logger.info(f'Load storages for group {groupname} on site {sitename}')
 
-    collection = ZFSSourceCollection.objects.get(sitename=sitename,
+    collection = ZFSSourceCollection.objects.get(sitename=sitename if mount_source_site is None \
+                                                          else mount_source_site,
                                                  name='group')
     automap = AutomountMap.objects.get(sitename=sitename,
                                        tablename='group')
@@ -1836,56 +1849,68 @@ def load_group_storages_from_puppet(storages: List[PuppetGroupStorage],
             group = GlobalGroup.objects.get(groupname=storage.group)
         else:
             group = GlobalGroup.objects.get(groupname=groupname)
-        if not storage.zfs:
-            source = NFSMountSource(name=storage.name,
-                                    sitename=sitename,
-                                    _host_path=storage.autofs.path,
-                                    _host=storage.autofs.nas,
-                                    owner=owner,
-                                    group=group,
-                                    collection=collection)
-            try:
-                source.save()
-            except NotUniqueError:
-                source = NFSMountSource.objects.get(sitename=sitename,
-                                                    _host=storage.autofs.nas,
-                                                    _host_path=storage.autofs.path)
-                                                    
-        else:
-            source = ZFSMountSource(name=storage.autofs.path,
-                                    sitename=sitename,
-                                    _host=storage.autofs.nas,
-                                    _host_path=storage.autofs.path,
-                                    owner=owner,
-                                    group=group,
-                                    _quota=storage.zfs.quota,
-                                    collection=collection)
-            try:
-                source.save()
-            except NotUniqueError:
-                source = ZFSMountSource.objects.get(sitename=sitename,
-                                                    _host=storage.autofs.nas,
-                                                    _host_path=storage.autofs.path)
 
-        mount = Automount(sitename=sitename,
-                          map=automap,
-                          name=storage.name,
-                          _options=storage.autofs.split_options())
-        try:
-            mount.save()
-        except NotUniqueError:
-            mount = Automount.objects.get(sitename=sitename,
-                                          map=automap,
-                                          name=storage.name)
-        
-        record = Storage(name=storage.name,
-                         source=source,
-                         mount=mount,
-                         globus=storage.globus)
-        try:
-            record.save()
-        except NotUniqueError:
-            pass
+        if not storage.zfs:
+            source_type = NFSMountSource
+        else:
+            source_type = ZFSMountSource
+
+        with run_in_transaction():
+            if mount_source_site is None:
+                if source_type is NFSMountSource:
+                    source = NFSMountSource(name=storage.name,
+                                            sitename=sitename,
+                                            _host_path=storage.autofs.path,
+                                            _host=storage.autofs.nas,
+                                            owner=owner,
+                                            group=group,
+                                            collection=collection)
+                    try:
+                        source.save()
+                    except NotUniqueError:
+                        source = NFSMountSource.objects.get(sitename=sitename,
+                                                            _host=storage.autofs.nas,
+                                                            _host_path=storage.autofs.path)
+                                                            
+                else:
+                    source = ZFSMountSource(name=storage.autofs.path,
+                                            sitename=sitename,
+                                            _host=storage.autofs.nas,
+                                            _host_path=storage.autofs.path,
+                                            owner=owner,
+                                            group=group,
+                                            _quota=storage.zfs.quota,
+                                            collection=collection)
+                    try:
+                        source.save()
+                    except NotUniqueError:
+                        source = ZFSMountSource.objects.get(sitename=sitename,
+                                                            _host=storage.autofs.nas,
+                                                            _host_path=storage.autofs.path)
+            else:
+                source = source_type.objects.get(sitename=mount_source_site,
+                                                 _host=storage.autofs.nas,
+                                                 _host_path=storage.autofs.path)
+
+            mount = Automount(sitename=sitename,
+                              map=automap,
+                              name=storage.name,
+                              _options=storage.autofs.split_options())
+            try:
+                mount.save()
+            except NotUniqueError:
+                mount = Automount.objects.get(sitename=sitename,
+                                              map=automap,
+                                              name=storage.name)
+            
+            record = Storage(name=storage.name,
+                             source=source,
+                             mount=mount,
+                             globus=storage.globus)
+            try:
+                record.save()
+            except NotUniqueError:
+                pass
 
 
 def create_slurm_partition(partitionname: str, sitename: str):
@@ -2009,7 +2034,7 @@ def slurm_association_state(sitename: str, ignore: set[str] = {'root'}):
     state = dict(users={}, accounts={})
 
     for group in SiteGroup.objects(sitename=sitename,
-                                   parent__in=GlobalGroup.objects(type='group')):
+                                   parent__in=GlobalGroup.objects(type__in=['group', 'class'])):
 
         assocs = False
         for assoc_tuple, qos_name in query_group_slurm_associations(sitename, group):
