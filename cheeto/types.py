@@ -17,6 +17,7 @@ import re
 from typing import Annotated, ClassVar, Type, Union, List, Self, Generator, Optional
 import sys
 
+import marshmallow
 from marshmallow import validate as mv
 from marshmallow import fields as mf
 from marshmallow import post_dump, Schema as _Schema
