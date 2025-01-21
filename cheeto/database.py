@@ -1085,11 +1085,16 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
         console.print(f'  user: [green]{config.user}')
         console.print(f'  db: [green]{config.database}')
         console.print(f'  tls: {config.tls}')
-    return connect(config.database,
-                   host=config.uri,
-                   username=config.user,
-                   password=config.password,
-                   tls=config.tls)
+    if config.user:
+        return connect(config.database,
+                       host=config.uri,
+                       username=config.user,
+                       password=config.password,
+                       tls=config.tls)
+    else:
+        return connect(config.database,
+                       host=config.uri,
+                       tls=config.tls)
 
 
 def create_site(sitename: str,
@@ -1126,12 +1131,15 @@ def query_sitename(site: str):
 
 def query_user(username: str | list[str] | None = None,
                uid: int | list[int] | None = None,
+               email: str | list[str] | None = None,
                sitename: str | None = None) -> User:
     kwargs = {}
     if username is not None:
         kwargs['username'] = username
     if uid is not None:
         kwargs['uid'] = uid
+    if email is not None:
+        kwargs['email'] = email
     if not kwargs:
         raise DoesNotExist()
     if sitename is not None:
@@ -1802,10 +1810,14 @@ def load_share_from_puppet(shares: dict[str, PuppetShareRecord],
                     source.save()
                 except NotUniqueError:
                     source = source_type.objects.get(sitename=sitename,
-                                                     name=share.storage.autofs.path)
+                                                     name=share_name)
             else:
-                source = source_type.objects.get(sitename=mount_source_site,
-                                                 name=share.storage.autofs.path)
+                try:
+                    source = source_type.objects.get(sitename=mount_source_site,
+                                                     name=share_name)
+                except DoesNotExist:
+                    logger.error(f'Does not exist: sitename={mount_source_site}, name={share.storage.autofs.path}')
+                    raise
 
             mount = Automount(sitename=sitename,
                               name=share_name,

@@ -8,6 +8,7 @@
 # Date   : 04.11.2024
 
 from argparse import Namespace
+import sys
 
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
@@ -276,6 +277,8 @@ def cmd_site_from_puppet(args: Namespace):
                          key_dir=args.key_dir,
                          load=False)
     nfs_data = puppet_merge(*(parse_yaml(f) for f in args.nfs_yamls)).get('nfs', None)
+    if nfs_data:
+        logger.info(f'Got NFS data')
 
     if args.mount_source_site is not None:
         query_site_exists(args.mount_source_site, raise_exc=True)
@@ -290,6 +293,7 @@ def cmd_site_from_puppet(args: Namespace):
             export_options = nfs_data['exports'].get('options', None)
             export_ranges = nfs_data['exports'].get('clients', None)
             for tablename, config in nfs_data['storage'].items():
+                logger.info(f'Set up Storage for table {tablename} with config {config}') 
                 autofs = config['autofs']
 
                 if args.mount_source_site is None:
@@ -319,14 +323,18 @@ def cmd_site_from_puppet(args: Namespace):
                 try:
                     mountmap.save()
                 except NotUniqueError:
-                    pass
+                    logger.warning(f'NotUniqueError on AutomountMap save: {mount_args}')
 
         for group_name, group_record in site_data.iter_groups():
             #logger.info(f'{group_name}, {group_record}')
             if group_record.ensure == 'absent':
                 continue
-            global_record = GlobalGroup.from_puppet(group_name, group_record)
-            global_record.save()
+
+            if args.mount_source_site is None:
+                global_record = GlobalGroup.from_puppet(group_name, group_record)
+                global_record.save()
+            else:
+                global_record = GlobalGroup.objects.get(groupname=group_name)
 
             site_record = SiteGroup.from_puppet(group_name,
                                                 args.site,
@@ -359,13 +367,17 @@ def cmd_site_from_puppet(args: Namespace):
             if ssh_key_path.exists():
                 ssh_key = ssh_key_path.read_text().strip()
 
-            global_record = GlobalUser.from_puppet(user_name, user_record, ssh_key=ssh_key)
-            global_record.save()
-            global_group = GlobalGroup(groupname=user_name,
-                                       gid=user_record.gid,
-                                       type='user',
-                                       user=global_record)
-            global_group.save()
+            if args.mount_source_site is None:
+                global_record = GlobalUser.from_puppet(user_name, user_record, ssh_key=ssh_key)
+                global_record.save()
+                global_group = GlobalGroup(groupname=user_name,
+                                           gid=user_record.gid,
+                                           type='user',
+                                           user=global_record)
+                global_group.save()
+            else:
+                global_record = GlobalUser.objects.get(username=user_name)
+                global_group = GlobalGroup.objects.get(groupname=user_name)
 
             site_record = SiteUser.from_puppet(user_name,
                                                args.site,
@@ -391,8 +403,11 @@ def cmd_site_from_puppet(args: Namespace):
                 logger.warning(f'{_ctx_name()}: error saving SiteGroup for {user_name}: {e}')
 
             if global_record.type == 'system' and args.system_groups:
-                global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
-                global_group.save()
+                if args.mount_source_site is None:
+                    global_group = GlobalGroup(groupname=user_name, gid=user_record.gid)
+                    global_group.save()
+                else:
+                    global_group = GlobalGroup.objects.get(groupname=user_name)
                 
                 site_group = SiteGroup(groupname=user_name, sitename=args.site, parent=global_group)
                 try:
@@ -469,7 +484,8 @@ def cmd_site_from_puppet(args: Namespace):
             if group_record.storage is not None:
                 load_group_storages_from_puppet(group_record.storage,
                                                 groupname,
-                                                args.site)
+                                                args.site,
+                                                mount_source_site=args.mount_source_site)
             if group_record.sponsors is not None:
                 for username in group_record.sponsors:
                     add_group_sponsor(args.site, username, groupname)
@@ -486,10 +502,14 @@ def cmd_site_from_puppet(args: Namespace):
                 logger.warning(f'Did not find group {groupname}, skip adding {[m.username for m in members]}')
                 continue
 
-        load_share_from_puppet(site_data.data.share, args.site)
+        load_share_from_puppet(site_data.data.share,
+                               args.site,
+                               mount_source_site=args.mount_source_site)
 
-        logger.info(f'Do slurm associations...')
-        load_slurm_from_puppet(args.site, site_data.data)
+        if args.mount_source_site is None:
+            logger.info(f'Do slurm associations...')
+            load_slurm_from_puppet(args.site,
+                                   site_data.data)
 
         logger.info('Done.')
 
@@ -592,8 +612,7 @@ def user_show(args: Namespace):
             scores = [r.get_text_score() for r in results]
             console.warn(f'More than 5 results for search "{args.find}", filtering...')
             mean = stat.mean(scores)
-            stdev = stat.stdev(scores)
-            #print(mean, stdev, scores)
+            stdev = stat.stdev(scores) or sys.float_info.min
             filtered = [r for r, s in zip(results, scores) if ((s - mean) / stdev) > 2]
             results = filtered if filtered else [r for r, s in zip(results, scores) if s > mean]
         
@@ -802,6 +821,17 @@ def cmd_user_groups(args: Namespace):
         output[username] = list(query_user_groups(args.site, username))
     dumped = dumps_yaml(output)
     console.print(highlight_yaml(dumped))
+
+
+@commands.register('database', 'user', 'index',
+                   help='Update user search index.')
+def user_index(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    users = GlobalUser.objects()
+    console.print(f'Updating index with {len(users)} users.')
+    for user in users:
+        UserSearch.update_index(user)
 
 
 #########################################
@@ -1167,8 +1197,9 @@ def cmd_storage_show(args: Namespace):
     elif args.automount:
         storages = query_automap_storages(sitename=args.site, tablename=args.automount)
     else:
-        sources = StorageMountSource.objects(sitename=args.site)
-        storages = Storage.objects(source__in=sources)
+        #sources = StorageMountSource.objects(sitename=args.site)
+        mounts = StorageMount.objects(sitename=args.site)
+        storages = Storage.objects(mount__in=mounts)
     
     for storage in storages:
         console.print(highlight_yaml(storage.pretty()))
