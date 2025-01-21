@@ -24,6 +24,9 @@ optional = true
 [tool.poetry.group.dev.dependencies]
 ipython = "^8.26.0"
 
+[tool.poetry.requires-plugins]
+poetry-bumpversion = "^0.3.3"
+
 [tool.poetry_bumpversion.file."cheeto/__init__.py"]
 
 [tool.poetry.dependencies]
