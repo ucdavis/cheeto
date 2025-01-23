@@ -58,7 +58,8 @@ from .utils import (TIMESTAMP_NOW,
                     _ctx_name, make_ngrams, 
                     size_to_megs,
                     removed,
-                    remove_nones)
+                    remove_nones,
+                    removed_nones)
 from .yaml import dumps as dumps_yaml
 
 
@@ -620,9 +621,9 @@ class SlurmTRES(EmbeddedDocument):
 class SiteSlurmQOS(BaseDocument):
     sitename = StringField(required=True)
     qosname = StringField(required=True, unique_with='sitename')
-    group_limits = EmbeddedDocumentField(SlurmTRES)
-    user_limits = EmbeddedDocumentField(SlurmTRES)
-    job_limits = EmbeddedDocumentField(SlurmTRES)
+    group_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
+    user_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
+    job_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
     priority = IntField()
     flags = ListField(SlurmQOSFlagField())
 
@@ -664,14 +665,6 @@ class SiteSlurmQOS(BaseDocument):
                               job=self.job_limits.to_puppet() if self.job_limits else None,
                               priority=self.priority if self.priority else 0,
                               flags=self.flags if self.flags else None)
-        #return PuppetSlurmQOS.load(dict(group=removed_nones(self.group_limits.to_dict())\
-        #                                    if self.group_limits else None,
-        #                                user=removed_nones(self.user_limits.to_dict())\
-        #                                    if self.user_limits else None,
-        #                                job=removed_nones(self.job_limits.to_dict())\
-        #                                    if self.job_limits else None,
-        #                                priority=self.priority if self.priority else 0,
-        #                                flags=self.flags if self.flags else None))
 
     @classmethod
     def from_puppet(cls, qosname: str, sitename: str, puppet_qos: PuppetSlurmQOS) -> Self:

@@ -23,10 +23,13 @@ from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
                      PuppetAccountMap,
+                     SlurmQOSTRES,
                      SlurmQOS)
 from .utils import (check_filter,
                     filter_nulls,
-                    _ctx_name, remove_nones)
+                    _ctx_name,
+                    remove_nones,
+                    removed_nones)
 
 
 class SControl:
@@ -206,15 +209,9 @@ def sanitize_tres(tres_string: str) -> dict:
 
 def build_puppet_tres(tres_string: str) -> Optional[dict]:
     slurm_tres = sanitize_tres(tres_string)
-    if any((item is not None for item in slurm_tres.values())):
-        puppet_tres = dict(cpus=slurm_tres.get('cpu', None),
-                           mem=slurm_tres.get('mem', None),
-                           gpus=slurm_tres.get('gpu', None))
-        remove_nones(puppet_tres)
-    else:
-        puppet_tres = None
-
-    return puppet_tres
+    return removed_nones(dict(cpus=slurm_tres.get('cpu', None),
+                              mem=slurm_tres.get('mem', None),
+                              gpus=slurm_tres.get('gpu', None)))
 
 
 def build_slurm_qos_state(qos_file_pointer: TextIO,
@@ -236,7 +233,7 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         try:
             puppet_qos = SlurmQOS.Schema().load(data) 
         except ValidationError as e:
-            logger.error(f'{_ctx_name()}: {data}, {e}')
+            logger.error(f'{data}::: {e}')
         else:
             if filter_row:
                 filtered_map[row['Name']] = puppet_qos
@@ -361,7 +358,7 @@ def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]
         else:
             new_qos = new_qoses[qos_name]
             if old_qos != new_qos:
-                logger.info(f'{_ctx_name()}: old qos: {old_qos} new qos: {new_qos}')
+                logger.info(f'{qos_name}:\nslurmdb qos: {old_qos}\nnew qos: {new_qos}')
                 updates.append((qos_name, new_qos))
     
     for qos_name, new_qos in new_qoses.items():
@@ -404,7 +401,7 @@ def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, li
             deletions.append(account_name)
         else:
             if old_extra != new_accounts[account_name]:
-                logger.info(f'{_ctx_name()}: old: {old_extra}, new: {new_accounts[account_name]}')
+                logger.info(f'slurmdb: {old_extra}\nnew: {new_accounts[account_name]}')
                 updates.append((account_name, new_accounts[account_name]))
 
     for account_name, new_extra in new_accounts.items():
