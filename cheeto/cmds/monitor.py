@@ -18,6 +18,12 @@ from . import commands
 from ..monitor import parse_dcmi_power, poll_dcmi_power
 
 
+@commands.register('monitor',
+                   help='Monitoring functionality')
+def _(*args):
+    pass
+
+
 @commands.register('monitor', 'power',
                    help='Monitor power usage from DCMI')
 def power(args: Namespace):

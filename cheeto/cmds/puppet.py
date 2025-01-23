@@ -23,6 +23,12 @@ from ..puppet import (_postload_validators,
 from ..yaml import MergeStrategy, parse_yaml_forest
 
 
+@commands.register('puppet',
+                   help='Operations on legacy puppet-consumed YAML')
+def _(*args):
+    pass
+
+
 @arggroup('YAML Validation')
 def validate_args(parser: ArgParser):
     parser.add_argument('--dump', default='/dev/stdout',

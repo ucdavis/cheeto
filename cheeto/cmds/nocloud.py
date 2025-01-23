@@ -18,6 +18,12 @@ from . import commands
 from ..yaml import parse_yaml, puppet_merge
 
 
+@commands.register('nocloud',
+                   help='Operations on nocloud cloud-init files')
+def _(*args):
+    pass
+
+
 @commands.register('nocloud', 'render',
                    help='Render nocloud templates for cobbler')
 def render(args: Namespace):

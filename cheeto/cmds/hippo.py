@@ -23,6 +23,12 @@ from ..hippo import (hippoapi_client, process_hippoapi_events,
 from ..log import Console
 
 
+@commands.register('hippo',
+                   help='Interaction with the HiPPO API')
+def _(*args):
+    pass
+
+
 @arggroup('HiPPO API', desc='HiPPO API event arguments')
 def event_args(parser: ArgParser):
     parser.add_argument('--post', default=False, action='store_true')

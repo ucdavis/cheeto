@@ -83,6 +83,12 @@ def setup_log(args: Namespace):
         atexit.register(close)
 
 
+@commands.register('config',
+                   help='Current configuration information')
+def _(args: Namespace):
+    pass
+
+
 @commands.register('config', 'show',
                    help='Parse and show the config file')
 def show(args: Namespace):
