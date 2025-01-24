@@ -1038,16 +1038,23 @@ class Storage(BaseDocument):
     def pretty(self) -> str:
         data = {}
         data['name'] = self.name
-        data['site'] = self.sitename
-        data['type'] = type(self.source).__name__
-        data['owner'] = self.owner
-        data['group'] = self.group
+        source = {}
+        source['name'] = self.source.name
+        source['site'] = self.sitename
+        source['type'] = type(self.source).__name__
+        source['owner'] = self.owner
+        source['group'] = self.group
         if self.quota:
-            data['quota'] = self.quota
-        data['host'] = self.host
-        data['host_path'] = str(self.host_path)
-        data['mount_path'] = str(self.mount_path)
-        data['mount_options'] = self.mount_options
+            source['quota'] = self.quota
+        source['host'] = self.host
+        source['host_path'] = str(self.host_path)
+        data['source'] = source
+        mount = {}
+        mount['name'] = self.mount.name
+        mount['site'] = self.mount.sitename
+        mount['path'] = str(self.mount_path)
+        mount['options'] = self.mount_options
+        data['mount'] = mount
         return dumps_yaml(data)
 
 
