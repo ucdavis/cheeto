@@ -1155,7 +1155,6 @@ def cmd_slurm_new_assoc(args: Namespace):
 
 
 @commands.register('database', 'storage',
-                   aliases=['st', 'store'],
                    help='Operations on storage')
 def storage_cmd(args: Namespace):
     pass
@@ -1205,23 +1204,35 @@ def cmd_storage_show(args: Namespace):
         console.print(highlight_yaml(storage.pretty()))
 
 
-@arggroup('Storage')
-def new_storage_args(parser: ArgParser):
-    parser.add_argument('--name', required=True)
-    parser.add_argument('--owner', required=True)
-    parser.add_argument('--group', required=True)
-    parser.add_argument('--host', required=True)
-    parser.add_argument('--path', required=True)
-    parser.add_argument('--table', required=True)
+@arggroup('Storage Source')
+def storage_source_args(parser: ArgParser,
+                        required: bool = False):
+    parser.add_argument('--owner', required=required)
+    parser.add_argument('--group', required=required)
+    parser.add_argument('--host', required=required)
+    parser.add_argument('--path', required=required)
     parser.add_argument('--collection')
     parser.add_argument('--quota', help='Override default quota from the collection')
+
+
+@arggroup('Storage Mount')
+def storage_mount_args(parser: ArgParser):
+    parser.add_argument('--table', required=True)
     parser.add_argument('--options', help='Override mount options from automount map for this mount')
     parser.add_argument('--add-options', help='Add mount options to automount map options for this mount')
     parser.add_argument('--remove-options', help='Remove mount options from automount map options for this mount')
     parser.add_argument('--globus', type=bool, default=False)
 
 
-@new_storage_args.apply()
+@arggroup('Storage')
+def storage_common_args(parser: ArgParser,
+                        required: bool = False):
+    parser.add_argument('--name', required=required)
+
+
+@storage_common_args.apply(required=True)
+@storage_source_args.apply(required=True)
+@storage_mount_args.apply()
 @site_args.apply(required=True)
 @commands.register('database', 'storage', 'new', 'storage',
                    help='Create a new Storage (source and mount)')
@@ -1275,6 +1286,45 @@ def cmd_storage_new_storage(args: Namespace):
                       mount=mount,
                       globus=args.globus)
     storage.save()
+
+
+@storage_common_args.apply(required=True)
+@site_args.apply(required=True)
+@storage_source_args.apply()
+@commands.register('database', 'storage', 'edit', 'source',
+                   help='Edit parameters of a storage source')
+def cmd_edit_storage_source(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+
+    source = StorageMountSource.objects.get(name=args.name,
+                                            sitename=args.site)
+    console.info(f'Updating Storage Source:')
+    console.print(highlight_yaml(source.pretty()))
+    console.rule()
+    update_kwargs = {}
+    if args.owner:
+        update_kwargs['owner'] = GlobalUser.objects.get(username=args.owner)
+    if args.group:
+        update_kwargs['group'] = GlobalGroup.objects.get(groupname=args.group)
+    if args.host:
+        update_kwargs['_host'] = args.host
+    if args.path:
+        update_kwargs['_host_path'] = args.path
+    if args.collection:
+        if type(source) is ZFSMountSource:
+            new_collection = ZFSSourceCollection.objects.get(sitename=args.site,
+                                                             name=args.collection)
+        else:
+            new_collection = NFSSourceCollection.objects.get(sitename=args.site,
+                                                             name=args.collection)
+        update_kwargs['collection'] = new_collection
+    if args.quota and type(source) is ZFSMountSource:
+        update_kwargs['_quota'] = args.quota
+
+    source.update(**update_kwargs)
+    console.info('Source Updated:')
+    console.print(highlight_yaml(source.pretty()))
 
 
 @arggroup('Collection')

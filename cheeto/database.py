@@ -867,6 +867,14 @@ class StorageMountSource(BaseDocument):
             data['group'] = data['group']['groupname']
         return data
 
+    def _pretty(self, *args, **kwargs):
+        formatters = {'owner': '{data.username}',
+                      'group': '{data.groupname}'}
+        if 'formatters' in kwargs and kwargs['formatters'] is not None:
+            formatters.update(kwargs['formatters'])
+        kwargs['formatters'] = formatters
+        return super()._pretty(*args, **kwargs)
+
 
 class NFSMountSource(StorageMountSource):
     _host_path = StringField()
