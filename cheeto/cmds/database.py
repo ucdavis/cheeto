@@ -1324,6 +1324,7 @@ def cmd_edit_storage_source(args: Namespace):
 
     source.update(**update_kwargs)
     console.info('Source Updated:')
+    source.reload()
     console.print(highlight_yaml(source.pretty()))
 
 
