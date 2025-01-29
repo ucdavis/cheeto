@@ -2346,6 +2346,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
                 uid=user.uid,
                 gid=user.gid,
                 shell=user.shell,
+                home_directory=user.home_directory,
                 fullname=user.fullname,
                 surname=user.fullname.split()[-1]) #type: ignore
 

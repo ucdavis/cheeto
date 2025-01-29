@@ -1177,7 +1177,7 @@ def storage_query_args(parser: ArgParser):
 @commands.register('database', 'storage', 'show',
                    help='Show storage information')
 def cmd_storage_show(args: Namespace):
-    console = Console()
+    console = Console(stderr=False)
 
     storages : List[Storage] = []
     if args.user:
