@@ -185,6 +185,11 @@ def set_user_type(username: str,
     GlobalUser.objects(username=username).update_one(set__type=usertype)
 
 
+def set_user_shell(username: str,
+                   shell: str):
+    GlobalUser.objects(username=username).update_one(set__shell=shell)
+
+
 def set_user_password(username: str,
                       password: str,
                       hasher: pyescrypt.Yescrypt):

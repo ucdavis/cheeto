@@ -30,6 +30,7 @@ from ..log import Emotes, Console
 from ..puppet import  SiteData
 from ..types import (USER_TYPES,
                      USER_STATUSES,
+                     ENABLED_SHELLS,
                      ACCESS_TYPES,
                      QOS_TRES_REGEX,
                      DATA_QUOTA_REGEX,
@@ -719,6 +720,19 @@ def user_set_status(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('status', choices=list(USER_STATUSES))
     parser.add_argument('--reason', '-r', required=True)
+
+
+@user_args.apply(required=True)
+@commands.register('database', 'user', 'set', 'shell',
+                   help='Set the shell for a user')
+def set_shell(args: Namespace):
+    for user in args.user:
+        set_user_shell(user, args.shell)
+
+
+@set_shell.args()
+def _(parser: ArgParser):
+    parser.add_argument('--shell', required=True, choices=ENABLED_SHELLS)
 
 
 @commands.register('database', 'user', 'set', 'password',

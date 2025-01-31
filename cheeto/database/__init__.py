@@ -45,6 +45,7 @@ from .crud import (
     query_user_status,
     tag_comment,
     add_user_comment,
+    set_user_shell,
     set_user_status,
     set_user_type,
     set_user_password,
