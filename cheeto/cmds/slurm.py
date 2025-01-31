@@ -17,10 +17,10 @@ from rich.progress import track
 import sh
 
 from . import commands
-from .database import (connect_to_database,
-                       slurm_association_state as build_db_association_state,
-                       slurm_qos_state as build_db_qos_state,
-                       site_args)
+from .database import site_args
+from ..database import (connect_to_database,
+                        slurm_association_state as build_db_association_state,
+                        slurm_qos_state as build_db_qos_state)
 from ..errors import ExitCode
 from ..puppet import PuppetAccountMap
 from ..slurm import (build_puppet_association_state,

@@ -34,7 +34,7 @@ def common_args(parser: ArgParser):
                        const=Path('/dev/stderr'),
                        help='Activate logger, either to stderr (just --log) or to a file (--log <file>)')
     parser.add_argument('--log-level',
-                        default='WARNING',
+                        default='INFO',
                         choices=list(logging.getLevelNamesMapping().keys()),
                         help='Set the log level')
     parser.add_argument('--quiet', '-q',

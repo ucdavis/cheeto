@@ -23,12 +23,9 @@ from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
                      MergeStrategy,
                      PuppetAccountMap,
-                     SlurmQOSTRES,
                      SlurmQOS)
 from .utils import (check_filter,
                     filter_nulls,
-                    _ctx_name,
-                    remove_nones,
                     removed_nones)
 
 

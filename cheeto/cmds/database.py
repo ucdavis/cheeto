@@ -8,23 +8,34 @@
 # Date   : 04.11.2024
 
 from argparse import Namespace
+from collections import defaultdict
+import logging
+from pathlib import Path
+import stat
 import sys
 
+from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
 from . import commands
-from ..database import _storage_to_puppet
 from .puppet import repo_args
-from ..args import regex_argtype
 from ..database import *
-from ..encrypt import generate_password
+from ..database import _storage_to_puppet
+from ..args import regex_argtype
+from ..encrypt import generate_password, get_mcf_hasher
 from ..errors import ExitCode
 from ..git import GitRepo
-from ..log import Emotes
+from ..log import Emotes, Console
 from ..puppet import  SiteData
-from ..utils import _ctx_name, slugify
-from ..yaml import highlight_yaml, parse_yaml, puppet_merge
+from ..types import (USER_TYPES,
+                     USER_STATUSES,
+                     ACCESS_TYPES,
+                     QOS_TRES_REGEX,
+                     DATA_QUOTA_REGEX,
+                     parse_qos_tres)
+from ..utils import slugify, removed, make_ngrams
+from ..yaml import highlight_yaml, parse_yaml, puppet_merge, dumps as dumps_yaml
 
 
 @commands.register('database',
@@ -397,10 +408,10 @@ def cmd_site_from_puppet(args: Namespace):
             try:
                 site_group.save()
             except NotUniqueError:
-                logger.info(f'{_ctx_name()}: SiteGroup {user_name} already exists, adding user as member')
+                logger.info(f'SiteGroup {user_name} already exists, adding user as member')
                 add_group_member(args.site, site_record, user_name)
             except Exception as e:
-                logger.warning(f'{_ctx_name()}: error saving SiteGroup for {user_name}: {e}')
+                logger.warning(f'error saving SiteGroup for {user_name}: {e}')
 
             if global_record.type == 'system' and args.system_groups:
                 if args.mount_source_site is None:
@@ -1179,7 +1190,7 @@ def storage_query_args(parser: ArgParser):
 def cmd_storage_show(args: Namespace):
     console = Console(stderr=False)
 
-    storages : List[Storage] = []
+    storages : list[Storage] = []
     if args.user:
         storages = query_user_storages(sitename=args.site, user=args.user)
     elif args.group:
