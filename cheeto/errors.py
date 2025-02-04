@@ -19,3 +19,4 @@ class ExitCode(IntEnum):
     BAD_CMDLINE_ARGS = 6
     NOT_UNIQUE = 7
     DOES_NOT_EXIST = 8
+    INVALID_METADATA = 9

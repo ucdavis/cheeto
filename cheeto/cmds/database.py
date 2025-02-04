@@ -9,6 +9,7 @@
 
 from argparse import Namespace
 from collections import defaultdict
+import csv
 import logging
 from pathlib import Path
 import stat
@@ -17,6 +18,9 @@ import sys
 from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
+
+from cheeto.config import IAMConfig
+from cheeto.iam import IAMAPI, sync_user_iam
 
 from . import commands
 from .puppet import repo_args
@@ -1418,3 +1422,122 @@ def cmd_storage_to_puppet(args: Namespace):
 @cmd_storage_to_puppet.args()
 def _(parser: ArgParser):
     parser.add_argument('puppet_yaml', type=Path)
+
+
+@commands.register('database', 'iam',
+                   help='Data sync from UCD IAM')
+def cmd_iam_sync(args: Namespace):
+    pass
+
+
+@commands.register('database', 'iam', 'sync',
+                   help='Sync user data from UCD IAM')
+def cmd_iam_sync_users(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    api = IAMAPI(args.config.ucdiam)
+    
+    users_to_sync = GlobalUser.objects(iam_synced=False,
+                                       iam_has_entry__in=[True, None],
+                                       type__in=['user', 'admin']).limit(args.max_users)
+    console.print(f'Syncing {len(users_to_sync)} users from IAM...')
+    for n, user in enumerate(users_to_sync):
+        try:
+            sync_user_iam(user, api=api)
+        except Exception as e:
+            logger.error(f'Error syncing user {user.username}: {e}')
+            continue
+
+
+@cmd_iam_sync_users.args()
+def _(parser: ArgParser):
+    parser.add_argument('--max-users', type=int, default=100,
+                        help='Maximum number of users to sync')
+
+
+def _create_user_from_iam(config: IAMConfig, username: str, email: str, comment: str):
+    logger = logging.getLogger(__name__ )
+
+    api = IAMAPI(config.ucdiam)
+    info_from_email = api.query_user_iamid_by_email(email)
+    info_from_username = api.query_user_iamid(username)
+    if info_from_email and info_from_username:
+        if info_from_email['iamId'] != info_from_username['iamId']:
+            logger.error(f'Username {username} and email {email} do not match.')
+            return None
+    
+    if info_from_email:
+        user_info = api.query_user_info(info_from_email['iamId'])
+        username = user_info['userId']
+        if query_user_exists(username):
+            logger.error(f'User {username} already exists.')
+            return None
+
+        try:
+            with run_in_transaction():
+                user, _ = create_user(username,
+                                    email,
+                                    int(user_info['mothraId']),
+                                    fullname=user_info['dFullName'],
+                                    status='inactive',
+                                    access=[])
+                user.iam_id = user_info['iamId']
+                user.iam_synced = True
+                user.colleges = api.query_user_colleges(user_info['iamId'])
+                user.save()
+            add_user_comment(user.username, f'Created from IAM data: {comment}')
+        except (DuplicateKeyError, NotUniqueError) as e:
+            logger.error(f'Duplicate user {username}: {e}')
+            logger.error(f'Existing user: {query_user(username)}')
+            return None
+        else:
+            return user
+    elif info_from_username:
+        logger.warning(f'Found username {username} in IAM but not email {email}.')
+    else:
+        logger.error('No user found in IAM with the provided username or email.')
+    return None
+
+
+@commands.register('database', 'iam', 'new-user',
+                   help='Create a user from IAM data')
+def cmd_iam_new_user(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+
+    user = _create_user_from_iam(args.config.ucdiam,
+                                 args.username,
+                                 args.email,
+                                 args.comment)
+    if user:
+        console.print('Created User:')
+        console.print(highlight_yaml(dumps_yaml(_show_user(user))))
+
+
+@cmd_iam_new_user.args()
+def _(parser: ArgParser):
+    parser.add_argument('username')
+    parser.add_argument('email')
+    parser.add_argument('comment')
+
+
+@commands.register('database', 'iam', 'new-users',
+                   help='Create users from IAM data')
+def cmd_iam_new_users(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+
+    with open(args.users) as fp:
+        for row in csv.DictReader(fp, delimiter='\t'):
+            user = _create_user_from_iam(args.config,
+                                         row['Username'],
+                                         row['Email'],
+                                         args.comment)
+            if user:
+                console.print('Created User:')
+                console.print(highlight_yaml(dumps_yaml(_show_user(user))))
+
+@cmd_iam_new_users.args()
+def _(parser: ArgParser):
+    parser.add_argument('users')
+    parser.add_argument('comment')

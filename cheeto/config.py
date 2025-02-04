@@ -69,6 +69,7 @@ class HippoConfig(BaseModel):
 @dataclass(frozen=True)
 class IAMConfig(BaseModel):
     api_key: str
+    base_url: str
 
 
 @require_kwargs

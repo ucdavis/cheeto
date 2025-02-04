@@ -669,6 +669,8 @@ def create_user(username: str,
                                    _members=[site_user])
             site_group.save(force_insert=True)
 
+    return global_user, global_group
+
 
 def create_system_user(username: str,
                        email: str,

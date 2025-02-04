@@ -7,9 +7,18 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 29.01.2025
 
+from functools import singledispatchmethod
 from typing import Mapping
 
-from mongoengine import connect, Document, QuerySet, GenericReferenceField, ReferenceField, EmbeddedDocument
+from mongoengine import (
+    connect, 
+    Document, 
+    QuerySet, 
+    GenericReferenceField, 
+    ReferenceField, 
+    EmbeddedDocument,
+    ListField
+)
 
 from ..config import MongoConfig
 from ..log import Console
@@ -38,6 +47,47 @@ def handler(event):
         return fn
 
     return decorator
+
+
+class BaseView:
+
+    def __init__(self, document: Document,
+                       strip_id: bool = True,
+                       strip_empty: bool = False,):
+        self.document = document
+
+    def __getattr__(self, key: str):
+        if key in self.document._fields:
+            return getattr(self.document, key)
+
+    @singledispatchmethod
+    def viewattr(self, attr: object):
+        return attr
+    
+    @viewattr.register
+    def _(self, attr: ListField):
+        pass
+    
+    def _pretty(self, formatters: Mapping[str, str] | None = None,
+                      lift: list[str] | None = None,
+                      skip: tuple | None = None,
+                      order: list[str] | None = None,
+                      extra: dict | None = None) -> str:
+        return self.document._pretty(formatters=formatters,
+                                     lift=lift,
+                                     skip=skip,
+                                     order=order,
+                                     extra=extra)
+
+    def pretty(self, formatters: Mapping[str, str] | None = None,
+                     lift: list[str] | None = None,
+                     skip: tuple | None = None,
+                     order: list[str] | None = None) -> str:
+        return self.document.pretty(formatters=formatters,
+                                    lift=lift,
+                                    skip=skip,
+                                    order=order)
+
 
 
 class BaseDocument(Document):

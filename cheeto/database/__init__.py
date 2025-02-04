@@ -7,6 +7,8 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 30.01.2025
 
+from mongoengine.context_managers import run_in_transaction
+
 from .base import (
     connect_to_database,
     InvalidUser,

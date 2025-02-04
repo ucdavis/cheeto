@@ -48,6 +48,10 @@ class GlobalUser(BaseDocument):
     access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
     comments = ListField(StringField())
 
+    iam_has_entry = BooleanField(default=True)
+    iam_id = POSIXIDField()
+    colleges = ListField(StringField())
+
     ldap_synced = BooleanField(default=False)
     iam_synced = BooleanField(default=False)
 

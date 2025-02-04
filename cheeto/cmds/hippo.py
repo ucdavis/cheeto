@@ -10,7 +10,6 @@
 from argparse import Namespace
 import logging
 from pathlib import Path
-import sys
 
 from ponderosa import ArgParser, arggroup
 
