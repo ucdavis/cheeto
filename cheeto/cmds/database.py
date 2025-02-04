@@ -12,7 +12,7 @@ from collections import defaultdict
 import csv
 import logging
 from pathlib import Path
-import stat
+import statistics as stat
 import sys
 
 from mongoengine import NotUniqueError, DoesNotExist
