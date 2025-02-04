@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -18,22 +18,22 @@ class MajorCodeList:
     Attributes:
         response_details (Union[Unset, str]):
         response_status (Union[Unset, int]):
-        major_code_list (Union[Unset, List['MajorCode']]):
+        major_code_list (Union[Unset, list['MajorCode']]):
         api_deprecated_error (Union[Unset, str]):
     """
 
     response_details: Union[Unset, str] = UNSET
     response_status: Union[Unset, int] = UNSET
-    major_code_list: Union[Unset, List["MajorCode"]] = UNSET
+    major_code_list: Union[Unset, list["MajorCode"]] = UNSET
     api_deprecated_error: Union[Unset, str] = UNSET
-    additional_properties: Dict[str, Any] = _attrs_field(init=False, factory=dict)
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         response_details = self.response_details
 
         response_status = self.response_status
 
-        major_code_list: Union[Unset, List[Dict[str, Any]]] = UNSET
+        major_code_list: Union[Unset, list[dict[str, Any]]] = UNSET
         if not isinstance(self.major_code_list, Unset):
             major_code_list = []
             for major_code_list_item_data in self.major_code_list:
@@ -42,7 +42,7 @@ class MajorCodeList:
 
         api_deprecated_error = self.api_deprecated_error
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if response_details is not UNSET:
@@ -57,7 +57,7 @@ class MajorCodeList:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         from ..models.major_code import MajorCode
 
         d = src_dict.copy()
@@ -85,7 +85,7 @@ class MajorCodeList:
         return major_code_list
 
     @property
-    def additional_keys(self) -> List[str]:
+    def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
     def __getitem__(self, key: str) -> Any:

@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import httpx
 
@@ -17,8 +17,8 @@ def _get_kwargs(
     campus_email: Union[Unset, str] = UNSET,
     key: Union[Unset, str] = UNSET,
     v: Union[Unset, str] = UNSET,
-) -> Dict[str, Any]:
-    params: Dict[str, Any] = {}
+) -> dict[str, Any]:
+    params: dict[str, Any] = {}
 
     params["iamId"] = iam_id
 
@@ -36,7 +36,7 @@ def _get_kwargs(
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
-    _kwargs: Dict[str, Any] = {
+    _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/iam/people/contactinfo/search",
         "params": params,

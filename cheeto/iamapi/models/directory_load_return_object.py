@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -29,24 +29,24 @@ class DirectoryLoadReturnObject:
     reponse_data: Union[Unset, "DirectoryResponseObject"] = UNSET
     cursor: Union[Unset, "DirectoryLoadCursor"] = UNSET
     api_deprecated_error: Union[Unset, str] = UNSET
-    additional_properties: Dict[str, Any] = _attrs_field(init=False, factory=dict)
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         response_details = self.response_details
 
         response_status = self.response_status
 
-        reponse_data: Union[Unset, Dict[str, Any]] = UNSET
+        reponse_data: Union[Unset, dict[str, Any]] = UNSET
         if not isinstance(self.reponse_data, Unset):
             reponse_data = self.reponse_data.to_dict()
 
-        cursor: Union[Unset, Dict[str, Any]] = UNSET
+        cursor: Union[Unset, dict[str, Any]] = UNSET
         if not isinstance(self.cursor, Unset):
             cursor = self.cursor.to_dict()
 
         api_deprecated_error = self.api_deprecated_error
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if response_details is not UNSET:
@@ -63,7 +63,7 @@ class DirectoryLoadReturnObject:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         from ..models.directory_load_cursor import DirectoryLoadCursor
         from ..models.directory_response_object import DirectoryResponseObject
 
@@ -100,7 +100,7 @@ class DirectoryLoadReturnObject:
         return directory_load_return_object
 
     @property
-    def additional_keys(self) -> List[str]:
+    def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
     def __getitem__(self, key: str) -> Any:

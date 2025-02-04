@@ -1,5 +1,5 @@
 from http import HTTPStatus
-from typing import Any, Dict, Optional, Union
+from typing import Any, Optional, Union
 
 import httpx
 
@@ -12,17 +12,17 @@ def _get_kwargs(
     id: str,
     *,
     key: Union[Unset, str] = UNSET,
-    type: Union[Unset, str] = UNSET,
-) -> Dict[str, Any]:
-    params: Dict[str, Any] = {}
+    type_: Union[Unset, str] = UNSET,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {}
 
     params["key"] = key
 
-    params["type"] = type
+    params["type"] = type_
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
-    _kwargs: Dict[str, Any] = {
+    _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/mothra/EAK/v1.0/{id}".format(
             id=id,
@@ -58,7 +58,7 @@ def sync_detailed(
     *,
     client: Union[AuthenticatedClient, Client],
     key: Union[Unset, str] = UNSET,
-    type: Union[Unset, str] = UNSET,
+    type_: Union[Unset, str] = UNSET,
 ) -> Response[Any]:
     """Get Basic IDs with loginid or employeeid
 
@@ -67,7 +67,7 @@ def sync_detailed(
     Args:
         id (str):
         key (Union[Unset, str]):
-        type (Union[Unset, str]):
+        type_ (Union[Unset, str]):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -80,7 +80,7 @@ def sync_detailed(
     kwargs = _get_kwargs(
         id=id,
         key=key,
-        type=type,
+        type_=type_,
     )
 
     response = client.get_httpx_client().request(
@@ -95,7 +95,7 @@ async def asyncio_detailed(
     *,
     client: Union[AuthenticatedClient, Client],
     key: Union[Unset, str] = UNSET,
-    type: Union[Unset, str] = UNSET,
+    type_: Union[Unset, str] = UNSET,
 ) -> Response[Any]:
     """Get Basic IDs with loginid or employeeid
 
@@ -104,7 +104,7 @@ async def asyncio_detailed(
     Args:
         id (str):
         key (Union[Unset, str]):
-        type (Union[Unset, str]):
+        type_ (Union[Unset, str]):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -117,7 +117,7 @@ async def asyncio_detailed(
     kwargs = _get_kwargs(
         id=id,
         key=key,
-        type=type,
+        type_=type_,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)

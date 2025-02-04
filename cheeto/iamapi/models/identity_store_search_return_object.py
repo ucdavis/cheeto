@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -26,20 +26,20 @@ class IdentityStoreSearchReturnObject:
     response_status: Union[Unset, int] = UNSET
     response_data: Union[Unset, "IdentityStoreResponseObject"] = UNSET
     api_deprecated_error: Union[Unset, str] = UNSET
-    additional_properties: Dict[str, Any] = _attrs_field(init=False, factory=dict)
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         response_details = self.response_details
 
         response_status = self.response_status
 
-        response_data: Union[Unset, Dict[str, Any]] = UNSET
+        response_data: Union[Unset, dict[str, Any]] = UNSET
         if not isinstance(self.response_data, Unset):
             response_data = self.response_data.to_dict()
 
         api_deprecated_error = self.api_deprecated_error
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if response_details is not UNSET:
@@ -54,7 +54,7 @@ class IdentityStoreSearchReturnObject:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         from ..models.identity_store_response_object import IdentityStoreResponseObject
 
         d = src_dict.copy()
@@ -82,7 +82,7 @@ class IdentityStoreSearchReturnObject:
         return identity_store_search_return_object
 
     @property
-    def additional_keys(self) -> List[str]:
+    def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
     def __getitem__(self, key: str) -> Any:

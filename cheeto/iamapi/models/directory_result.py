@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Type, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -54,9 +54,9 @@ class DirectoryResult:
     labeled_uri: Union[Unset, str] = UNSET
     ou: Union[Unset, str] = UNSET
     title: Union[Unset, str] = UNSET
-    additional_properties: Dict[str, Any] = _attrs_field(init=False, factory=dict)
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         check_sum = self.check_sum
 
         ucd_person_uuid = self.ucd_person_uuid
@@ -97,7 +97,7 @@ class DirectoryResult:
 
         title = self.title
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if check_sum is not UNSET:
@@ -144,7 +144,7 @@ class DirectoryResult:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         check_sum = d.pop("checkSum", UNSET)
 
@@ -213,7 +213,7 @@ class DirectoryResult:
         return directory_result
 
     @property
-    def additional_keys(self) -> List[str]:
+    def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
     def __getitem__(self, key: str) -> Any:

@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Type, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 from attrs import field as _attrs_field
@@ -20,16 +20,16 @@ class DirectoryLoadCursor:
     estimated_result_count: Union[Unset, int] = UNSET
     current_index: Union[Unset, int] = UNSET
     more_results_url: Union[Unset, str] = UNSET
-    additional_properties: Dict[str, Any] = _attrs_field(init=False, factory=dict)
+    additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         estimated_result_count = self.estimated_result_count
 
         current_index = self.current_index
 
         more_results_url = self.more_results_url
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update({})
         if estimated_result_count is not UNSET:
@@ -42,7 +42,7 @@ class DirectoryLoadCursor:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         estimated_result_count = d.pop("estimatedResultCount", UNSET)
 
@@ -60,7 +60,7 @@ class DirectoryLoadCursor:
         return directory_load_cursor
 
     @property
-    def additional_keys(self) -> List[str]:
+    def additional_keys(self) -> list[str]:
         return list(self.additional_properties.keys())
 
     def __getitem__(self, key: str) -> Any:
