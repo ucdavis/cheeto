@@ -7,8 +7,9 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 29.01.2025
 
+from codecs import ignore_errors
 import logging
-from typing import Iterable, Optional, Self
+from typing import Iterable, Optional, Self, no_type_check
 
 from mongoengine import (EmailField,
                          StringField, 
@@ -22,7 +23,7 @@ from mongoengine import (EmailField,
 from ..hippoapi.models import QueuedEventAccountModel
 from ..utils import make_ngrams
 from ..puppet import PuppetUserRecord
-from ..types import DEFAULT_SHELL
+from ..types import DEFAULT_SHELL, hippo_to_cheeto_access
 
 from .base import BaseDocument, handler, SyncQuerySet
 from .fields import (POSIXNameField,
@@ -69,11 +70,13 @@ class GlobalUser(BaseDocument):
         ]
     }
 
+    @no_type_check
     def full_ngrams(self):
         return make_ngrams(self.username) + \
                make_ngrams(self.fullname) + \
                make_ngrams(self.email)
 
+    @no_type_check
     def prefix_ngrams(self):
         return make_ngrams(self.username, prefix=True) + \
                make_ngrams(self.fullname, prefix=True) + \
@@ -221,54 +224,55 @@ class SiteUser(BaseDocument):
 
     @property
     def email(self):
-        return self.parent.email
+        return self.parent.email # type: ignore
 
     @property
     def uid(self):
-        return self.parent.uid
+        return self.parent.uid # type: ignore
 
     @property
     def gid(self):
-        return self.parent.gid
+        return self.parent.gid # type: ignore
 
     @property
     def fullname(self):
-        return self.parent.fullname
+        return self.parent.fullname # type: ignore
 
     @property
     def shell(self):
-        return self.parent.shell
+        return self.parent.shell # type: ignore
 
     @property
     def home_directory(self):
-        return self.parent.home_directory
+        return self.parent.home_directory # type: ignore
 
     @property
     def password(self):
-        return self.parent.password
+        return self.parent.password # type: ignore
 
     @property
     def type(self):
-        return self.parent.type
+        return self.parent.type # type: ignore
 
     @property
     def status(self):
-        if self.parent.status != 'active':
-            return self.parent.status
+        if self.parent.status != 'active': # type: ignore
+            return self.parent.status # type: ignore
         else:
             return self._status
 
     @property
     def ssh_key(self):
-        return self.parent.ssh_key
+        return self.parent.ssh_key # type: ignore
 
     @property
+    @no_type_check
     def access(self):
         return set(self._access) | set(self.parent.access)
 
     @property
     def comments(self):
-        return self.parent.comments
+        return self.parent.comments # type: ignore
 
     @classmethod
     def from_puppet(cls, username: str,
@@ -279,7 +283,7 @@ class SiteUser(BaseDocument):
         puppet_data = puppet_record.to_dict()
         access = set()
         if 'tag' in puppet_data:
-            tags = puppet_data['tag']
+            tags = puppet_data['tag'] # type: ignore
             if 'root-ssh-tag' in tags:
                 access.add('root-ssh')
             if 'ssh-tag' in tags:
@@ -290,7 +294,7 @@ class SiteUser(BaseDocument):
         return cls(
             username = username,
             sitename = sitename,
-            expiry = puppet_data.get('expiry', None),
+            expiry = puppet_data.get('expiry', None), # type: ignore
             _access = access,
             _status = puppet_record.status,
             parent = parent

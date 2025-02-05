@@ -104,10 +104,11 @@ class LDAPManager:
                  servers: Optional[List[Server]] = None,  
                  strategy: Optional[str] = SYNC,
                  auto_bind: bool = True,
+                 use_ssl: bool = False,
                  **connection_kwargs):
 
         if servers is None:
-            self.servers = [Server(uri, get_info='ALL') for uri in config.servers] #type: ignore
+            self.servers = [Server(uri, get_info='ALL', use_ssl=use_ssl) for uri in config.servers] #type: ignore
         else:
             self.servers = servers
 
@@ -253,6 +254,8 @@ class LDAPManager:
 
         status = entry.entry_commit_changes()
         if status is False and entry.entry_status == STATUS_PENDING_CHANGES:
+            self.logger.error(entry.entry_cursor.errors)
+            self.logger.error(entry)
             raise LDAPCommitFailed(f'Failed to update user {username}')
         self.logger.info(f'update_user: {entry}')
         return entry
