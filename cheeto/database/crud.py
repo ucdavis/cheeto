@@ -560,7 +560,11 @@ def create_home_storage(sitename: str,
                                 owner=user,
                                 group=group,
                                 collection=collection)
-        source.save()
+        try:
+            source.save()
+        except NotUniqueError as e:
+            logger.warning(f'source already exists')
+            source = ZFSMountSource.objects.get(sitename=sitename, name=user.username)
     else:
         source.update(collection=collection)
 

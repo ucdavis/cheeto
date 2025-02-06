@@ -9,8 +9,10 @@
 
 from mongoengine import (DictField,
                          IntField,
-                         StringField)
+                         StringField,
+                         DateTimeField)
 
+from ..hippoapi.models import QueuedEventModel
 from ..types import HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES
 
 from .base import BaseDocument
@@ -24,4 +26,8 @@ class HippoEvent(BaseDocument):
     status = StringField(required=True,
                          default='Pending',
                          choices=HIPPO_EVENT_STATUSES)
+    #created_at = DateTimeField()
     data = DictField()
+
+    def to_event_model(self) -> QueuedEventModel:
+        return QueuedEventModel.from_dict(self.data)

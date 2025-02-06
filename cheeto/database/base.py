@@ -207,12 +207,12 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
         console.print(f'  tls: {config.tls}')
     if config.user:
         return connect(config.database,
-                       host=config.uri,
+                       host=f'{config.uri}:{config.port}',
                        username=config.user,
                        password=config.password,
                        tls=config.tls)
     else:
         return connect(config.database,
-                       host=config.uri,
+                       host=f'{config.uri}:{config.port}',
                        tls=config.tls)
 
