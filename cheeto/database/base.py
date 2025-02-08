@@ -9,6 +9,7 @@
 
 from functools import singledispatchmethod
 from typing import Mapping
+import uuid
 
 from mongoengine import (
     connect, 
@@ -24,15 +25,6 @@ from ..config import MongoConfig
 from ..log import Console
 from ..types import is_listlike
 from ..yaml import dumps as dumps_yaml
-
-
-class InvalidUser(RuntimeError):
-    pass
-
-
-class DuplicateUser(ValueError):
-    def __init__(self, username):
-        super().__init__(f'User {username} already exists.')
 
 
 def handler(event):
@@ -210,9 +202,11 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
                        host=f'{config.uri}:{config.port}',
                        username=config.user,
                        password=config.password,
-                       tls=config.tls)
+                       tls=config.tls,
+                       uuidRepresentation='standard')
     else:
         return connect(config.database,
                        host=f'{config.uri}:{config.port}',
-                       tls=config.tls)
+                       tls=config.tls,
+                       uuidRepresentation='standard')
 

@@ -261,13 +261,18 @@ def handle_createaccount_event(event: QueuedEventDataModel,
                                     _members=[site_user])
                 site_group.save()
 
-            try:
-                create_home_storage(sitename, global_user)
-            except Exception:
-                logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}')
+            #try:
+            #    create_home_storage(sitename, global_user)
+            #except Exception as e:
+            #    logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}: {e}')
 
             for group in event.groups:
-                add_group_member(sitename, username, group.name)
+                try:
+                    SiteGroup.objects(sitename=sitename, groupname=group.name).update(add_to_set___members=site_user) #type: ignore
+                    #add_group_member(sitename, username, group.name)
+                except Exception as e:
+                    logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
+                    raise
 
             if is_sponsor_account:
                 sponsor_group = create_group_from_sponsor(site_user)

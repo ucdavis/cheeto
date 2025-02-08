@@ -1,33 +1,56 @@
 ldap:
-  test-server:
+  default:
     servers:
-    - test-server
+    - ldap://localhost
     searchbase: dc=hpc,dc=ucdavis,dc=edu
-    login_dn: 'uid=test-user,ou=Services,dc=hpc,dc=ucdavis,dc=edu'
-    password: test-password
+    login_dn: cn=admin,dc=hpc,dc=ucdavis,dc=edu
+    password: ''
+    user_status_groups:
+      active: login-ssh-users
+      inactive: inactive-users
+      disabled: disabled-users
+    user_access_groups:
+      login-ssh: login-ssh-users
+      compute-ssh: compute-ssh-users
+      root-ssh: root-ssh-users
+      sudo: sudo-users
     user_classes:
       - inetOrgPerson
       - posixAccount
+      - ldapPublicKey
     user_attrs:
-      uid: uid
+      username: uid
       email: mail
-      uid_number: uidNumber
-      gid_number: gidNumber
+      uid: uidNumber
+      gid: gidNumber
       fullname: displayName
       surname: sn
       home_directory: homeDirectory
       shell: loginShell
+      ssh_keys: sshPublicKey
+      #password: userPassword
     user_base: ou=users,dc=hpc,dc=ucdavis,dc=edu
     group_classes:
       - posixGroup
       - groupOfMembers
     group_attrs:
-      gid: cn
-      gid_number: gidNumber
+      groupname: cn
+      gid: gidNumber
       members: memberUid
+hippo:
+  api_key: ''
+  site_aliases:
+    caesfarm: farm
+  max_tries: 3
+  base_url: https://hippo-test.azurewebsites.net
+ucdiam:
+  api_key: ''
+  base_url: https://iet-ws.ucdavis.edu/api
 mongo:
-  uri: 127.0.0.1
-  port: 27017
-  user: cheeto
-  password: cheeto-password
-  database: hpccf
+  default:
+    uri: 127.0.0.1
+    port: 28080
+    tls: False
+    user: ''
+    password: ''
+    database: hpccf

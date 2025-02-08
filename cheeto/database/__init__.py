@@ -11,15 +11,24 @@ from mongoengine.context_managers import run_in_transaction
 
 from .base import (
     connect_to_database,
-    InvalidUser,
-    DuplicateUser,
     SyncQuerySet,
     BaseDocument,
     handler
 )
 from .site import Site
 from .hippo import HippoEvent
-from .user import GlobalUser, SiteUser, UserSearch, User
+from .user import (
+    DuplicateUser,
+    DuplicateGlobalUser,
+    DuplicateSiteUser,
+    NonExistentGlobalUser,
+    NonExistentSiteUser,
+    GlobalUser, 
+    InvalidUser, 
+    SiteUser, 
+    UserSearch, 
+    User
+)
 from .group import GlobalGroup, SiteGroup, SiteSlurmAccount
 from .slurm import (
     SiteSlurmAssociation, 

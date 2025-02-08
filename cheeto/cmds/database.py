@@ -20,6 +20,7 @@ from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
 from cheeto.config import IAMConfig
+from ..database.user import DuplicateUser
 from cheeto.iam import IAMAPI, sync_user_iam
 
 from . import commands
@@ -687,7 +688,7 @@ def user_new_system(args: Namespace):
                            args.email,
                            args.fullname,
                            password=password)
-    except DuplicateUser as e:
+    except DuplicateGlobalUser as e:
         console.print(f'[red]{e}')
     else:
         console.print(f'Created user {args.username} on all sites.')

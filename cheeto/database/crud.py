@@ -42,7 +42,7 @@ from ..types import (DEFAULT_SHELL,
                      SlurmAccount as SlurmAccountTuple)
 from ..yaml import dumps as dumps_yaml
 
-from .base import DuplicateUser
+from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser
 from .site import Site
 from .hippo import HippoEvent
 from .user import GlobalUser, SiteUser, User, UserSearch, global_user_t, site_user_t, handle_site_users
@@ -593,11 +593,13 @@ def add_site_user(sitename: str, user: global_user_t):
         user = GlobalUser.objects.get(username=user)
     group = GlobalGroup.objects.get(groupname=user.username)
 
+    if query_user_exists(user.username, sitename):
+        raise DuplicateSiteUser(user.username, sitename)
+
     with run_in_transaction():
         site_user = SiteUser(username=user.username,
                              sitename=sitename,
-                             parent=user,
-                             _groups=[group])
+                             parent=user)
         site_user.save(force_insert=True)
 
         site_group = SiteGroup(groupname=user.username,
@@ -607,6 +609,8 @@ def add_site_user(sitename: str, user: global_user_t):
         site_group.save(force_insert=True)
 
     logger.info(f'Created SiteUser {user.username} on site {sitename}')
+
+    return site_user, site_group
 
 
 def create_user(username: str,
@@ -624,7 +628,7 @@ def create_user(username: str,
     logger = logging.getLogger(__name__)
 
     if query_user_exists(username, raise_exc=False):
-        raise DuplicateUser(username)
+        raise DuplicateGlobalUser(username)
     
     if gid is None:
         gid = uid
@@ -662,16 +666,7 @@ def create_user(username: str,
 
     if sitenames is not None:
         for sitename in sitenames:
-            site_user = SiteUser(username=username,
-                                 sitename=sitename,
-                                 parent=global_user)
-            site_user.save(force_insert=True)
-
-            site_group = SiteGroup(groupname=username,
-                                   sitename=sitename,
-                                   parent=global_group,
-                                   _members=[site_user])
-            site_group.save(force_insert=True)
+            add_site_user(sitename, global_user)
 
     return global_user, global_group
 

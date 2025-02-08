@@ -333,3 +333,31 @@ def handle_site_users(sitename: str, users: Iterable[site_user_t]):
     logger.debug(f'to_query: {to_query}')
     for user in SiteUser.objects(sitename=sitename, username__in=to_query):
         yield user
+
+
+class DuplicateUser(ValueError):
+    def __init__(self, username):
+        super().__init__(f'User {username} already exists.')
+
+
+class DuplicateGlobalUser(DuplicateUser):
+    pass
+
+
+class DuplicateSiteUser(DuplicateUser):
+    def __init__(self, username, sitename):
+        super().__init__(f'User {username} already exists in site {sitename}.')
+
+
+class NonExistentGlobalUser(ValueError):
+    def __init__(self, username):
+        super().__init__(f'User {username} does not exist.')
+
+
+class NonExistentSiteUser(ValueError):
+    def __init__(self, username, sitename):
+        super().__init__(f'User {username} does not exist in site {sitename}.')
+
+
+class InvalidUser(RuntimeError):
+    pass
