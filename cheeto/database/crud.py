@@ -359,13 +359,15 @@ def query_admin_keys(sitename: Optional[str] = None):
 def query_user_home_storage(sitename: str, user: site_user_t):
     logger = logging.getLogger(__name__)
     if type(user) is SiteUser:
-        user = user.username
+        username = user.username
     home_collection = NFSSourceCollection.objects.get(name='home',
                                                       sitename=sitename)
     home_sources = StorageMountSource.objects(collection=home_collection,
-                                              name=user)
+                                              owner=user)
+    home_mounts = Automount.objects(sitename=sitename)
     #logger.info(f'{_ctx_name()}: {user}: {home_sources}')
-    return Storage.objects.get(source__in=home_sources)
+    return Storage.objects.get(source__in=home_sources,
+                               mount__in=home_mounts)
  
 
 def query_user_storages(sitename: str, user: site_user_t):
