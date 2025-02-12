@@ -261,10 +261,10 @@ def handle_createaccount_event(event: QueuedEventDataModel,
                                     _members=[site_user])
                 site_group.save()
 
-            #try:
-            #    create_home_storage(sitename, global_user)
-            #except Exception as e:
-            #    logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}: {e}')
+            try:
+                create_home_storage(sitename, global_user)
+            except Exception as e:
+                logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}: {e}')
 
             for group in event.groups:
                 try:
