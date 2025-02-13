@@ -42,6 +42,8 @@ class TestUser:
     def setup_site(self, db_config):
         drop_database(db_config)
         create_site('test-site', 'test.site.com')
+        for doc in (GlobalUser, GlobalGroup, SiteUser, SiteGroup):
+            doc.ensure_indexes()
         yield
         drop_database(db_config)
 
