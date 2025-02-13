@@ -20,7 +20,7 @@ from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
 from cheeto.config import IAMConfig
-from ..database.user import DuplicateUser
+from ..database.user import DuplicateGlobalUser, DuplicateUser
 from cheeto.iam import IAMAPI, sync_user_iam
 
 from . import commands

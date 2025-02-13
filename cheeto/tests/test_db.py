@@ -3,37 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from ..config import get_config
 from ..database import *
 
-
-@pytest.fixture(scope='session')
-def db_config(request):
-    data_dir = Path(__file__).parent / 'data'
-    return get_config(data_dir / 'config.yaml').mongo
-
-
-def drop_database(config):
-    conn = connect_to_database(config, quiet=True)
-    conn.drop_database(config.database)
-
-
-@pytest.fixture
-def drop_before(db_config):
-    drop_database(db_config)
-
-
-@pytest.fixture
-def drop_after(db_config):
-    yield
-    drop_database(db_config)
-
-
-@pytest.fixture
-def drop_before_after(db_config):
-    drop_database(db_config)
-    yield
-    drop_database(db_config)
+from .conftest import drop_database
 
 
 def test_connect_to_database(db_config):

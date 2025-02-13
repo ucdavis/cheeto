@@ -10,6 +10,7 @@
 import argparse
 import logging
 import shlex
+import site
 import socket
 import sys
 import traceback
@@ -19,18 +20,29 @@ from jinja2 import Environment, FileSystemLoader
 from mongoengine.context_managers import run_in_transaction
 from rich.console import Console
 
+from cheeto.database.crud import query_user_home_storage
+from cheeto.database.ldap import ldap_sync
+from cheeto.database.storage import NonExistentStorage
+
 from .config import HippoConfig
 from .database import (Site,
                        add_group_member,
                        add_user_access,
+                       add_site_user,
+                       DuplicateGlobalUser,
+                       DuplicateSiteUser,
                        GlobalUser,
                        SiteUser,
                        GlobalGroup,
                        SiteGroup,
                        HippoEvent,
                        create_group_from_sponsor,
-                       create_home_storage, query_associated_storages,
-                       query_user_exists, query_user_groups, query_user_slurm, 
+                       create_user_from_hippo,
+                       create_home_storage,
+                       query_associated_storages,
+                       query_user_exists,
+                       query_user_groups,
+                       query_user_slurm, 
                        set_user_status)
 from .hippoapi.api.event_queue import (event_queue_pending_events,
                                        event_queue_update_status)
@@ -177,7 +189,8 @@ def postback_event_failed(event_id: int,
 @event_handler('UpdateSshKey')
 def handle_updatesshkey_event(event: QueuedEventDataModel,
                               client: AuthenticatedClient,
-                              config: HippoConfig):
+                              config: HippoConfig,
+                              notify: bool = True):
     logger = logging.getLogger(__name__)
     hippo_account = event.accounts[0]
     sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
@@ -198,7 +211,8 @@ def handle_updatesshkey_event(event: QueuedEventDataModel,
     except Exception:
         raise
     else:
-        hippoapi_send_email(get_updatesshkey_email(user), client)
+        if notify:
+            hippoapi_send_email(get_updatesshkey_email(user), client)
 
 
 def get_updatesshkey_email(user: SiteUser):
@@ -213,7 +227,8 @@ def get_updatesshkey_email(user: SiteUser):
 @event_handler('CreateAccount')
 def handle_createaccount_event(event: QueuedEventDataModel,
                                client: AuthenticatedClient,
-                               config: HippoConfig):
+                               config: HippoConfig,
+                               notify: bool = True):
 
     logger = logging.getLogger(__name__)
 
@@ -225,63 +240,54 @@ def handle_createaccount_event(event: QueuedEventDataModel,
     logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
 
     try:
-        with run_in_transaction():
-            if not query_user_exists(username):
-                logger.info(f'GlobalUser for {username} does not exist, creating.')
-                global_user = GlobalUser.from_hippo(hippo_account)
-                global_user.save()
-                global_group = GlobalGroup(groupname=username,
-                                        gid=global_user.gid,
-                                        type='user')
-                global_group.save()
-            else:
-                logger.info(f'GlobalUser for {username} exists, checking status.')
-                global_user = GlobalUser.objects.get(username=username) #type: ignore
-                global_group = GlobalGroup.objects.get(groupname=username)  # type: ignore
-                if global_user.status != 'active':
-                    logger.info(f'GlobalUser for {username} has status {global_user.status}, setting to "active"')
-                    set_user_status(username, 'active', 'Activated from HiPPO')
+        guser, ggroup = create_user_from_hippo(hippo_account)
+        logger.info(f'Created GlobalUser and GlobalGroup for {username}')
+    except DuplicateGlobalUser:
+        logger.info(f'GlobalUser for {username} already exists.')
+        guser = GlobalUser.objects.get(username=username)
+        if hippo_account.key not in guser.ssh_key:
+            logger.info(f'Updating SSH key for {username}')
+            guser.update(ssh_key=[hippo_account.key], ldap_synced=False)
+    
+    if guser.status == 'inactive':
+        logger.info(f'GlobalUser for {username} is inactive, setting to "active"')
+        set_user_status(username, 'active', 'Activated from HiPPO')
 
-            if query_user_exists(username, sitename=sitename):
-                site_user = SiteUser.objects.get(username=username, sitename=sitename) #type: ignore
-                logger.info(f'SiteUser for {username} exists, checking status.')
-                if site_user.status != 'active':
-                    logger.info(f'SiteUser for {username}, site {sitename} has status {site_user.status}, setting to "active"')
-                    set_user_status(username, 'active', 'Activated from HiPPO', sitename=sitename)
-            else:
-                logger.info(f'SiteUser for user {username}, site {sitename} does not exist, creating.')
-                site_user = SiteUser(username=username,
-                                    sitename=sitename,
-                                    parent=global_user,
-                                    _access=hippo_to_cheeto_access(hippo_account.access_types) | {'slurm'}) #type: ignore
-                site_user.save()
-                site_group = SiteGroup(groupname=username,
-                                    sitename=sitename,
-                                    parent=global_group,
-                                    _members=[site_user])
-                site_group.save()
+    try:
+        suser, sgroup = add_site_user(sitename, guser)
+    except DuplicateSiteUser:
+        logger.warning(f'SiteUser for {username} already exists. This should not happen!')
+        suser = SiteUser.objects.get(username=username, sitename=sitename)
+       
+    # Reactivate the user _only_ if inactive (ie, not if disabled)
+    if suser.status == 'inactive':
+        logger.info(f'SiteUser for {username} is inactive, setting to "active"')
+        set_user_status(username, 'active', 'Activated from HiPPO', sitename=sitename)
 
-            try:
-                create_home_storage(sitename, global_user)
-            except Exception as e:
-                logger.error(f'{_ctx_name()}: error creating home storage for {username} on site {sitename}: {e}')
+    add_user_access(suser, list(hippo_to_cheeto_access(hippo_account.access_types) | {'slurm'}))
 
-            for group in event.groups:
-                try:
-                    SiteGroup.objects(sitename=sitename, groupname=group.name).update(add_to_set___members=site_user) #type: ignore
-                    #add_group_member(sitename, username, group.name)
-                except Exception as e:
-                    logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
-                    raise
-
-            if is_sponsor_account:
-                sponsor_group = create_group_from_sponsor(site_user)
-    except Exception:
-        raise
+    try:
+        query_user_home_storage(sitename, guser)
+    except NonExistentStorage:
+        logger.info(f'Creating home storage for {username}')
+        create_home_storage(sitename, guser)
     else:
-        hippoapi_send_email(get_createaccount_email(site_user), client)
+        logger.warning(f'Home storage for {username} already exists. This should not happen!')
+
+    for group in event.groups:
+        try:
+            add_group_member(sitename, suser, group.name)
+        except Exception as e:
+            logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
+            raise
+
+    if is_sponsor_account:
+        sponsor_group = create_group_from_sponsor(suser)
+
+    if notify:
+        hippoapi_send_email(get_createaccount_email(suser), client)
         if is_sponsor_account:
-            hippoapi_send_email(get_newsponsor_email(site_user, sponsor_group), client)
+            hippoapi_send_email(get_newsponsor_email(suser, sponsor_group), client)
 
 
 

@@ -267,3 +267,8 @@ class Storage(BaseDocument):
         mount['options'] = self.mount_options
         data['mount'] = mount
         return dumps_yaml(data)
+
+
+class NonExistentStorage(ValueError):
+    pass
+

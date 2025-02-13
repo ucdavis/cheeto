@@ -183,6 +183,13 @@ class UserSearch(BaseDocument):
 global_user_t = GlobalUser | str
 
 
+def handle_global_user(user: global_user_t) -> GlobalUser:
+    if type(user) is str:
+        return GlobalUser.objects.get(username=user)
+    else:
+        return user
+
+
 @handler(signals.post_save)
 def user_apply_globals(sender, document, **kwargs):
     from .site import Site

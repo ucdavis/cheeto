@@ -3,12 +3,16 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 
 from pymongo import MongoClient
 import pytest
 
-from cheeto.types import is_listlike
+from ..config import get_config
+from ..database import connect_to_database
+from ..log import setup as _setup_logging
+from ..types import is_listlike
 
 
 MONGODB_PORT = 28080
@@ -75,6 +79,11 @@ def run_shell_cmd(cmd, print_stderr=True, in_directory=None):
 
 
 @pytest.fixture(scope='session', autouse=True)
+def setup_logging():
+    _setup_logging(sys.stdout)
+
+
+@pytest.fixture(scope='session', autouse=True)
 def start_mongodb(tmp_path_factory):
     '''
     Fixture that starts a MongoDB instance for the duration of the test session.
@@ -121,3 +130,38 @@ def start_mongodb(tmp_path_factory):
     yield
     proc.terminate()
     proc.wait()
+
+
+@pytest.fixture(scope='session')
+def db_config(request):
+    data_dir = Path(__file__).parent / 'data'
+    return get_config(data_dir / 'config.yaml').mongo
+
+
+@pytest.fixture(scope='session')
+def hippo_config(request):
+    data_dir = Path(__file__).parent / 'data'
+    return get_config(data_dir / 'config.yaml').hippo
+
+
+def drop_database(config):
+    conn = connect_to_database(config, quiet=True)
+    conn.drop_database(config.database)
+
+
+@pytest.fixture
+def drop_before(db_config):
+    drop_database(db_config)
+
+
+@pytest.fixture
+def drop_after(db_config):
+    yield
+    drop_database(db_config)
+
+
+@pytest.fixture
+def drop_before_after(db_config):
+    drop_database(db_config)
+    yield
+    drop_database(db_config)

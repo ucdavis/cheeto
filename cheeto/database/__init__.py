@@ -27,24 +27,41 @@ from .user import (
     InvalidUser, 
     SiteUser, 
     UserSearch, 
-    User
+    User,
+    global_user_t,
+    site_user_t
 )
-from .group import GlobalGroup, SiteGroup, SiteSlurmAccount
+from .group import (
+    GlobalGroup,
+    SiteGroup,
+    SiteSlurmAccount,
+    global_group_t,
+    site_group_t,
+    DuplicateGroup,
+    DuplicateGlobalGroup,
+    DuplicateSiteGroup,
+    NonExistentGroup,
+    NonExistentGlobalGroup,
+    NonExistentSiteGroup
+)
 from .slurm import (
     SiteSlurmAssociation, 
     SiteSlurmPartition, 
     SiteSlurmQOS,
     SlurmTRES
 )
-from .storage import (Automount,
-                      AutomountMap,
-                      Storage,
-                      StorageMount,
-                      StorageMountSource,
-                      NFSMountSource,
-                      ZFSMountSource,
-                      NFSSourceCollection,
-                      ZFSSourceCollection)
+from .storage import (
+    Automount,
+    AutomountMap,
+    Storage,
+    StorageMount,
+    StorageMountSource,
+    NFSMountSource,
+    ZFSMountSource,
+    NFSSourceCollection,
+    ZFSSourceCollection,
+    NonExistentStorage
+)
 from .crud import (
     create_site,
     query_site_exists,
@@ -54,6 +71,7 @@ from .crud import (
     query_user_type,
     query_user_access,
     query_user_status,
+    query_group_exists,
     tag_comment,
     add_user_comment,
     set_user_shell,
@@ -98,8 +116,10 @@ from .crud import (
     create_home_storage,
     add_site_user,
     create_user,
+    create_user_from_hippo,
     create_system_user,
     create_class_user,
+    create_group,
     create_system_group,
     create_class_group,
     create_lab_group,

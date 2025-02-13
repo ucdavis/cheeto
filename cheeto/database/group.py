@@ -161,3 +161,29 @@ class SiteGroup(BaseDocument):
 
 
 site_group_t = SiteGroup | str
+
+
+class DuplicateGroup(ValueError):
+    def __init__(self, groupname):
+        super().__init__(f'Group {groupname} already exists.')
+
+class DuplicateGlobalGroup(DuplicateGroup):
+    pass
+
+
+class DuplicateSiteGroup(DuplicateGroup):
+    def __init__(self, groupname, sitename):
+        super().__init__(f'Group {groupname} already exists in site {sitename}.')
+
+
+class NonExistentGroup(ValueError):
+    def __init__(self, groupname):
+        super().__init__(f'Group {groupname} does not exist.')
+
+
+class NonExistentGlobalGroup(NonExistentGroup):
+    pass
+
+class NonExistentSiteGroup(NonExistentGroup):
+    def __init__(self, groupname, sitename):
+        super().__init__(f'Group {groupname} does not exist in site {sitename}.')

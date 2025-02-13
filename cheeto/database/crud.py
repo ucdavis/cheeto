@@ -13,12 +13,17 @@ import logging
 from operator import attrgetter
 from pathlib import Path
 from typing import Iterable, Optional
+from venv import create
 
+from httpx import get
 from mongoengine import DoesNotExist, NotUniqueError
 from mongoengine.context_managers import run_in_transaction
 from mongoengine.queryset.visitor import Q as Qv
 
 import pyescrypt
+
+from cheeto import iam
+from cheeto.hippoapi.models.queued_event_account_model import QueuedEventAccountModel
 
 from ..encrypt import hash_yescrypt, get_mcf_hasher
 from ..utils import (TIMESTAMP_NOW,
@@ -39,17 +44,17 @@ from ..types import (DEFAULT_SHELL,
                      MIN_LABGROUP_ID,
                      MAX_LABGROUP_ID,
                      GROUP_TYPES,
-                     SlurmAccount as SlurmAccountTuple)
+                     SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access)
 from ..yaml import dumps as dumps_yaml
 
-from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser
+from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser, NonExistentGlobalUser
 from .site import Site
 from .hippo import HippoEvent
 from .user import GlobalUser, SiteUser, User, UserSearch, global_user_t, site_user_t, handle_site_users
-from .group import GlobalGroup, SiteGroup, global_group_t, site_group_t
+from .group import DuplicateGlobalGroup, DuplicateSiteGroup, GlobalGroup, NonExistentGlobalGroup, SiteGroup, global_group_t, site_group_t
 from .slurm import SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS, SlurmTRES
 from .storage import (Automount,
-                      AutomountMap,
+                      AutomountMap, NonExistentStorage,
                       Storage,
                       StorageMount,
                       StorageMountSource,
@@ -126,6 +131,21 @@ def query_user_exists(username: str,
         return False
     else:
         return True
+    
+
+def query_group_exists(groupname: str,
+                       sitename: Optional[str] = None):
+    logger = logging.getLogger(__name__)
+    try:
+        if sitename is None:
+            _ = GlobalGroup.objects.get(groupname=groupname)
+        else:
+            _ = SiteGroup.objects.get(groupname=groupname, sitename=sitename)
+    except DoesNotExist:
+        logger.info(f'Group {groupname} at site {sitename} does not exist.')
+        return False
+    else:    
+        return True
 
 
 def query_user_type(types: list[str],
@@ -198,17 +218,17 @@ def set_user_password(username: str,
 
 
 @singledispatch
-def add_user_access(user: SiteUser | GlobalUser | str, access: str):
+def add_user_access(user: SiteUser | GlobalUser | str, access: str | list[str]):
     pass
 
 
 @add_user_access.register
-def _(user: SiteUser, access: str):
+def _(user: SiteUser, access: str | list[str]):
     user.update(add_to_set___access=access)
 
 
 @add_user_access.register
-def _(user: GlobalUser, access: str):
+def _(user: GlobalUser, access: str | list[str]):
     user.update(add_to_set__access=access)
 
 
@@ -356,19 +376,20 @@ def query_admin_keys(sitename: Optional[str] = None):
     return keys
 
 
-def query_user_home_storage(sitename: str, user: site_user_t):
+def query_user_home_storage(sitename: str, user: GlobalUser):
     logger = logging.getLogger(__name__)
-    if type(user) is SiteUser:
-        username = user.username
-    home_collection = NFSSourceCollection.objects.get(name='home',
-                                                      sitename=sitename)
-    home_sources = StorageMountSource.objects(collection=home_collection,
-                                              owner=user)
-    home_mounts = Automount.objects(sitename=sitename)
-    #logger.info(f'{_ctx_name()}: {user}: {home_sources}')
-    return Storage.objects.get(source__in=home_sources,
-                               mount__in=home_mounts)
- 
+    try:
+        home_collection = NFSSourceCollection.objects.get(name='home',
+                                                          sitename=sitename)
+        home_sources = StorageMountSource.objects(collection=home_collection,
+                                                  owner=user)
+        home_mounts = Automount.objects(sitename=sitename)
+        
+        return Storage.objects.get(source__in=home_sources,
+                                mount__in=home_mounts)
+    except DoesNotExist:
+        raise NonExistentStorage(f'home storage for {user.username} at {sitename}')
+    
 
 def query_user_storages(sitename: str, user: site_user_t):
     if type(user) is str:
@@ -591,9 +612,16 @@ def create_home_storage(sitename: str,
 
 def add_site_user(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
+    logger.info(f'Adding user {user.username} to site {sitename}')
     if type(user) is str:
-        user = GlobalUser.objects.get(username=user)
-    group = GlobalGroup.objects.get(groupname=user.username)
+        try:
+            user = GlobalUser.objects.get(username=user)
+        except DoesNotExist:
+            raise NonExistentGlobalUser(user)
+    try:
+        group = GlobalGroup.objects.get(groupname=user.username)
+    except DoesNotExist:
+        raise NonExistentGlobalGroup(user.username)
 
     if query_user_exists(user.username, sitename):
         raise DuplicateSiteUser(user.username, sitename)
@@ -626,7 +654,8 @@ def create_user(username: str,
                 ssh_key: list[str] | None = None,
                 access: list[str] | None = None,
                 sitenames: list[str] | None = None,
-                gid: int | None = None):
+                gid: int | None = None,
+                iam_id: int | None = None):
     logger = logging.getLogger(__name__)
 
     if query_user_exists(username, raise_exc=False):
@@ -650,27 +679,43 @@ def create_user(username: str,
         user_kwargs['access'] = access
     if ssh_key is not None:
         user_kwargs['ssh_key'] = ssh_key
+    if iam_id is not None:
+        user_kwargs['iam_id'] = iam_id
+    
+    with run_in_transaction():
 
-    global_user = GlobalUser(**user_kwargs)
-    global_user.save(force_insert=True)
+        global_user = GlobalUser(**user_kwargs)
+        global_user.save(force_insert=True)
 
-    UserSearch.update_index(global_user)
+        UserSearch.update_index(global_user)
 
-    if password is not None:
-        hasher = get_mcf_hasher()
-        set_user_password(username, password, hasher)
+        if password is not None:
+            hasher = get_mcf_hasher()
+            set_user_password(username, password, hasher)
 
-    global_group = GlobalGroup(groupname=username,
-                               gid=global_user.gid,
-                               type='user',
-                               user=global_user)
-    global_group.save(force_insert=True)
+        global_group = GlobalGroup(groupname=username,
+                                gid=global_user.gid,
+                                type='user',
+                                user=global_user)
+        global_group.save(force_insert=True)
 
-    if sitenames is not None:
-        for sitename in sitenames:
-            add_site_user(sitename, global_user)
+        if sitenames is not None:
+            for sitename in sitenames:
+                add_site_user(sitename, global_user)
 
     return global_user, global_group
+
+
+def create_user_from_hippo(hippo_data: QueuedEventAccountModel,
+                           use_access: bool = False):
+    return create_user(hippo_data.kerberos,
+                       hippo_data.email,
+                       int(hippo_data.mothra),
+                       hippo_data.name,
+                       ssh_key=[hippo_data.key],
+                       access=list(hippo_to_cheeto_access(hippo_data.access_types)) if use_access else None,
+                       iam_id=int(hippo_data.iam))
+
 
 
 def create_system_user(username: str,
@@ -703,61 +748,69 @@ def create_class_user(username: str,
                 sitenames=[sitename])
 
 
-
-def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
+def create_group(groupname: str,
+                 gid: int,
+                 type: str = 'group',
+                 sites: list[str] | None = None):
     logger = logging.getLogger(__name__)
+    if query_group_exists(groupname):
+        raise DuplicateGlobalGroup(groupname)
+    
     global_group = GlobalGroup(groupname=groupname,
-                               type='system',
-                               gid=get_next_system_id())
+                               gid=gid,
+                               type=type)
     global_group.save(force_insert=True)
-    logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
+    logger.info(f'Created GlobalGroup {groupname} gid={gid}')
 
-    if sitenames is not None:
-        for sitename in sitenames:
+    if sites is not None:
+        for sitename in sites:
+            if query_group_exists(groupname, sitename):
+                # This state should never be reached, but just in case
+                raise DuplicateSiteGroup(groupname, sitename)
+
             site_group = SiteGroup(groupname=groupname,
                                    sitename=sitename,
                                    parent=global_group)
             site_group.save(force_insert=True)
-            logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
+            logger.info(f'Created SiteGroup {groupname} for site {sitename}')
 
+    return global_group
+
+
+def create_system_group(groupname: str, sitenames: Optional[list[str]] = None):
+    return create_group(groupname,
+                        get_next_system_id(),
+                        type='system',
+                        sites=sitenames)
 
 
 def create_class_group(groupname: str, sitename: str) -> SiteGroup:
-    logger = logging.getLogger(__name__)
-    global_group = GlobalGroup(groupname=groupname,
-                               type='class',
-                               gid=get_next_class_id())
-    global_group.save(force_insert=True)
-    logger.info(f'Created system GlobalGroup {groupname} gid={global_group.gid}')
+    global_group = create_group(groupname,
+                                get_next_class_id(),
+                                type='class',
+                                sites=[sitename])
 
-    site_group = SiteGroup(groupname=groupname,
-                           sitename=sitename,
-                           parent=global_group)
-    site_group.save(force_insert=True)
-    logger.info(f'Created system SiteGroup {groupname} for site {sitename}')
-
-    return site_group
+    return SiteGroup.objects.get(groupname=groupname, sitename=sitename)
 
 
 def create_lab_group(groupname: str, sitename: str | None = None):
-    gg = GlobalGroup(groupname=groupname,
-                     type='group',
-                     gid=get_next_lab_id())
-    gg.save(force_insert=True)
-
+    global_group = create_group(groupname,
+                                get_next_lab_id(),
+                                type='group',
+                                sites=[sitename] if sitename is not None else None)
     if sitename is not None:
-        sg = SiteGroup(groupname=groupname,
-                       sitename=sitename,
-                       parent=gg)
-        sg.save(force_insert=True)
-        return sg
+        return SiteGroup.objects.get(groupname=groupname, sitename=sitename)
     else:
-        return gg
+        return global_group
 
 
 def add_site_group(group: global_group_t, sitename: str):
     if type(group) is str:
         group = GlobalGroup.objects.get(groupname=group)
+
+    if query_group_exists(group.groupname, sitename):
+        raise DuplicateSiteGroup(group.groupname, sitename)
+
     SiteGroup(groupname=group.groupname,
               sitename=sitename,
               parent=group).save(force_insert=True)
@@ -861,6 +914,7 @@ def user_to_puppet(user: SiteUser,
                    slurm: set[str], 
                    group_sudo: set[str]):
     logger = logging.getLogger(__name__)
+    logger.info(f'convert user {user.username} to legacy puppet format.')
     groups.remove(user.username)
     slurm = {'account': sorted(slurm)} if slurm else None
     
@@ -881,7 +935,7 @@ def user_to_puppet(user: SiteUser,
         shell = '/usr/sbin/nologin-account-disabled'
 
     try:
-        home_storage = query_user_home_storage(user.sitename, user)
+        home_storage = query_user_home_storage(user.sitename, user.parent)
     except DoesNotExist:
         storage = None
     else:
