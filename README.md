@@ -1,4 +1,7 @@
-# cheeto: HPCCF utilities.
+# cheeto: UCD HPC Management Utilities 
+
+![Tests](https://github.com/ucdavis/cheeto/actions/workflows/test.yaml/badge.svg) ![Static Badge](https://img.shields.io/badge/Platforms-Linux-blue)
+
 
 `cheeto` provides a library and schemas for validating our puppet
 YAML files, merging account data, and converting from the HiPPO
