@@ -133,15 +133,19 @@ def start_mongodb(tmp_path_factory):
 
 
 @pytest.fixture(scope='session')
-def db_config(request):
+def config(request):
     data_dir = Path(__file__).parent / 'data'
-    return get_config(data_dir / 'config.yaml').mongo
+    return get_config(data_dir / 'config.yaml')
 
 
 @pytest.fixture(scope='session')
-def hippo_config(request):
-    data_dir = Path(__file__).parent / 'data'
-    return get_config(data_dir / 'config.yaml').hippo
+def db_config(config):
+    return config.mongo
+
+
+@pytest.fixture(scope='session')
+def hippo_config(config):
+    return config.hippo
 
 
 def drop_database(config):

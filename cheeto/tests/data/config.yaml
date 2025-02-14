@@ -1,10 +1,10 @@
 ldap:
   default:
     servers:
-    - ldap://localhost
+    - test-server
     searchbase: dc=hpc,dc=ucdavis,dc=edu
     login_dn: cn=admin,dc=hpc,dc=ucdavis,dc=edu
-    password: ''
+    password: test-password
     user_status_groups:
       active: login-ssh-users
       inactive: inactive-users

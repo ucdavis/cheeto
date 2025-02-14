@@ -15,7 +15,7 @@ from ..ldap import LDAPCommitFailed, LDAPManager, LDAPUser, LDAPGroup
 from .site import Site
 from .user import GlobalUser, SiteUser
 from .group import GlobalGroup, SiteGroup
-from .crud import query_automap_storages, query_admin_keys
+from .crud import query_automap_storages, query_admin_keys, DoesNotExist
 
 
 def ldap_sync(sitename: str, config: Config, force: bool = False):
@@ -34,28 +34,34 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
     for user in SiteUser.objects(sitename=sitename):
         ldap_sync_siteuser(user, ldap_mgr, force=force)
 
-    for storage in query_automap_storages(sitename, 'home'):
-        logger.info(f'sync home storage {storage.name}') 
-        host = f'{storage.host}${{HOST_SUFFIX}}'
-        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.owner,
-                                                             'home',
-                                                             sitename))
-        ldap_mgr.add_home_automount(storage.owner,
-                                    sitename,
-                                    host,
-                                    storage.host_path,
-                                    '-' + ','.join(storage.mount_options))
+    try:
+        for storage in query_automap_storages(sitename, 'home'):
+            logger.info(f'sync home storage {storage.name}') 
+            host = f'{storage.host}${{HOST_SUFFIX}}'
+            ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.owner,
+                                                                'home',
+                                                                sitename))
+            ldap_mgr.add_home_automount(storage.owner,
+                                        sitename,
+                                        host,
+                                        storage.host_path,
+                                        '-' + ','.join(storage.mount_options))
+    except DoesNotExist:
+        logger.warning(f'No home storages found for site {sitename}')
 
-    for storage in query_automap_storages(sitename, 'group'):
-        host = f'{storage.host}${{HOST_SUFFIX}}'
-        ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.name,
-                                                             'group',
-                                                             sitename))
-        ldap_mgr.add_group_automount(storage.name,
-                                     sitename,
-                                     host,
-                                     storage.host_path,
-                                     '-' + ','.join(storage.mount_options))
+    try:
+        for storage in query_automap_storages(sitename, 'group'):
+            host = f'{storage.host}${{HOST_SUFFIX}}'
+            ldap_mgr.connection.delete(ldap_mgr.get_automount_dn(storage.name,
+                                                                'group',
+                                                                sitename))
+            ldap_mgr.add_group_automount(storage.name,
+                                        sitename,
+                                        host,
+                                        storage.host_path,
+                                        '-' + ','.join(storage.mount_options))
+    except DoesNotExist:
+        logger.warning(f'No group storages found for site {sitename}')
 
 
 def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):

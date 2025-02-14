@@ -53,13 +53,17 @@
             "3"
         ],
         "supportedSASLMechanisms": [
+            "GSS-SPNEGO",
+            "GSSAPI",
             "SCRAM-SHA-1",
             "SCRAM-SHA-256",
+            "GS2-IAKERB",
+            "GS2-KRB5",
             "DIGEST-MD5",
-            "CRAM-MD5",
             "NTLM",
-            "PLAIN",
-            "LOGIN"
+            "CRAM-MD5",
+            "LOGIN",
+            "PLAIN"
         ],
         "vendorName": [],
         "vendorVersion": []
