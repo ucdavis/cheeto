@@ -1,33 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : log.py
 # License: Modified BSD
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 23.05.2023
 
+from enum import Enum
 import logging
 from typing import TextIO
 
-from rich.console import Console
+from rich.console import Console as _Console
 from rich.logging import RichHandler
 
 
 def setup(log_file: TextIO,
-          quiet: bool = False):
-
-    handlers = [RichHandler(console=Console(file=log_file))]
-
-    if not quiet:
-        handlers.append(RichHandler(console=Console(stderr=True),
-                                    markup=True))
-
+          level=logging.INFO):
     logging.basicConfig(
-        level=logging.INFO,
-        format='%(message)s',
-        #format='%(asctime)s %(levelname)10s [%(filename)s:%(lineno)s - %(funcName)20s()] %(message)s',
+        level=level,
+        format='%(funcName)s: %(message)s',
         datefmt="[%x %X]",
-        handlers=handlers
+        handlers=[RichHandler(console=Console(file=log_file))]
     )
 
+
+class Emotes(Enum):
+    ERROR = '💀'
+    WARN = '🚩'
+    INFO = '🔔'
+    DEBUG = '🐛'
+    SUCCESS = '✅'
+    FAIL = '❌'
+    WAIT = '⏳'
+    DONE = '🎉'
+    STOP = '🛑'
+    START = '🏁'
+    QUESTION = '❓'
+    EXCLAMATION = '❗'
+
+
+class Console(_Console):
+
+    def __init__(self, *args, stderr=True, **kwargs):
+        super().__init__(*args, soft_wrap=True, stderr=stderr, **kwargs)
+
+    def error(self, *args, **kwargs):
+        self.print(Emotes.ERROR.value, *args, style='italic bold red', **kwargs)
+
+    def warn(self, *args, **kwargs):
+        self.print(Emotes.WARN.value, *args, style='italic dark_orange', **kwargs)
+
+    def info(self, *args, **kwargs):
+        self.print(Emotes.INFO.value, *args, style='italic blue', **kwargs)

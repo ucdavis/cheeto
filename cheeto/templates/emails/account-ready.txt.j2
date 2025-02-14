@@ -1,30 +1,39 @@
-Your account and group association on {{ cluster }} has been processed and should be live within 30 minutes.
+Your account and group association on **{{ sitename}}** has been
+processed and should be live within 30 minutes.
 
-You can access the cluster from the machine you generated your SSH key on with the following command:
+You can access the cluster from the machine on which you generated your SSH key with the following command:
 
-	ssh {{username}}@{{domain}}
+```
+    ssh {{username}}@{{sitefqdn}}
+```
 
-{%- if slurm_partitions %}
+You are a member of the following Unix groups:
+{%- for group in groups %}
+- _{{group}}_
+{%- endfor %}
 
-You can use the following Slurm partitions by specifying "-A {{slurm_account}}" on job submission:
-{%- for partition in slurm_partitions %}
-- {{partition}}
+{% if slurm_accounts -%}
+You have access to the following Slurm accounts and their associated partitions,
+which you can use to submit jobs by passing `-A [ACCOUNT] -p [PARTITION]` to `sbatch`
+and other Slurm commands:
+{%- for account, partitions in slurm_accounts.items() %}
+- _{{account}}_
+{%- for partition in partitions %}
+  - `{{partition}}`
+{%- endfor %}
 {%- endfor %}
 {%- endif %}
 
 Your home directory has a quota of 20GB to allow for your configuration files and code.
-Talk to your sponsor about where to store larger data and results.
 
-{%- if storages %}
-
-You have access to the following group storages:
-{%- for path in storages %}
+{%- if group_storages %}
+You have access to the following group storages, which you should use for larger data:
+{%- for path in group_storages %}
 - {{path}}
 {%- endfor %}
 
 Talk to your sponsor about how data is organized on these volumes.
 {%- endif %}
 
-Please contact hpc-help@ucdavis.edu for support requests.
-
-
+Additional user documentation can be found at [https://docs.hpc.ucdavis.edu](https://docs.hpc.ucdavis.edu).
+Please contact [hpc-help@ucdavis.edu](mailto:hpc-help@ucdavis.edu?subject=Support%20Request%3A%20{{sitename}}) for support requests.

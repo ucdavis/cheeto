@@ -1,0 +1,10 @@
+name: cheeto
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - openldap
+  - pip
+  - gh
+  - pip:
+    - git+https://github.com/ucdavis/cheeto#egg=cheeto

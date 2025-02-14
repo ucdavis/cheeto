@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : hippo.py
 # License: Modified BSD
@@ -8,495 +8,366 @@
 # Date   : 17.02.2023
 
 import argparse
-from enum import IntEnum, auto, Enum
 import logging
-import os
-from pathlib import Path
 import shlex
-import shutil
+import site
 import socket
 import sys
-import time
 import traceback
-from typing import Optional, Tuple, Union, List
+from typing import Callable, Optional, List
 
 from jinja2 import Environment, FileSystemLoader
-import marshmallow
-from marshmallow_dataclass import dataclass
-import sh
+from mongoengine.context_managers import run_in_transaction
+from rich.console import Console
 
-from .args import subcommand
-from .errors import ExitCode
-from .git import Git, Gh, CIStatus
-from .mail import Mail
-from .parsing import (parse_yaml,
-                      parse_yaml_forest,
-                      validate_yaml_forest)
-from .puppet import (PuppetAccountMap, 
-                     SiteData,
-                     PuppetUserRecord,
-                     PuppetUserMap,
-                     MergeStrategy)
+from cheeto.database.crud import query_user_home_storage
+from cheeto.database.ldap import ldap_sync
+from cheeto.database.storage import NonExistentStorage
+
+from .config import HippoConfig
+from .database import (Site,
+                       add_group_member,
+                       add_user_access,
+                       add_site_user,
+                       DuplicateGlobalUser,
+                       DuplicateSiteUser,
+                       GlobalUser,
+                       SiteUser,
+                       GlobalGroup,
+                       SiteGroup,
+                       HippoEvent,
+                       create_group_from_sponsor,
+                       create_user_from_hippo,
+                       create_home_storage,
+                       query_associated_storages,
+                       query_user_exists,
+                       query_user_groups,
+                       query_user_slurm, 
+                       set_user_status)
+from .hippoapi.api.event_queue import (event_queue_pending_events,
+                                       event_queue_update_status)
+from .hippoapi.api.notify import (notify_raw,
+                                  notify_styled)
+from .hippoapi.client import AuthenticatedClient
+from .hippoapi.models import (QueuedEventModel,
+                              QueuedEventDataModel,
+                              QueuedEventUpdateModel,
+                              SimpleNotificationModel)
+
+from .mail import Email, NewAccountEmail, NewMembershipEmail, NewSponsorEmail, UpdateSSHKeyEmail
 from .templating import PKG_TEMPLATES
 from .types import *
-from .utils import (human_timestamp,
-                    require_kwargs,
-                    TIMESTAMP_NOW,
-                    sanitize_timestamp)
+from .utils import (_ctx_name,
+                    human_timestamp,
+                    TIMESTAMP_NOW)
 
 
-@require_kwargs
-@dataclass(frozen=True)
-class HippoAccount(BaseModel):
-    name: str
-    email: Email #type: ignore
-    kerb: KerberosID #type: ignore
-    iam: IAMID #type: ignore
-    mothra: MothraID #type: ignore
-    key: Optional[str] = None
+EVENT_HANDLERS = {}
+
+def event_handler(event_name: str):
+    def wrapper(func: Callable[[QueuedEventDataModel, AuthenticatedClient, HippoConfig], None]):
+        EVENT_HANDLERS[event_name] = func
+        return func
+    return wrapper
 
 
-@require_kwargs
-@dataclass(frozen=True)
-class HippoMeta(BaseModel):
-    cluster: str
+def hippoapi_client(config: HippoConfig, quiet: bool = False):
+    if not quiet:
+        console = Console(stderr=True)
+        console.print('hippo config:')
+        console.print(f'  uri: {config.base_url}')
+    return AuthenticatedClient(follow_redirects=True,
+                               base_url=config.base_url,
+                               token=config.api_key,
+                               #httpx_args={"event_hooks": {"request": [log_request]}},
+                               auth_header_name='X-API-Key',
+                               prefix='')
 
 
-@require_kwargs
-@dataclass(frozen=True)
-class HippoRecord(BaseModel):
-    groups: List[KerberosID] #type: ignore
-    account: HippoAccount
-    meta: HippoMeta
+def hippoapi_send_email(data: Email,
+                        client: AuthenticatedClient):
+    logger = logging.getLogger(__name__)
+    body = SimpleNotificationModel(subject=data.subject,
+                                   header=data.header,
+                                   emails=data.emails,
+                                   cc_emails=data.ccEmails,
+                                   paragraphs=list(data.paragraphs()))
+    result = notify_styled.sync_detailed(client=client, body=body)
+    if result.status_code != 200:
+        logger.error(f'Failed to send notification: {result.content}')
+    else:
+        logger.info(f'Successfully sent notification: {body}')
+    return result
 
 
-def add_sanitize_args(parser):
-    parser.add_argument('--site-file',
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet YAML.')
-    parser.add_argument('--global-file',
-                        type=Path,
-                        required=True,
-                        help='Global puppet YAML.')
+def filter_events(events: List[QueuedEventModel],
+                  event_type: Optional[str] = None,
+                  event_id: Optional[str] = None):
+
+    if event_type is event_id is None:
+        yield from events
+    else:
+        for event in events:
+            if event.id == event_id:
+                yield event
+            elif event.action == event_type:
+                yield event
 
 
-@subcommand('sanitize', add_sanitize_args)
-def sanitize(args: argparse.Namespace):
+def process_hippoapi_events(config: HippoConfig,
+                            post_back: bool = False,
+                            event_type: Optional[str] = None,
+                            event_id: Optional[str] = None):
+    logger = logging.getLogger(__name__)
+    with hippoapi_client(config) as client:
+        events = event_queue_pending_events.sync(client=client)
+
+        if events:
+            _process_hippoapi_events(filter_events(events,
+                                                   event_type=event_type,
+                                                   event_id=event_id),
+                                     client,
+                                     config,
+                                     post_back=post_back)
+        else:
+            logger.warning(f'Got no events to process.')
+
+
+def _process_hippoapi_events(events: Iterable[QueuedEventModel],
+                             client: AuthenticatedClient,
+                             config: HippoConfig,
+                             post_back: bool = False):
     logger = logging.getLogger(__name__)
 
-    yaml_files = [args.global_file, args.site_file] if args.site_file.exists() \
-                 else [args.global_file]
-    merged_yaml = parse_yaml_forest(yaml_files,
-                                    merge_on=MergeStrategy.ALL)
-    # Generator only yields one item with MergeStrategy.ALL
-    _, user_record = next(validate_yaml_forest(merged_yaml,
-                                               PuppetUserMap,
-                                               strict=True))
-    if len(user_record.user) == 0:
-        logger.error(f'No users!')
-        sys.exit(ExitCode.BAD_MERGE)
-    if len(user_record.user) > 1:
-        logger.error(f'Merge resulted in multiple users.')
-        sys.exit(ExitCode.BAD_MERGE)
+    for event in events:
+        logger.info(f'Process hippoapi {event.action} id={event.id}')
+        if event.status != 'Pending':
+            logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
 
-    site_dumper = PuppetUserMap.site_schema()
-    global_dumper = PuppetUserMap.common_schema()
+        event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
+                                                                    set_on_insert__action=event.action, 
+                                                                    set_on_insert__data=event.to_dict(),
+                                                                    new=True)
+        if post_back and event_record.status == 'Complete':
+            logger.info(f'Event id={event.id} already marked complete, attempting postback')
+            postback_event_complete(event.id, client)
+            continue
 
-    with args.global_file.open('w') as fp:
-        print(global_dumper.dumps(user_record), file=fp)
-
-    with args.site_file.open('w') as fp:
-        print(site_dumper.dumps(user_record), file=fp)
-
-
-def add_validate_args(parser):
-    parser.add_argument('-i', '--hippo-file',
-                        type=Path,
-                        nargs='+',
-                        required=True)
-
-
-@subcommand('validate', add_validate_args)
-def validate(args: argparse.Namespace) -> None:
-    for hippo_file in args.hippo_file:
-        record = load_hippo(hippo_file, quiet=args.quiet)
-        if record is None:
-            sys.exit(ExitCode.VALIDATION_ERROR)
+        try:
+            handler = EVENT_HANDLERS.get(event.action)
+            handler(event.data, client, config)
+        except Exception as e:
+            event_record.modify(inc__n_tries=True)
+            logger.critical(f'Error processing event id={event.id}, n_tries={event_record.n_tries}: {e}')
+            logger.critical(traceback.format_exc())
+            if event_record.n_tries >= config.max_tries:
+                logger.warning(f'Event id={event.id} failed {event_record.n_tries}, POST back that it Failed.')
+                event_record.modify(set__status='Failed')
+                if post_back:
+                    logger.info(f'Event id={event.id}: attempt postback')
+                    postback_event_failed(event.id, client)
+        else:
+            event_record.modify(inc__n_tries=True, set__status='Complete')
+            logger.info(f'Event id={event.id} completed.')
+            if post_back:
+                logger.info(f'Event id={event.id}: attempt postback')
+                postback_event_complete(event.id, client)
 
 
-def load_hippo(hippo_file: Path,
-               quiet: Optional[bool] = True) -> Union[None, HippoRecord]:
+def postback_event_complete(event_id: int,
+                            client: AuthenticatedClient):
+    update = QueuedEventUpdateModel(status='Complete', id=event_id)
+    response = event_queue_update_status.sync_detailed(client=client, body=update)
 
+
+def postback_event_failed(event_id: int,
+                         client: AuthenticatedClient):
+    update = QueuedEventUpdateModel(status='Failed', id=event_id)
+    response = event_queue_update_status.sync_detailed(client=client, body=update)
+
+
+@event_handler('UpdateSshKey')
+def handle_updatesshkey_event(event: QueuedEventDataModel,
+                              client: AuthenticatedClient,
+                              config: HippoConfig,
+                              notify: bool = True):
     logger = logging.getLogger(__name__)
-    
-    hippo_yaml = parse_yaml(str(hippo_file))
+    hippo_account = event.accounts[0]
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
+    username = hippo_account.kerberos
+    ssh_key = hippo_account.key
+
+    logger.info(f'Process UpdateSshKey for user {username}')
     try:
-        hippo_record = HippoRecord.Schema().load(hippo_yaml) #type: ignore
-    except marshmallow.exceptions.ValidationError as e: #type: ignore
-        logger.error(f'[red]ValidationError: {hippo_file}[/]')
-        logger.error(e.messages)
-        return None
+        with run_in_transaction():
+            user = SiteUser.objects.get(username=username, sitename=sitename)
+            global_user = user.parent
+            global_user.ssh_key = [ssh_key]
+            global_user.ldap_synced = False
+            global_user.save()
+
+            logger.info(f'Add login-ssh access to user {username}, site {sitename}')
+            add_user_access(user, 'login-ssh')
+    except Exception:
+        raise
     else:
-        if not quiet:
-            logger.info(hippo_record)
-        return hippo_record
+        if notify:
+            hippoapi_send_email(get_updatesshkey_email(user), client)
 
 
-class ConversionState(IntEnum):
-    UNINIT = auto()
-    INVALID = auto()
-    ERROR = auto()
-    PREPROC = auto()
-    PROC = auto()
-    COMPLETE = auto()
-
-    
-class ConversionOp(Enum):
-    USER = 'USER'
-    SPONSOR = 'SPONSOR'
-    KEY = 'KEY'
-    NOOP = 'NOOP'
+def get_updatesshkey_email(user: SiteUser):
+    sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
+    email = UpdateSSHKeyEmail(to=[user.parent.email],
+                              username=user.username,
+                              sitename=user.sitename.capitalize(),
+                              sitefqdn=sitefqdn)
+    return email
 
 
-def hippo_to_puppet(hippo_record: HippoRecord,
-                    site: SiteData,
-                    sponsors_group: str) -> Tuple[str, PuppetUserRecord, ConversionOp]:
+@event_handler('CreateAccount')
+def handle_createaccount_event(event: QueuedEventDataModel,
+                               client: AuthenticatedClient,
+                               config: HippoConfig,
+                               notify: bool = True):
 
     logger = logging.getLogger(__name__)
 
-    user_name = hippo_record.account.kerb
-    uid = hippo_record.account.mothra
-    groups = set(hippo_record.groups)
-    dataop = ConversionOp.USER
+    hippo_account = event.accounts[0]
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
+    username = hippo_account.kerberos
+    is_sponsor_account = any((group.name == 'sponsors' for group in event.groups))
 
-    # Check if the group for sponsors is in the group request:
-    # if so, this is a new PI group and their group YAML should be created
-    if sponsors_group in groups: # type: ignore
-        logger.info(f'{user_name} appears to be a sponsor account, creating group.')
-        group_name = site.create_group_from_sponsor(user_name, uid)
-        # Make the sponsor a member of their own new group
-        groups.add(group_name)
-        dataop = ConversionOp.SPONSOR
+    logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
+
+    try:
+        guser, ggroup = create_user_from_hippo(hippo_account)
+        logger.info(f'Created GlobalUser and GlobalGroup for {username}')
+    except DuplicateGlobalUser:
+        logger.info(f'GlobalUser for {username} already exists.')
+        guser = GlobalUser.objects.get(username=username)
+        if hippo_account.key not in guser.ssh_key:
+            logger.info(f'Updating SSH key for {username}')
+            guser.update(ssh_key=[hippo_account.key], ldap_synced=False)
+    
+    if guser.status == 'inactive':
+        logger.info(f'GlobalUser for {username} is inactive, setting to "active"')
+        set_user_status(username, 'active', 'Activated from HiPPO')
+
+    try:
+        suser, sgroup = add_site_user(sitename, guser)
+    except DuplicateSiteUser:
+        logger.warning(f'SiteUser for {username} already exists. This should not happen!')
+        suser = SiteUser.objects.get(username=username, sitename=sitename)
+       
+    # Reactivate the user _only_ if inactive (ie, not if disabled)
+    if suser.status == 'inactive':
+        logger.info(f'SiteUser for {username} is inactive, setting to "active"')
+        set_user_status(username, 'active', 'Activated from HiPPO', sitename=sitename)
+
+    add_user_access(suser, list(hippo_to_cheeto_access(hippo_account.access_types) | {'slurm'}))
+
+    try:
+        query_user_home_storage(sitename, guser)
+    except NonExistentStorage:
+        logger.info(f'Creating home storage for {username}')
+        create_home_storage(sitename, guser)
     else:
-        logger.info(f'{user_name} appears to be a user account.')
+        logger.warning(f'Home storage for {username} already exists. This should not happen!')
 
-    if not groups and dataop != ConversionOp.SPONSOR:
-        dataop = ConversionOp.KEY
+    for group in event.groups:
+        try:
+            add_group_member(sitename, suser, group.name)
+        except Exception as e:
+            logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
+            raise
 
-    user = PuppetUserRecord( #type: ignore
-        fullname = hippo_record.account.name,
-        email = hippo_record.account.email,
-        uid = uid,
-        gid = uid,
-        groups = groups
-    )
-    
-    # don't re-enable nologin accounts on key update
-    enable = dataop in (ConversionOp.USER, ConversionOp.SPONSOR)
-    site.update_user(user_name, user, enable=enable)
-    
-    if hippo_record.account.key is not None:
-        site.write_key(user_name, hippo_record.account.key)
+    if is_sponsor_account:
+        sponsor_group = create_group_from_sponsor(suser)
 
-    logger.info(f'hippo_to_puppet: did {dataop.name} for {user_name} with groups {groups}') 
-
-    return user_name, user, dataop
+    if notify:
+        hippoapi_send_email(get_createaccount_email(suser), client)
+        if is_sponsor_account:
+            hippoapi_send_email(get_newsponsor_email(suser, sponsor_group), client)
 
 
-class HippoConverter:
 
-    def __init__(self,
-                 input_file: Path,
-                 site: SiteData,
-                 jinja_env: Environment,
-                 processed_dir: Path,
-                 invalid_dir: Path,
-                 noop_dir: Path,
-                 sponsors_group: str = 'sponsors'):
-
-        self.logger = logging.getLogger(__name__)
-        self.input_file = input_file
-        self.site = site
-        self.jinja_env = jinja_env
-        self.processed_dir = processed_dir
-        self.invalid_dir = invalid_dir
-        self.noop_dir = noop_dir
-        self.sponsors_group = sponsors_group
-        self.hippo_record : Optional[HippoRecord] = None
-        self.user_name : Optional[str] = None
-        self.user_record : Optional[PuppetUserRecord] = None
-        self.state : ConversionState = ConversionState.UNINIT
-        self.op : ConversionOp = ConversionOp.NOOP
-
-        for d in (self.invalid_dir, self.noop_dir, self.processed_dir):
-            d.mkdir(parents=True, exist_ok=True)
-
-    def __str__(self):
-        return f'HippoConversion: {self.input_file}\n'\
-               f'         status: {self.state.name}\n'\
-               f'             op: {self.op.name}\n'\
-               f'           user: {self.user_name}\n'\
-               f'                 {self.user_record}'
-
-    def set_state(self, state: ConversionState):
-        self.logger.info(f'{self.input_file}: set state to {state.name}')
-        self.state = state
-
-    def set_op(self, op: ConversionOp):
-        self.logger.info(f'{self.input_file}: set op to {op.name}')
-        self.op = op
-
-    def summary(self):
-        if self.op == ConversionOp.NOOP:
-            return f'op: no-op, file: {self.input_file}'
-        msg = f'op: {self.op}, user: {self.user_name}'
-        if self.op == ConversionOp.KEY:
-            return msg
+def get_user_email_info(user: SiteUser):
+    groups = query_user_groups(user.sitename, user, types=['group', 'class', 'admin'])
+    sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
+    slurm_accounts = {}
+    for assoc in query_user_slurm(user.sitename, user.username):
+        if assoc.group.groupname in slurm_accounts:
+            slurm_accounts[assoc.group.groupname].append(assoc.partition.partitionname)
         else:
-            return f'{msg}, {self.user_record.groups}' #type: ignore
-
-    def set_invalid(self):
-        if self.state == ConversionState.INVALID:
-            self.logger.warning(f'{self.input_file} set Invalid twice.')
-            return
-        self.set_state(ConversionState.INVALID)
-        self.logger.info(f'Moving {self.input_file} to invalid dir ({self.invalid_dir})')
-        shutil.move(self.input_file, self.invalid_dir / processed_filename(self.input_file))
-
-    def set_noop(self):
-        if self.state != ConversionState.PROC:
-            self.logger.warning(f'{self.input_file}: tried to set_noop with state not PROC.')
-            return
-        self.set_state(ConversionState.COMPLETE)
-        self.set_op(ConversionOp.NOOP)
-        self.logger.info(f'Moving {self.input_file} to noop dir ({self.noop_dir})')
-        shutil.move(self.input_file, self.noop_dir / processed_filename(self.input_file))
-
-    def set_complete(self):
-        if self.state == ConversionState.INVALID:
-            self.logger.warning(f'{self.input_file}: tried to set_complete on invalid conversion.')
-            return
-        if self.state == ConversionState.COMPLETE:
-            self.logger.warning(f'{self.input_file} tried to set_complete on completed conversion.')
-            return
-        self.logger.info(f'Moving {self.input_file} to processed dir ({self.processed_dir})')
-        shutil.move(self.input_file, self.processed_dir / processed_filename(self.input_file))
-        self.set_state(ConversionState.COMPLETE)
-
-    def preprocess(self):
-        self.logger.info(f'Loading {self.input_file}')
-        self.hippo_record = load_hippo(self.input_file)
-        if self.hippo_record is None:
-            self.logger.error(f'{self.input_file}: validation error!')
-            self.set_invalid()
-            return
-
-        for group in set(self.hippo_record.groups):
-            if group not in self.site.data.group: #type: ignore
-                self.logger.error(f'{self.input_file}: {group} is not a valid group.')
-                self.set_invalid()
-                return
-
-        self.set_state(ConversionState.PREPROC)
-
-    def process(self):
-        if self.state == ConversionState.PREPROC and self.hippo_record is not None:
-            self.user_name, self.user_record, self.op = hippo_to_puppet(self.hippo_record,
-                                                                        self.site,
-                                                                        sponsors_group=self.sponsors_group)
-            self.set_state(ConversionState.PROC)
-
-    def postprocess(self):
-        if self.state != ConversionState.PROC or self.user_record is None:
-            return
-
-        mail = Mail()
-
-        if self.op == ConversionOp.USER:
-            group = list(self.hippo_record.groups)[0]
-            slurm_account, slurm_partitions = self.site.get_group_slurm_partitions(group)
-            storages = self.site.get_group_storage_paths(group)
-            template = self.jinja_env.get_template('account-ready.txt.j2')
-            email_contents = template.render(
-                                cluster=self.hippo_record.meta.cluster,
-                                username=self.user_name,
-                                domain=self.site.root.name,
-                                slurm_account=slurm_account,
-                                slurm_partitions=slurm_partitions,
-                                storages=storages
-                             )
-            email_subject = f'Account Information: {self.hippo_record.meta.cluster}'
-            email_cmd = mail.send(self.user_record.email,
-                                  email_contents,
-                                  reply_to='hpc-help@ucdavis.edu',
-                                  subject=email_subject)
-        elif self.op == ConversionOp.KEY:
-            template = self.jinja_env.get_template('key-updated.txt.j2')
-            email_contents = template.render(
-                                cluster=self.hippo_record.meta.cluster,
-                                username=self.user_name,
-                                domain=self.site.root.name
-                             )
-            email_subject = f'Key Updated: {self.hippo_record.meta.cluster}'
-            email_cmd = mail.send(self.user_record.email,
-                                  email_contents,
-                                  reply_to='hpc-help@ucdavis.edu',
-                                  subject=email_subject)
-        else:
-            # okay this is ugly but if its a sponsor group, its new, so the only
-            # two elements in the groups will be "sponsors" and the new group
-            group = list(self.user_record.groups.copy() - {self.sponsors_group})[0]
-            template = self.jinja_env.get_template('new-sponsor.txt.j2')
-            email_contents = template.render(
-                                cluster=self.hippo_record.meta.cluster,
-                                username=self.user_name,
-                                domain=self.site.root.name,
-                                group=group
-                             )
-            email_subject = f'New Sponsor Account: {self.hippo_record.meta.cluster}'
-            email_cmd = mail.send(self.user_record.email,
-                                  email_contents,
-                                  reply_to='hpc-help@ucdavis.edu',
-                                  subject=email_subject)
-
-        self.logger.info(f'Sending email: \nSubject: {email_subject}\nBody: {email_contents}')
-        email_cmd()
-        self.set_complete()
+            slurm_accounts[assoc.group.groupname] = [assoc.partition.partitionname]
+    group_storages = []
+    for storage in query_associated_storages(user.sitename, user.username):
+        if str(storage.mount_path) != f'/home/{user.username}':
+            group_storages.append(storage.mount_path)
+    return groups, sitefqdn, slurm_accounts, group_storages
 
 
-class HippoData:
+def get_createaccount_email(user: SiteUser):
+    groups, sitefqdn, slurm_accounts, group_storages = get_user_email_info(user)
 
-    def __init__(self,
-                 root: Path,
-                 processed_dir: Optional[Path] = None,
-                 invalid_dir: Optional[Path] = None,
-                 noop_dir: Optional[Path] = None):
-        self.root = root
-        if processed_dir is None:
-            self.processed_dir = root / '.processed'
-        else:
-            self.processed_dir = processed_dir
-        if invalid_dir is None:
-            self.invalid_dir = root / '.invalid'
-        else:
-            self.invalid_dir = invalid_dir
-        if noop_dir is None:
-            self.noop_dir = root / '.noop'
-        else:
-            self.noop_dir = noop_dir
-
-    def find_yamls(self):
-        return self.root.glob('*.yaml')
-
-    def convert_yamls(self,
-                      site: SiteData,
-                      jinja_env: Environment,
-                      sponsors_group: str):
-
-        for hippo_file in self.find_yamls():
-            converter = HippoConverter(hippo_file,
-                                       site,
-                                       jinja_env,
-                                       self.processed_dir,
-                                       self.invalid_dir,
-                                       self.noop_dir,
-                                       sponsors_group=sponsors_group)
-            yield converter
+    email = NewAccountEmail(to=[user.parent.email],
+                            username=user.username,
+                            groups=groups,
+                            sitename=user.sitename.capitalize(),
+                            sitefqdn=sitefqdn,
+                            slurm_accounts=slurm_accounts,
+                            group_storages=group_storages)
+    return email
 
 
-def add_convert_args(parser):
-    parser.add_argument('-i', '--hippo-file',
-                        type=Path,
-                        nargs='+',
-                        required=True)
-    parser.add_argument('--site-dir', 
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet accounts directory.')
-    parser.add_argument('--global-dir',
-                        type=Path,
-                        required=True,
-                        help='Global puppet accounts directory.')
-    parser.add_argument('--key-dir',
-                        type=Path,
-                        required=True,
-                        help='Puppet SSH keys directory.')
-    parser.add_argument('--cluster-yaml',
-                        type=Path,
-                        required=True,
-                        help='Path to merged cluster YAML.')
-    parser.add_argument('--sponsor-group',
-                        required=True,
-                        help='Group that sponsors belong to.')
-
-
-@subcommand('convert', add_convert_args)
-def convert(args: argparse.Namespace):
+@event_handler('AddAccountToGroup')
+def handle_addaccounttogroup_event(event: QueuedEventDataModel,
+                                   client: AuthenticatedClient,
+                                   config: HippoConfig):
     logger = logging.getLogger(__name__)
+    hippo_account = event.accounts[0]
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
+    is_sponsor_account = any((group.name == 'sponsors' for group in event.groups))
+    logger.info(f'Process AddAccountToGroup for site {sitename}, event: {event}')
 
-    current_state = PuppetAccountMap.Schema().load(parse_yaml(args.cluster_yaml)) #type: ignore
-    
-    if args.group_map:
-        group_map = HippoSponsorGroupMapping.load_yaml(args.group_map) #type: ignore
+    try:
+        with run_in_transaction():
+            site_user = SiteUser.objects.get(sitename=sitename, username=hippo_account.kerberos)
+            for group in event.groups:
+                add_group_member(sitename, site_user, group.name)
+
+            if is_sponsor_account:
+                sponsor_group = create_group_from_sponsor(site_user)
+    except Exception:
+        raise
     else:
-        group_map = HippoSponsorGroupMapping.Schema().load({'mapping': {}}) #type: ignore
-
-    admin_sponsors_map = HippoAdminSponsorList.load_yaml(args.admin_sponsors) #type: ignore
-
-    for hippo_file in args.hippo_file:
-        logger.info(f'Processing {hippo_file}...')
-        hippo_to_puppet(hippo_file,
-                        args.global_dir,
-                        args.site_dir,
-                        args.key_dir,
-                        current_state,
-                        group_map,
-                        admin_sponsors_map)
+        if is_sponsor_account:
+            hippoapi_send_email(get_newsponsor_email(site_user, sponsor_group), client)
+        hippoapi_send_email(get_newmembership_email(site_user), client)
 
 
-def add_sync_args(parser):
-    parser.add_argument('-i', '--hippo-dir',
-                        type=Path,
-                        required=True,
-                        help='Incoming hippo directory.')
-    parser.add_argument('--site-dir', 
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet accounts directory.')
-    parser.add_argument('--sponsor-group',
-                        default='sponsors',
-                        help='Group that sponsors belong to.')
-    parser.add_argument('--global-dir',
-                        type=Path,
-                        help='Global puppet accounts directory.')
-    parser.add_argument('--key-dir',
-                        type=Path,
-                        help='Puppet SSH keys directory.')
-    parser.add_argument('--processed-dir', type=Path,
-                        help='Directory to move completed user.txt files to.')
-    parser.add_argument('--invalid-dir', type=Path,
-                        help='Directory to move invalid user.txt files to.')
-    parser.add_argument('--base-branch',
-                        default='main',
-                        help='Branch to make PR against.')
-    parser.add_argument('--timeout',
-                        type=int,
-                        default=30)
+def get_newsponsor_email(user: SiteUser, group: SiteGroup):
+    sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
+    email = NewSponsorEmail(to=[user.parent.email],
+                            username=user.username,
+                            group=group.groupname,
+                            sitename=user.sitename.capitalize(),
+                            sitefqdn=sitefqdn)
+    return email
 
 
-def branch_name_title(prefix: Optional[str] = 'cheeto-hippo-sync') -> Tuple[str, str]:
-    branch_name = f"{prefix}.{sanitize_timestamp(TIMESTAMP_NOW)}"
-    title = f"[{socket.getfqdn()}] {prefix}: {human_timestamp(TIMESTAMP_NOW)}"
-    return branch_name, title
+def get_newmembership_email(user: SiteUser):
+    groups, sitefqdn, slurm_accounts, group_storages = get_user_email_info(user)
+    email = NewMembershipEmail(to=[user.parent.email],
+                               username=user.username,
+                               groups=groups,
+                               sitename=user.sitename.capitalize(),
+                               sitefqdn=sitefqdn,
+                               slurm_accounts=slurm_accounts,
+                               group_storages=group_storages)
+    return email
 
 
-def processed_filename(filename: Path) -> str:
-    date_suffix = f'.{sanitize_timestamp(TIMESTAMP_NOW)}'
-    return filename.with_suffix(''.join((date_suffix, *filename.suffixes))).name
-
-
-@subcommand('sync', add_sync_args)
 def sync(args: argparse.Namespace):
     templates_dir = PKG_TEMPLATES / 'emails'
     jinja_env = Environment(loader=FileSystemLoader(searchpath=templates_dir))
@@ -515,109 +386,6 @@ def sync(args: argparse.Namespace):
                                    timestamp=human_timestamp(TIMESTAMP_NOW),
                                    pyexe=sys.executable,
                                    exeargs=shlex.join(sys.argv))
-        Mail().send('cswel@ucdavis.edu', contents, subject=subject)()
+        Mailx().send('cswel@ucdavis.edu', contents, subject=subject)()
         
 
-def _sync(args, jinja_env: Environment):
-    logger = logging.getLogger(__name__)
-
-    site_data = SiteData(args.site_dir,
-                         common_root=args.global_dir,
-                         key_dir=args.key_dir,
-                         load=False)
-    hippo_data = HippoData(args.hippo_dir,
-                           processed_dir=args.processed_dir,
-                           invalid_dir=args.invalid_dir)
-
-    lock = site_data.lock(args.timeout)
-    with lock:
-        
-        gh = Gh(working_dir=site_data.common.root)
-        git = Git(working_dir=site_data.common.root)
-        git.checkout(branch=args.base_branch)()
-        git.clean(force=True, exclude=os.path.basename(lock.lock_file))()
-        git.pull()()
-
-        site_data.load()
-
-        working_branch, pr_title = branch_name_title()
-        git.checkout(branch=working_branch, create=True)()
-
-        fqdn = socket.getfqdn()
-        
-        get_commit = git.rev_parse()
-        start_commit = get_commit().strip()
-        converters = list(hippo_data.convert_yamls(site_data, 
-                                                   jinja_env, 
-                                                   args.sponsor_group))
-        for converter in converters:
-            converter.preprocess()
-            if converter.state == ConversionState.PREPROC:
-                converter.process()
-                message = f'[{fqdn}] {converter.summary()}'
-                git.add(Path('.'))()
-                try:
-                    git.commit(message)()
-                except sh.ErrorReturnCode_1: #type: ignore
-                    logger.info(f'Nothing to commit.')
-                    converter.set_noop()
-        end_commit = get_commit().strip()
-
-        if start_commit == end_commit:
-            logger.info('No commits made, skipping PR flow.')
-            for converter in converters:
-                #converter.set_noop()
-                logger.info(converter)
-            return
-        
-        logger.info(f'Pushing and creating branch: {working_branch}.')
-        git.push(remote_create=working_branch)()
-
-        logger.info('Creating pull request.')
-        pr_body = '\n'.join((f'- {c.summary()}' for c in converters))
-        gh.pr_create(args.base_branch, title=pr_title, body=pr_body)()
-
-        wait_on_pull_request(gh, working_branch, args.timeout, jinja_env)
-       
-        # TODO: check if merge has already occurred in case admin does so manually.
-        logger.info('Merging pull request.')
-        gh.pr_merge(working_branch)()
-        
-        git.checkout(branch=args.base_branch)()
-        git.pull()()
-
-        logger.info(f'Moving processed files to {hippo_data.processed_dir}')
-        for converter in converters:
-            converter.postprocess()
-                
-
-def wait_on_pull_request(gh: Gh,
-                         branch: str,
-                         poll_interval: int,
-                         jinja_env: Environment):
-
-    logger = logging.getLogger(__name__)
-    logger.info(f'Waiting on CI for pull request.')
-    #logger.info(gh.pr_view(branch)())
-    pr_url = gh.pr_view_url(branch)().strip() #type: ignore
-    mail = Mail()
-
-    ticket_created = False
-    while True:
-        status = gh.get_last_run_status(branch)
-        if status is CIStatus.INCOMPLETE:
-            logger.info(f'CI incomplete; waiting {poll_interval}s: {pr_url}')
-        elif status is CIStatus.SUCCESS:
-            logger.info(f'CI success: {pr_url}')
-            break
-        else:
-            if not ticket_created:
-                subject = f'cheeto account sync CI failed for branch {{branch}}'
-                logger.warning(f'CI failed, creating ticket: {pr_url}')
-                template = jinja_env.get_template('ci-error.txt.j2')
-                contents = template.render(pr_url=pr_url)
-                mail.send('cswel@ucdavis.edu', contents, subject=subject)()
-                ticket_created = True
-            else:
-                logger.info(f'CI failed, waiting resolution: {pr_url}')
-        time.sleep(poll_interval)

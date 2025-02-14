@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : errors.py
 # License: Modified BSD
@@ -16,4 +16,7 @@ class ExitCode(IntEnum):
     INVALID_SPONSOR = 3
     FILE_EXISTS = 4
     BAD_LDAP_QUERY = 5
-
+    BAD_CMDLINE_ARGS = 6
+    NOT_UNIQUE = 7
+    DOES_NOT_EXIST = 8
+    INVALID_METADATA = 9

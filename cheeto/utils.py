@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : utils.py
 # License: Modified BSD
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 17.02.2023
 
-import argparse
 from dataclasses import is_dataclass
 from datetime import datetime
-from enum import Enum
+import inspect
 from pathlib import Path
+import re
 from typing import TypeVar, Type, Callable, List, Dict, Any
 
 
@@ -31,11 +31,56 @@ def filter_nulls(d: dict) -> dict:
     return {key: val for key, val in d.items() if val}
 
 
+def remove_nones(d: dict):
+    for key in list(d.keys()):
+        if d[key] is None:
+            del d[key]
+
+
+def removed_nones(d: dict) -> dict:
+    return {k: v for k, v in d.items() if v is not None}
+
+
 def check_filter(d: dict, filter_on: dict):
     for key, val in d.items():
         if val in filter_on.get(key, []):
             return True
     return False
+
+
+def removed(d: dict, key: Any):
+    try:
+        del d[key]
+    except KeyError:
+        pass
+    return d
+
+
+def _ctx_name():
+    return inspect.stack()[1].function
+
+
+def slugify(s: str) -> str:
+    return re.sub(r'[^\w]+', '-', s).strip('-').lower()
+
+
+def make_ngrams(word: str,
+                min_size: int = 2,
+                prefix: bool = False,
+                stop_chars: list[str] = ['@']) -> list[str]:
+    length = len(word)
+    size_range = range(min_size, max(length, min_size) + 1)
+    if prefix:
+        return [
+            word[0:size]
+            for size in size_range
+        ]
+    return list(set(
+        word[i:i+size]
+        for size in size_range
+        for i in range(0, max(0, length-size) + 1)
+        if not word[i] == ' ' and not word[i+size-1] == ' '
+    ))
 
 
 def get_relative_path(lower_path: Path, upper_path: Path):
@@ -61,32 +106,6 @@ def size_to_megs(size: str) -> int:
     else:
         raise ValueError(f'{size} is not an allowed value.')
 
-
-class EnumAction(argparse.Action):
-    """
-    Argparse action for handling Enums
-    """
-    def __init__(self, **kwargs):
-        # Pop off the type value
-        enum = kwargs.pop("type", None)
-
-        # Ensure an Enum subclass is provided
-        if enum is None:
-            raise ValueError("type must be assigned an Enum when using EnumAction")
-        if not issubclass(enum, Enum):
-            raise TypeError("type must be an Enum when using EnumAction")
-
-        # Generate choices from the Enum
-        kwargs.setdefault("choices", tuple(e.name for e in enum))
-
-        super(EnumAction, self).__init__(**kwargs)
-
-        self._enum = enum
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        # Convert value back into an Enum
-        enum = self._enum[values]
-        setattr(namespace, self.dest, enum)
 
 
 _T = TypeVar("_T")

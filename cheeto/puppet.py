@@ -7,39 +7,31 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 21.02.2023
 
-import argparse
-from dataclasses import asdict, field
+from dataclasses import field
 from enum import Enum
 import logging
-import os
-from typing import Callable, Optional, List, Mapping, Union, Set, Tuple, Type
+from typing import Callable, Optional, List, Mapping, Union, Tuple, Type
 from typing_extensions import Concatenate
 import sys
 
 from filelock import FileLock
-import ldap
 import marshmallow
-from marshmallow import post_dump
+from marshmallow import pre_dump
 from marshmallow_dataclass import dataclass
-from rich import print as rprint
-from rich.console import Console
-from rich.syntax import Syntax
 
-from .args import subcommand
 from .errors import ExitCode
-from .parsing import (MergeStrategy,
-                      parse_yaml_forest,
-                      puppet_merge,
-                      validate_yaml_forest)
+from .ldap import LDAPManager
+from .yaml import (MergeStrategy,
+                   parse_yaml_forest,
+                   puppet_merge)
 from .types import *
 from .utils import (require_kwargs,
-                    EnumAction,
                     size_to_megs,
                     link_relative)
 
 
 MIN_PIGROUP_GID = 100_000_000
-MIN_SYSTEM_UID = 4_000_000_000
+MIN_SYSTEM_UID  = 4_000_000_000
 
 
 @require_kwargs
@@ -49,11 +41,17 @@ class PuppetAutofs(BaseModel):
     path: str # TODO: path-like
     options: Optional[str] = None
 
+    def split_options(self):
+        if self.options is None:
+            return None
+        else:
+            return self.options.strip('-').split(',')
+
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetZFS(BaseModel):
-    quota: DataQuota #type: ignore
+    quota: DataQuota 
 
 
 @require_kwargs
@@ -66,13 +64,13 @@ class PuppetUserStorage(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOSTRES(BaseModel):
-    cpus: Optional[UInt32] = None #type: ignore
-    gpus: Optional[UInt32] = None #type: ignore
-    mem: Optional[DataQuota] = None #type: ignore
+    cpus: Optional[int] = None 
+    gpus: Optional[int] = None 
+    mem: Optional[DataQuota] = None 
 
     @marshmallow.post_load
     def convert_mem(self, in_data, **kwargs):
-        if in_data['mem'] is not None:
+        if 'mem' in in_data and in_data['mem'] is not None:
             in_data['mem'] = f'{size_to_megs(in_data["mem"])}M'
         return in_data
 
@@ -90,11 +88,11 @@ class SlurmQOSTRES(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmQOS(BaseModel):
-    group: Optional[SlurmQOSTRES] = None #type: ignore
-    user: Optional[SlurmQOSTRES] = None #type: ignore
-    job: Optional[SlurmQOSTRES] = None #type: ignore
+    group: Optional[SlurmQOSTRES] = None 
+    user: Optional[SlurmQOSTRES] = None 
+    job: Optional[SlurmQOSTRES] = None 
     priority: Optional[int] = 0
-    flags: Optional[Set[SlurmQOSFlag]] = None #type: ignore
+    flags: Optional[List[SlurmQOSFlag]] = None 
 
     def to_slurm(self) -> List[str]:
         tokens = []
@@ -121,9 +119,11 @@ class SlurmPartition(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class SlurmRecord(BaseModel):
-    account: Optional[Union[KerberosID, Set[KerberosID]]] = None #type: ignore
+    account: Optional[Union[KerberosID, List[KerberosID]]] = None 
     partitions: Optional[Mapping[str, SlurmPartition]] = None
-    max_jobs: Optional[UInt32] = None #type: ignore
+    max_jobs: Optional[int] = None 
+    max_group_jobs: Optional[int] = None
+    max_submit_jobs: Optional[int] = None
 
 
 @require_kwargs
@@ -136,32 +136,50 @@ class SlurmRecordMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetUserRecord(BaseModel):
     fullname: str
-    email: Email #type: ignore
-    uid: LinuxUID #type: ignore
-    gid: LinuxGID #type: ignore
-    groups: Optional[Set[KerberosID]] = None #type: ignore
-    group_sudo: Optional[List[KerberosID]] = None #type: ignore
-    password: Optional[LinuxPassword] = None #type: ignore
-    shell: Optional[Shell] = None #type: ignore
-    tag: Optional[Set[str]] = None
+    email: Email
+    uid: LinuxUID 
+    gid: LinuxGID
+    groups: Optional[List[KerberosID]] = None 
+    group_sudo: Optional[List[KerberosID]] = None 
+    password: Optional[LinuxPassword] = None 
+    shell: Optional[Shell] = None 
+    tag: Optional[List[str]] = None
     home: Optional[str] = None
-    expiry: Optional[Union[Date, PuppetAbsent]] = None #type: ignore
+    expiry: Optional[Union[Date, PuppetAbsent]] = None 
 
-    ensure: Optional[PuppetEnsure] = None #type: ignore
-    membership: Optional[PuppetMembership] = None #type: ignore
+    ensure: Optional[PuppetEnsure] = None 
+    membership: Optional[PuppetMembership] = None 
 
     storage: Optional[PuppetUserStorage] = None
     slurm: Optional[SlurmRecord] = None
+
+    @property
+    def usertype(self):
+        tags = set() if self.tag is None else self.tag
+        if self.groups is not None and 'hpccfgrp' in self.groups: #type: ignore
+            return 'admin'
+        elif self.uid > 3000000000 or 'system-tag' in tags or self.uid == 0 \
+            or self.email in ('donotreply@ucdavis.edu', 'hpc-help@ucdavis.edu'):
+            return 'system'
+        else:
+            return 'user'
+
+    @property
+    def status(self):
+        if self.shell in DISABLED_SHELLS and self.usertype in ('admin', 'user'):
+            return 'inactive'
+        else:
+            return 'active'
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetUserMap(BaseModel):
-    user: Mapping[KerberosID, PuppetUserRecord] #type: ignore
+    user: Mapping[KerberosID, PuppetUserRecord] 
 
     @staticmethod
     def common_schema():
-        return PuppetUserMap.Schema(only=['user.fullname', #type: ignore
+        return PuppetUserMap.Schema(only=['user.fullname', 
                                           'user.email',
                                           'user.uid',
                                           'user.gid',
@@ -170,7 +188,7 @@ class PuppetUserMap(BaseModel):
 
     @staticmethod
     def site_schema():
-        return PuppetUserMap.Schema(only=['user.groups', #type: ignore
+        return PuppetUserMap.Schema(only=['user.groups', 
                                           'user.group_sudo',
                                           'user.tag',
                                           'user.home',
@@ -185,8 +203,8 @@ class PuppetUserMap(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupStorage(BaseModel):
     name: str
-    owner: KerberosID #type: ignore
-    group: Optional[KerberosID] = None #type: ignore
+    owner: KerberosID 
+    group: Optional[KerberosID] = None 
     autofs: Optional[PuppetAutofs] = None
     zfs: Optional[Union[PuppetZFS, bool]] = None
     globus: Optional[bool] = False
@@ -196,9 +214,9 @@ class PuppetGroupStorage(BaseModel):
 @dataclass(frozen=True)
 class PuppetGroupRecord(BaseModel):
     gid: LinuxGID #type: ignore
-    sponsors: Optional[List[KerberosID]] = None #type: ignore
-    ensure: Optional[PuppetEnsure] = None #type: ignore
-    tag: Optional[Set[str]] = None
+    sponsors: Optional[List[KerberosID]] = None 
+    ensure: Optional[PuppetEnsure] = None 
+    tag: Optional[List[str]] = None
 
     storage: Optional[List[PuppetGroupStorage]] = None
     slurm: Optional[SlurmRecord] = None
@@ -207,11 +225,11 @@ class PuppetGroupRecord(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetGroupMap(BaseModel):
-    group: Mapping[KerberosID, PuppetGroupRecord] #type: ignore
+    group: Mapping[KerberosID, PuppetGroupRecord] 
 
     @staticmethod
     def common_schema():
-        return PuppetGroupMap.Schema(only=['group.gid', #type: ignore
+        return PuppetGroupMap.Schema(only=['group.gid', 
                                            'group.tag',
                                            'group.ensure'])
 
@@ -227,8 +245,8 @@ class PuppetGroupMap(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetShareStorage(BaseModel):
-    owner: KerberosID #type: ignore
-    group: Optional[KerberosID] #type: ignore
+    owner: KerberosID 
+    group: Optional[KerberosID] 
     zfs: Union[PuppetZFS, bool]
     autofs: Optional[PuppetAutofs]
 
@@ -248,21 +266,30 @@ class PuppetShareMap(BaseModel):
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetMeta(BaseModel):
-    admin_sponsors: List[KerberosID] #type: ignore
+    admin_sponsors: List[KerberosID] 
 
 
 @require_kwargs
 @dataclass(frozen=True)
 class PuppetAccountMap(BaseModel):
-    group: Mapping[KerberosID, PuppetGroupRecord] = field(default_factory=dict) #type: ignore
-    user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) #type: ignore
+    group: Mapping[KerberosID, PuppetGroupRecord] = field(default_factory=dict) 
+    user: Mapping[KerberosID, PuppetUserRecord] = field(default_factory=dict) 
     share: Mapping[str, PuppetShareRecord] = field(default_factory=dict)
     meta: Optional[PuppetMeta] = None
+
+    @pre_dump
+    def sort_maps(self, data, **kwargs):
+        return PuppetAccountMap(
+            group = BaseModel._sort(data.group), #type: ignore
+            user = BaseModel._sort(data.user), #type: ignore
+            share = BaseModel._sort(data.share), #type: ignore
+            meta = data.meta
+        )
 
 
 def get_group_storage_paths(group: str, puppet_data: PuppetAccountMap):
     try:
-        storage = puppet_data.group[group].storage #type: ignore
+        storage = puppet_data.group[group].storage 
     except (KeyError, AttributeError):
         return None
     else:
@@ -413,11 +440,12 @@ class CommonData(YamlRepo):
             print(key, file=fp)
 
     def create_user(self, user_name: str,
-                          user: PuppetUserRecord):
+                          user: PuppetUserRecord,
+                          force: bool = False):
 
         logger = logging.getLogger(__name__)
         file_path = self.root / f'{user_name}.yaml'
-        if file_path.exists():
+        if file_path.exists() and not force:
             logger.info(f'Common YAML {file_path} exists, skipping.')
         else:
             record = PuppetUserMap(user = {user_name: user})
@@ -514,7 +542,7 @@ class SiteData(YamlRepo):
 
     def create_user(self,
                     user_name: str,
-                    user: PuppetUserRecord):
+                  user: PuppetUserRecord):
 
         site_path, common_path = self.get_entity_paths(user_name)
         # Create the top-level common user.yaml file
@@ -559,167 +587,18 @@ class SiteData(YamlRepo):
         self._raise_notloaded()
         return get_group_slurm_partitions(group_name, self.data) # type: ignore
 
+    def users(self):
+        for user_name in self.data.user.keys(): #type: ignore
+            yield user_name
 
-def add_validate_args(parser: argparse.ArgumentParser):
-    group = parser.add_argument_group('YAML Validation')
-    group.add_argument('--dump', default='/dev/stdout',
-                  help='Dump the validated YAML to the given file')
-    group.add_argument('--echo', action='store_true', default=False)
-    group.add_argument('files', nargs='+',
-                        help='YAML files to validate.')
-    group.add_argument('--merge',
-                        default=MergeStrategy.NONE,
-                        type=MergeStrategy,
-                        action=EnumAction,
-                        help='Merge the given YAML files before validation.')
-    group.add_argument('--strict', action='store_true', default=False,
-                        help='Terminate on validation errors.')
-    group.add_argument('--partial',
-                        default=False,
-                        action='store_true',
-                        help='Allow partial loading (ie missing keys).')
-    group.add_argument('--postload-validate', default=False,
-                       action='store_true')
-    for func_name in _postload_validators.keys():
-        group.add_argument(f'--{func_name}', action='store_true', default=False)
+    def iter_users(self):
+        for user_name, user_record in self.data.user.items(): #type: ignore
+            yield user_name, user_record
 
-
-
-@subcommand('validate', add_validate_args)
-def validate_yamls(args: argparse.Namespace):
-
-    console = Console(stderr=True)
-
-    yaml_forest = parse_yaml_forest(args.files,
-                                    merge_on=args.merge)
-    
-    for source_file, puppet_data in validate_yaml_forest(yaml_forest,
-                                                         PuppetAccountMap,
-                                                         args.strict):
-        if not args.quiet: 
-            console.rule(source_file, style='blue')
-
-        if args.postload_validate:
-            for postload_func in _postload_validators.values():
-                postload_func(source_file, puppet_data, args.strict)
-        else:
-            for func_name in _postload_validators.keys():
-                if getattr(args, func_name):
-                    _postload_validators[func_name](source_file, puppet_data, args.strict)
-
-        output_yaml = PuppetAccountMap.Schema().dumps(puppet_data) #type: ignore
-        hl_yaml = Syntax(output_yaml,
-                         'yaml',
-                         theme='github-dark',
-                         background_color='default')
-
-        if args.dump:
-            with open(args.dump, 'w') as fp:
-                if args.dump == '/dev/stdout':
-                    rprint(hl_yaml, file=fp)
-                else:
-                    print(output_yaml, file=fp)
-
-        if args.dump != '/dev/stdout' and args.echo and not args.quiet:
-            console.print(hl_yaml)
-
-
-class LDAPQueryParams(Enum):
-    username = 'uid'
-    uuid = 'ucdPersonUUID'
-    email = 'mail'
-    displayname = 'displayName'
-
-
-def add_create_nologin_user_args(parser: argparse.ArgumentParser):
-    qgroup = parser.add_argument_group('LDAP Query Parameters')
-    xgroup = qgroup.add_mutually_exclusive_group(required=True)
-    for param in LDAPQueryParams:
-        xgroup.add_argument(f'--{param.name}', metavar=param.value)
-    
-    lgroup = parser.add_argument_group('LDAP Server')
-    lgroup.add_argument('--ldap-uri', default='ldap://ldap.ucdavis.edu')
-
-    parser.add_argument('--site-dir', 
-                        type=Path,
-                        required=True,
-                        help='Site-specific puppet accounts directory.')
-    parser.add_argument('--global-dir',
-                        type=Path,
-                        required=True,
-                        help='Global puppet accounts directory.')
-    parser.add_argument('--force',
-                        default=False,
-                        action='store_true',
-                        help='Overwrite existing global YAML file.')
+    def iter_groups(self):
+        for group_name, group_record in self.data.group.items(): #type: ignore
+            yield group_name, group_record
 
 
 def flatten_and_decode(data: dict) -> dict:
     return {key: value[0].decode() for key, value in data.items()} #type: ignore
-
-
-@subcommand('create-nologin-user', 
-            add_create_nologin_user_args)
-def create_nologin_user(args: argparse.Namespace):
-    console = Console(stderr=True)
-    logger = logging.getLogger(__name__)
-    conn = ldap.initialize(args.ldap_uri)
-    
-    query = ','.join((f'{param.value}={getattr(args, param.name)}' for param in LDAPQueryParams \
-                      if getattr(args, param.name) is not None))
-
-    console.print(f'Server: {args.ldap_uri}')
-    console.print(f'Query: {query}')
-
-    try:
-        result = conn.search_s('ou=People,dc=ucdavis,dc=edu',
-                               ldap.SCOPE_SUBTREE, #type: ignore
-                               query,
-                               [param.value for param in LDAPQueryParams])
-    except Exception as e:
-        console.print(e)
-    else:
-        if not (0 < len(result) < 2): #type: ignore
-            logger.error(f'Should get exactly one result (got {len(result)})') #type: ignore
-            logger.error(result)
-            sys.exit(ExitCode.BAD_LDAP_QUERY)
-        
-        data = flatten_and_decode(result[0][1]) #type: ignore
-        console.print(f'Result: {data}')
-
-        user_name = data['uid']
-        yaml_dumper = PuppetUserMap.global_dumper()
-        yaml_filename = args.global_dir / f'{user_name}.yaml'
-
-        if not args.force and os.path.exists(yaml_filename):
-            logger.error(f'{yaml_filename} already exists! Exiting.')
-            sys.exit(ExitCode.FILE_EXISTS)
-
-        user_record = PuppetUserMap(
-            user = {
-                user_name: PuppetUserRecord(
-                    fullname = data['displayName'],
-                    email = data.get('mail', ['donotreply@ucdavis.edu']),
-                    uid = data['ucdPersonUUID'],
-                    gid = data['ucdPersonUUID'],
-                )
-            }
-        )
-
-        output_yaml = yaml_dumper.dumps(user_record) #type: ignore
-        hl_yaml = Syntax(output_yaml,
-                         'yaml',
-                         theme='github-dark',
-                         background_color='default')
-
-        if not args.quiet:
-            console.print(hl_yaml)
-
-        with yaml_filename.open('w') as fp:
-            print(output_yaml, file=fp)
-
-        try:
-            link_relative(args.site_dir, yaml_filename)
-        except FileExistsError:
-            logger.info(f'{yaml_filename} already linked to {args.site_dir}.')
-

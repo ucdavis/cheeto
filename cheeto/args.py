@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : __main__.py
 # License: Modified BSD
@@ -10,39 +10,59 @@
 # pyright: reportMissingTypeArgument=true
 
 
-from argparse import ArgumentParser, Namespace, _SubParsersAction
-import os
-from functools import wraps
-from pathlib import Path
-from typing import Callable
-from typing_extensions import Concatenate, ParamSpec
+from argparse import (Action,
+                      ArgumentTypeError)
+from enum import Enum
+import re
 
-P = ParamSpec('P')
-Subparsers = _SubParsersAction
-NS = Namespace
-NamespaceFunc = Callable[Concatenate[NS, P], None]
-SubCommandFunc = Callable[Concatenate[Subparsers, P], None]
+from . import __version__
+from .templating import PKG_TEMPLATES
 
 
-def add_common_args(parser):
-    parser.add_argument('--log', type=Path, default=Path(os.devnull),
-                        help='Log to file.')
-    parser.add_argument('--quiet', default=False, action='store_true')
+
+splash = (PKG_TEMPLATES / 'banner.txt').read_text().rstrip('\n').format(version=f'v{__version__}')
+banner = f'''
+\b
+{splash}
+'''
+
+def regex_argtype(pattern: re.Pattern[str] | str):
+    _pattern = pattern
+    def inner(value: str | None):
+        if value is None:
+            return value
+        if not isinstance(_pattern, re.Pattern):
+            pattern = re.compile(_pattern)
+        else:
+            pattern = _pattern
+        if not pattern.match(value):
+            raise ArgumentTypeError(f'Invalid value, should match: {pattern.pattern}')
+        return value
+    return inner
 
 
-def subcommand(subcommand_name: str, *arg_adders: Callable[[ArgumentParser], None]) \
--> Callable[[NamespaceFunc[P]], SubCommandFunc[P]]:
+class EnumAction(Action):
+    """
+    Argparse action for handling Enums
+    """
+    def __init__(self, **kwargs):
+        # Pop off the type value
+        enum = kwargs.pop("type", None)
 
-    def wrapper(func: NamespaceFunc[P]) -> SubCommandFunc[P]:
-   
-        @wraps(func)
-        def wrapped(parent_parser: Subparsers, *args: P.args, **kwargs: P.kwargs) -> None:
-            parser = parent_parser.add_parser(subcommand_name)
-            add_common_args(parser)
-            parser.set_defaults(func=func)
-            for adder in arg_adders:
-                adder(parser)
+        # Ensure an Enum subclass is provided
+        if enum is None:
+            raise ValueError("type must be assigned an Enum when using EnumAction")
+        if not issubclass(enum, Enum):
+            raise TypeError("type must be an Enum when using EnumAction")
 
-        return wrapped
+        # Generate choices from the Enum
+        kwargs.setdefault("choices", tuple(e.name for e in enum))
 
-    return wrapper
+        super(EnumAction, self).__init__(**kwargs)
+
+        self._enum = enum
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # Convert value back into an Enum
+        enum = self._enum[values]
+        setattr(namespace, self.dest, enum)

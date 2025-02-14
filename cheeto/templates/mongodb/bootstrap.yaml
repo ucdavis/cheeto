@@ -1,0 +1,69 @@
+users:
+  - username: camw
+    email: cswel@ucdavis.edu
+    uid: 1134153
+    gid: 1134153
+    fullname: Camille Scott
+    shell: /bin/zsh
+    home_directory: /home/camw
+    type: admin
+groups:
+  - groupname: hpccfgrp
+    gid: 4100000000
+sites:
+  - sitename: hive
+    fqdn: hive.hpc.ucdavis.edu
+    users:
+      - username: camw
+        tag:
+          - root-ssh-tag
+          - ssh-tag
+          - sudo-tag
+    groups:
+      - groupname: hpccfgrp
+        members:
+          - camw
+        sponsors:
+          - camw
+  - sitename: farm
+    fqdn: farm.hpc.ucdavis.edu
+    users:
+      - username: camw
+        tag:
+          - root-ssh-tag
+          - ssh-tag
+          - sudo-tag
+    groups:
+      - groupname: hpccfgrp
+        members:
+          - camw
+        sponsors:
+          - camw
+  - sitename: franklin
+    fqdn: franklin.hpc.ucdavis.edu
+    users:
+      - username: camw
+        tag:
+          - root-ssh-tag
+          - ssh-tag
+          - sudo-tag
+    groups:
+      - groupname: hpccfgrp
+        members:
+          - camw
+        sponsors:
+          - camw
+  - sitename: peloton
+    fqdn: peloton.hpc.ucdavis.edu
+    users:
+      - username: camw
+        tag:
+          - root-ssh-tag
+          - ssh-tag
+          - sudo-tag
+    groups:
+      - groupname: hpccfgrp
+        members:
+          - camw
+        sponsors:
+          - camw

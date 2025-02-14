@@ -10,29 +10,31 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Install apt dependencies
         run: |
+          curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
+          echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
           sudo apt update
-          sudo apt install libldap-2.5-0 libldap-dev libsasl2-dev
+          sudo apt install -y libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev gnupg curl mongodb-org
       - uses: actions/checkout@v2
       - uses: actions/setup-python@v2
         with:
           python-version: 3.12
       - name: cache poetry install
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: ~/.local
-          key: poetry-1.8.3-0
+          key: poetry-2.0.1-0
       - uses: snok/install-poetry@v1
         with:
-          version: 1.8.3
+          version: 2.0.1
           virtualenvs-create: true
           virtualenvs-in-project: true
       - name: cache deps
         id: cache-deps
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: .venv
           key: pydeps-${{ hashFiles('**/poetry.lock') }}

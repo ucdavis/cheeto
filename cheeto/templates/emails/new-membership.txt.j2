@@ -1,0 +1,33 @@
+Your new group association on **{{ sitename }}** has been
+processed and should be live within 30 minutes.
+
+You are now a member of the following Unix groups:
+{%- for group in groups %}
+- _{{group}}_
+{%- endfor %}
+
+{% if slurm_accounts -%}
+You now have access to the following Slurm accounts and their associated partitions,
+which you can use to submit jobs by passing `-A [ACCOUNT] -p [PARTITION]` to `sbatch`
+and other Slurm commands:
+{%- for account, partitions in slurm_accounts.items() %}
+- _{{account}}_
+{%- for partition in partitions %}
+  - `{{partition}}`
+{%- endfor %}
+{%- endfor %}
+{%- endif %}
+
+As a reminder, your home directory has a quota of 20GB to allow for your configuration files and code.
+
+{%- if group_storages %}
+You have access to the following group storages, which you should use for larger data:
+{%- for path in group_storages %}
+- {{path}}
+{%- endfor %}
+
+Talk to your sponsor about how data is organized on these volumes.
+{%- endif %}
+
+Additional user documentation can be found at [https://docs.hpc.ucdavis.edu](https://docs.hpc.ucdavis.edu).
+Please contact [hpc-help@ucdavis.edu](mailto:hpc-help@ucdavis.edu?subject=Support%20Request%3A%20{{sitename}}) for support requests.

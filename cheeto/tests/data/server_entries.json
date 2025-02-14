@@ -1,0 +1,629 @@
+{
+    "entries": [
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hpccf"
+                ]
+            },
+            "dn": "ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "hpccf"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "groups"
+                ]
+            },
+            "dn": "ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "groups"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "objectClass": [
+                    "top",
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "automount"
+                ]
+            },
+            "dn": "ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "objectClass": [
+                    "top",
+                    "organizationalUnit"
+                ],
+                "ou": [
+                    "automount"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Camille Scott"
+                ],
+                "displayName": "Camille Scott",
+                "gidNumber": 1134153,
+                "homeDirectory": "/home/camw",
+                "loginShell": "/bin/zsh",
+                "mail": [
+                    "cswel@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Scott"
+                ],
+                "sshPublicKey": [
+                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDLXcXPG9eV1a8lGtKx64XquUUkZSkVmatpfehh9BuWqhDEx/KI93agee23o8aQKBhaVVEZAd05o/loxVY25ClFoLcwZLiRmihGksudlE1mWxLGAgoviVVtX9JRTqMyYzWvR94dfobG4ysy2SU2yJFAN9gPqybz4TWmU5dOHnulAgSMNVAFxLnJsI7Euvutq15YanetfSJ1aZ0dCgBFTWgOCJA0MPszpKrEF9FWJw4DMqgKnFPF67MivKBT3yYqgRjxACQurkACzvPl/cijktnD4bFQqpclqyZ8F8RCBnpYq1zzoOPwo+/IQ13vKGUzdY/Vgfe3pLQyxhnKspRF/mBc7wn38FznuiW6uK9w3wWWhNIlCDqC4Yd1a+j5AE02rnqLwUJ+BpzMdnCH6cY6Hna7V+bI4y+2dEYGYoXNwfkhmd/f6jauQHWIuoAU+7A8sB20TslERSFcin8YevSGnAcI7MojdNMXgGpdmwuvG1uwd+1bLSUD6yQOVfhaD5HO02Im1rdQ0ZYs2wwpdrDkxdB9QSK00iTQJ7dQXFlRpHLQH20pH5oFUi7HE5EjtBr3HcvxXA1hx5o413SJAqdz0NMb1SdZQgOm7tg9syUIaKUbcmcKe+6k3ThWlulTRVrPSjo8VcBAHOMX1ibhHSwNkc77ss0oUrmKN6ALN2j2d0FwJQ== camw@hpccf"
+                ],
+                "uid": [
+                    "camw"
+                ],
+                "uidNumber": 1134153
+            },
+            "dn": "uid=camw,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Camille Scott"
+                ],
+                "displayName": [
+                    "Camille Scott"
+                ],
+                "gidNumber": [
+                    "1134153"
+                ],
+                "homeDirectory": [
+                    "/home/camw"
+                ],
+                "loginShell": [
+                    "/bin/zsh"
+                ],
+                "mail": [
+                    "cswel@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Scott"
+                ],
+                "sshPublicKey": [
+                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQDLXcXPG9eV1a8lGtKx64XquUUkZSkVmatpfehh9BuWqhDEx/KI93agee23o8aQKBhaVVEZAd05o/loxVY25ClFoLcwZLiRmihGksudlE1mWxLGAgoviVVtX9JRTqMyYzWvR94dfobG4ysy2SU2yJFAN9gPqybz4TWmU5dOHnulAgSMNVAFxLnJsI7Euvutq15YanetfSJ1aZ0dCgBFTWgOCJA0MPszpKrEF9FWJw4DMqgKnFPF67MivKBT3yYqgRjxACQurkACzvPl/cijktnD4bFQqpclqyZ8F8RCBnpYq1zzoOPwo+/IQ13vKGUzdY/Vgfe3pLQyxhnKspRF/mBc7wn38FznuiW6uK9w3wWWhNIlCDqC4Yd1a+j5AE02rnqLwUJ+BpzMdnCH6cY6Hna7V+bI4y+2dEYGYoXNwfkhmd/f6jauQHWIuoAU+7A8sB20TslERSFcin8YevSGnAcI7MojdNMXgGpdmwuvG1uwd+1bLSUD6yQOVfhaD5HO02Im1rdQ0ZYs2wwpdrDkxdB9QSK00iTQJ7dQXFlRpHLQH20pH5oFUi7HE5EjtBr3HcvxXA1hx5o413SJAqdz0NMb1SdZQgOm7tg9syUIaKUbcmcKe+6k3ThWlulTRVrPSjo8VcBAHOMX1ibhHSwNkc77ss0oUrmKN6ALN2j2d0FwJQ== camw@hpccf"
+                ],
+                "uid": [
+                    "camw"
+                ],
+                "uidNumber": [
+                    "1134153"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Janet L Campbell"
+                ],
+                "displayName": "Janet L Campbell",
+                "gidNumber": 2250435,
+                "homeDirectory": "/home/janca",
+                "loginShell": "/bin/bash",
+                "mail": [
+                    "janca@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Campbell"
+                ],
+                "sshPublicKey": [
+                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDy2LhOfR8uRNmq5BZ40MFtE8UDWuvolp0IaPCxbnDaSW9bgrMp0SzfCGk2qlk97bpPLehwQ5iR6rPdq38SmXQxfYIXIhBA3oAonBkGy9exg8htcJHnMd7MFuYSO3czMT2eeISRDQYZsONjPfavcIPmv1OfwquZDdKsJmGtbUA0oY5RQdCjgp0QzBw8NY+E3CCFJK6vzw5kGMkrPg21RnqStBHi3nii4b8wHxcxWFaeEMQppG5JuwM3noLTTdXSzuiKI5bj5jCIJVtEcKUBDdp79W5uq9knVjeHZ4InuEqixL6paK1W6541dJlHZxSx4sN2AzD3DP/zSyf/nRWMBMvst66xart4F3NZTtP3XZMDKR6XG333I2SpdxuZPBUClILerMbT0jnPpZTWIwgERqDLlFxnxH6L7yaohxHL3nGvf8iiiSxLPeliDUzw4zIIKNLuEqYf9+aaaO2hb+GeWZLRUEShOHqBCkDUhCXh899/4ywEEy8iE9UMzwQJY2mXyyk= janet@ibis",
+                    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCKEXMDJHWmEffBD81z/gmjlgFT6cdATzocheNV230g80p8c1ex99dgULJPr0/04HWYktotF2hPTogUQvdvI4K8= janca-ucd@secretive.W2XQGWKXL4.local"
+                ],
+                "uid": [
+                    "janca"
+                ],
+                "uidNumber": 2250435
+            },
+            "dn": "uid=janca,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Janet L Campbell"
+                ],
+                "displayName": [
+                    "Janet L Campbell"
+                ],
+                "gidNumber": [
+                    "2250435"
+                ],
+                "homeDirectory": [
+                    "/home/janca"
+                ],
+                "loginShell": [
+                    "/bin/bash"
+                ],
+                "mail": [
+                    "janca@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Campbell"
+                ],
+                "sshPublicKey": [
+                    "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDy2LhOfR8uRNmq5BZ40MFtE8UDWuvolp0IaPCxbnDaSW9bgrMp0SzfCGk2qlk97bpPLehwQ5iR6rPdq38SmXQxfYIXIhBA3oAonBkGy9exg8htcJHnMd7MFuYSO3czMT2eeISRDQYZsONjPfavcIPmv1OfwquZDdKsJmGtbUA0oY5RQdCjgp0QzBw8NY+E3CCFJK6vzw5kGMkrPg21RnqStBHi3nii4b8wHxcxWFaeEMQppG5JuwM3noLTTdXSzuiKI5bj5jCIJVtEcKUBDdp79W5uq9knVjeHZ4InuEqixL6paK1W6541dJlHZxSx4sN2AzD3DP/zSyf/nRWMBMvst66xart4F3NZTtP3XZMDKR6XG333I2SpdxuZPBUClILerMbT0jnPpZTWIwgERqDLlFxnxH6L7yaohxHL3nGvf8iiiSxLPeliDUzw4zIIKNLuEqYf9+aaaO2hb+GeWZLRUEShOHqBCkDUhCXh899/4ywEEy8iE9UMzwQJY2mXyyk= janet@ibis",
+                    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBCKEXMDJHWmEffBD81z/gmjlgFT6cdATzocheNV230g80p8c1ex99dgULJPr0/04HWYktotF2hPTogUQvdvI4K8= janca-ucd@secretive.W2XQGWKXL4.local"
+                ],
+                "uid": [
+                    "janca"
+                ],
+                "uidNumber": [
+                    "2250435"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "Omen Wild"
+                ],
+                "displayName": "Omen Wild",
+                "gidNumber": 457597,
+                "homeDirectory": "/home/omen",
+                "loginShell": "/bin/bash",
+                "mail": [
+                    "omen@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Wild"
+                ],
+                "sshPublicKey": [
+                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJJ3I60ODsCgV6x8CVYm9LHmoK+Yk27HHOO1oZU6w7L omen@HPC-CF",
+                    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFF90FbdKXKaNxa00vDtalzp2A28lSLCItSJj2xYfugKEtnFXikrvVn6PY39ulVwrRFAdjs4arDXWu7yTBWtJy0= omen@secretive.thaen.local"
+                ],
+                "uid": [
+                    "omen"
+                ],
+                "uidNumber": 457597
+            },
+            "dn": "uid=omen,ou=users,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "Omen Wild"
+                ],
+                "displayName": [
+                    "Omen Wild"
+                ],
+                "gidNumber": [
+                    "457597"
+                ],
+                "homeDirectory": [
+                    "/home/omen"
+                ],
+                "loginShell": [
+                    "/bin/bash"
+                ],
+                "mail": [
+                    "omen@ucdavis.edu"
+                ],
+                "objectClass": [
+                    "inetOrgPerson",
+                    "posixAccount",
+                    "ldapPublicKey"
+                ],
+                "sn": [
+                    "Wild"
+                ],
+                "sshPublicKey": [
+                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBJJ3I60ODsCgV6x8CVYm9LHmoK+Yk27HHOO1oZU6w7L omen@HPC-CF",
+                    "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFF90FbdKXKaNxa00vDtalzp2A28lSLCItSJj2xYfugKEtnFXikrvVn6PY39ulVwrRFAdjs4arDXWu7yTBWtJy0= omen@secretive.thaen.local"
+                ],
+                "uid": [
+                    "omen"
+                ],
+                "uidNumber": [
+                    "457597"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "camw"
+                ],
+                "gidNumber": 1134153,
+                "memberUid": [
+                    "camw"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=camw,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "camw"
+                ],
+                "gidNumber": [
+                    "1134153"
+                ],
+                "memberUid": [
+                    "camw"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "omen"
+                ],
+                "gidNumber": 457597,
+                "memberUid": [
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=omen,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "omen"
+                ],
+                "gidNumber": [
+                    "457597"
+                ],
+                "memberUid": [
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "janca"
+                ],
+                "gidNumber": 2250435,
+                "memberUid": [
+                    "janca"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=janca,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "janca"
+                ],
+                "gidNumber": [
+                    "2250435"
+                ],
+                "memberUid": [
+                    "janca"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "hpccfgrp"
+                ],
+                "gidNumber": 4100000000,
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=hpccfgrp,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "hpccfgrp"
+                ],
+                "gidNumber": [
+                    "4100000000"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "sudo-users"
+                ],
+                "gidNumber": 4000001007,
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=sudo-users,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "sudo-users"
+                ],
+                "gidNumber": [
+                    "4000001007"
+                ],
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "root-ssh-users"
+                ],
+                "gidNumber": 4000001005,
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=root-ssh-users,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "root-ssh-users"
+                ],
+                "gidNumber": [
+                    "4000001005"
+                ],
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "login-ssh-users"
+                ],
+                "gidNumber": 4000001001,
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=login-ssh-users,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "login-ssh-users"
+                ],
+                "gidNumber": [
+                    "4000001001"
+                ],
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "cn": [
+                    "compute-ssh-users"
+                ],
+                "gidNumber": 4000001004,
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            },
+            "dn": "cn=compute-ssh-users,ou=groups,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "cn": [
+                    "compute-ssh-users"
+                ],
+                "gidNumber": [
+                    "4000001004"
+                ],
+                "memberUid": [
+                    "camw",
+                    "janca",
+                    "omen"
+                ],
+                "objectClass": [
+                    "posixGroup",
+                    "groupOfMembers"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.home",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.home,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.home"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.group",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.group,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.group"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountMapName": "auto.master",
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            },
+            "dn": "automountMapName=auto.master,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountMapName": [
+                    "auto.master"
+                ],
+                "objectClass": [
+                    "top",
+                    "automountMap"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountInformation": "ldap:automountMapName=auto.home,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+                "automountKey": "/home",
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            },
+            "dn": "automountKey=/home,automountMapName=auto.master,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountInformation": [
+                    "ldap:automountMapName=auto.home,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu"
+                ],
+                "automountKey": [
+                    "/home"
+                ],
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            }
+        },
+        {
+            "attributes": {
+                "automountInformation": "ldap:automountMapName=auto.group,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu --ghost",
+                "automountKey": "/group",
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            },
+            "dn": "automountKey=/group,automountMapName=auto.master,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu",
+            "raw": {
+                "automountInformation": [
+                    "ldap:automountMapName=auto.group,ou=automount,ou=hpccf,dc=hpc,dc=ucdavis,dc=edu --ghost"
+                ],
+                "automountKey": [
+                    "/group"
+                ],
+                "objectClass": [
+                    "top",
+                    "automount"
+                ]
+            }
+        }
+    ]
+}

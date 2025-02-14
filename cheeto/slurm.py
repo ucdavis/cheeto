@@ -1,26 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# (c) Camille Scott, 2023
+# (c) Camille Scott, 2023-2024
 # (c) The Regents of the University of California, Davis, 2023
 # File   : slurm.py
 # License: Modified BSD
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.04.2023
 
-import argparse
 import csv
 from enum import Enum, auto
 from io import StringIO
-import json
 import os
 import sys
 from typing import Any, Generator, Tuple, Optional, TextIO
 
+from marshmallow import ValidationError
 from rich.console import Console
-from rich.progress import track
 import sh
 
-from .args import subcommand
 from .types import *
 from .puppet import (parse_yaml_forest,
                      validate_yaml_forest,
@@ -28,7 +25,9 @@ from .puppet import (parse_yaml_forest,
                      PuppetAccountMap,
                      SlurmQOS)
 from .utils import (check_filter,
-                    filter_nulls)
+                    filter_nulls,
+                    removed_nones)
+
 
 class SControl:
 
@@ -82,20 +81,24 @@ class SAcctMgr:
         self.show = self.cmd.bake('show', '-P')
 
     def add_account(self, account_name: str,
-                          max_jobs: Optional[int] = None) -> sh.Command:
-        args = ['account', account_name]
-        if max_jobs is not None:
-            args.append(f'MaxJobs={max_jobs}')
+                          account: SlurmAccount) -> sh.Command:
+        args = ['account', account_name,
+                f'MaxJobs={account.max_user_jobs}',
+                f'GrpJobs={account.max_group_jobs}',
+                f'MaxWall={account.max_job_length}',
+                f'MaxSubmit={account.max_submit_jobs}']
+
         return self.add.bake(*args)
 
     def modify_account(self, account_name: str,
-                             max_jobs: int) -> sh.Command:
-        if max_jobs is None:
-            max_jobs = -1
+                             account: SlurmAccount) -> sh.Command:
         return self.modify.bake('account',
                                 account_name,
                                 'set',
-                                f'MaxJobs={max_jobs}')
+                                f'MaxJobs={account.max_user_jobs}',
+                                f'GrpJobs={account.max_group_jobs}',
+                                f'MaxWall={account.max_job_length}',
+                                f'MaxSubmit={account.max_submit_jobs}')
 
     def remove_account(self, account_name: str) -> sh.Command:
         return self.remove.bake('account', account_name)
@@ -203,18 +206,14 @@ def sanitize_tres(tres_string: str) -> dict:
 
 def build_puppet_tres(tres_string: str) -> Optional[dict]:
     slurm_tres = sanitize_tres(tres_string)
-    if any((item is not None for item in slurm_tres.values())):
-        puppet_tres = dict(cpus=slurm_tres.get('cpu', None),
-                           mem=slurm_tres.get('mem', None),
-                           gpus=slurm_tres.get('gpu', None))
-    else:
-        puppet_tres = None
-
-    return puppet_tres
+    return removed_nones(dict(cpus=slurm_tres.get('cpu', None),
+                              mem=slurm_tres.get('mem', None),
+                              gpus=slurm_tres.get('gpu', None)))
 
 
 def build_slurm_qos_state(qos_file_pointer: TextIO,
                           filter_on: dict = {'Name': 'normal'}) -> Tuple[dict, dict]:
+    logger = logging.getLogger(__name__)
     qos_map = {}
     filtered_map = {}
     for row in SAcctMgr.get_show_parser(qos_file_pointer):
@@ -224,16 +223,19 @@ def build_slurm_qos_state(qos_file_pointer: TextIO,
         puppet_grp_tres = build_puppet_tres(row['GrpTRES'])
         puppet_job_tres = build_puppet_tres(row['MaxTRES'])
         puppet_user_tres = build_puppet_tres(row['MaxTRESPU'])
-
-        puppet_qos = SlurmQOS.Schema().load(dict(group=puppet_grp_tres, #type: ignore
-                                                 job=puppet_job_tres,
-                                                 user=puppet_user_tres,
-                                                 priority=row['Priority'])) 
-        
-        if filter_row:
-            filtered_map[row['Name']] = puppet_qos
+        data = dict(group=puppet_grp_tres, #type: ignore
+                    job=puppet_job_tres,
+                    user=puppet_user_tres,
+                    priority=row['Priority'])
+        try:
+            puppet_qos = SlurmQOS.Schema().load(data) 
+        except ValidationError as e:
+            logger.error(f'{data}::: {e}')
         else:
-            qos_map[row['Name']] = puppet_qos
+            if filter_row:
+                filtered_map[row['Name']] = puppet_qos
+            else:
+                qos_map[row['Name']] = puppet_qos
 
     return qos_map, filtered_map
 
@@ -251,7 +253,12 @@ def build_slurm_association_state(associations_file_pointer: TextIO,
             # Set partitions empty and fill in as we encounter them.
             filter_row = check_filter(row, filter_accounts_on)
             if not filter_row:
-                extras = int(row['MaxJobs']) if 'MaxJobs' in row else None
+                extras = (int(row['MaxJobs']) if 'MaxJobs' in row else -1,
+                          )
+                extras = SlurmAccount(max_user_jobs=int(row.get('MaxJobs', -1)),
+                                      max_submit_jobs=int(row.get('MaxSubmit', -1)),
+                                      max_group_jobs=int(row.get('GrpJobs', -1)),
+                                      max_job_length=row.get('MaxWall', '-1'))
                 associations['accounts'][row['Account']] = extras
         elif 'User' in row:
             filter_row = check_filter(row, filter_users_on)
@@ -303,7 +310,8 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
 
     for group_name, group in puppet_mapping.group.items():
         if group.slurm is not None:
-            puppet_associations['accounts'][group_name] = group.slurm.max_jobs
+            max_user_jobs = group.slurm.max_jobs if group.slurm.max_jobs is not None else -1
+            puppet_associations['accounts'][group_name] = (max_user_jobs, -1)
 
     for user_name, user in puppet_mapping.user.items():
 
@@ -336,6 +344,7 @@ def build_puppet_association_state(puppet_mapping: PuppetAccountMap) -> dict:
 
 
 def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]:
+    logger = logging.getLogger(__name__)
     deletions = []
     updates = []
     additions = []
@@ -346,6 +355,7 @@ def reconcile_qoses(old_qoses: dict, new_qoses: dict) -> Tuple[list, list, list]
         else:
             new_qos = new_qoses[qos_name]
             if old_qos != new_qos:
+                logger.info(f'{qos_name}:\nslurmdb qos: {old_qos}\nnew qos: {new_qos}')
                 updates.append((qos_name, new_qos))
     
     for qos_name, new_qos in new_qoses.items():
@@ -377,6 +387,8 @@ def reconcile_users(old_assocs: dict, new_assocs: dict) -> Tuple[list, list, lis
 
 
 def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, list, list]:
+    logger = logging.getLogger(__name__)
+
     deletions = []
     updates = []
     additions = []
@@ -386,6 +398,7 @@ def reconcile_accounts(old_accounts: dict, new_accounts: dict) -> Tuple[list, li
             deletions.append(account_name)
         else:
             if old_extra != new_accounts[account_name]:
+                logger.info(f'slurmdb: {old_extra}\nnew: {new_accounts[account_name]}')
                 updates.append((account_name, new_accounts[account_name]))
 
     for account_name, new_extra in new_accounts.items():
@@ -446,92 +459,6 @@ def generate_commands(slurm_associations: dict,
                           [sacctmgr.remove_account(deletion) for deletion in account_deletions]))
 
     return command_queue
-
-
-def add_sync_args(parser):
-    parser.add_argument('--sudo', action='store_true', default=False,
-                        help='Run sacctmgr commands with sudo.')
-    parser.add_argument('--apply', action='store_true', default=False,
-                        help='Execute and apply the Slurm changes.')
-    parser.add_argument('--slurm-associations', type=argparse.FileType('r'),
-                        help='Read slurm associations from the specified file '
-                             'instead of parsing from a `sacctmgr show -P assoc` call.')
-    parser.add_argument('--slurm-qoses', type=argparse.FileType('r'),
-                        help='Read slurm QoSes from the specified file '
-                             'instead of parsing from a `sacctmgr show -P qos` call.')
-    parser.add_argument('yaml_files', nargs='+',
-                        help='Source YAML files.')
-
-
-@subcommand('show-qos')
-def show_qos(args: argparse.Namespace):
-    pass
-
-
-@subcommand('sync', add_sync_args)
-def sync(args: argparse.Namespace):
-    console = Console(stderr=True)
-
-    console.rule('Load association data.')
-    console.print('Loading Puppet YAML data...')
-    yaml_forest = parse_yaml_forest(args.yaml_files,
-                                    merge_on=MergeStrategy.ALL)
-    # Generator only yields one item with MergeStrategy.ALL
-    _, puppet_data = next(validate_yaml_forest(yaml_forest,
-                                               PuppetAccountMap,
-                                               strict=True))
-
-    console.print('Building Puppet associations table...')
-    puppet_associations = build_puppet_association_state(puppet_data)
-    console.print('Building Puppet QoSes...')
-    puppet_qos_map = build_puppet_qos_state(puppet_data)
-
-    sacctmgr = SAcctMgr(sudo=args.sudo)
-    console.print('Getting current associations...')
-    if args.slurm_associations:
-        slurm_associations = build_slurm_association_state(args.slurm_associations)
-    else:
-        slurm_associations = sacctmgr.get_slurm_association_state()
-    console.print('Getting current QoSes...')
-    if args.slurm_qoses:
-        slurm_qos_map, _ = build_slurm_qos_state(args.slurm_qoses)
-    else:
-        slurm_qos_map, _ = sacctmgr.get_slurm_qos_state()
-
-    console.rule('Reconcile Puppet and Slurm.')
-    console.print('Generating reconciliation commands...')
-    command_queue = generate_commands(slurm_associations,
-                                      slurm_qos_map,
-                                      puppet_associations,
-                                      puppet_qos_map,
-                                      sacctmgr=sacctmgr)
-
-    report = {}
-    for command_group_name, slurm_op, command_group in command_queue:
-        group_report = {'successes': 0, 'failures': 0, 'commands': len(command_group)}
-        report[slurm_op.name] = group_report
-
-        if not command_group:
-            continue
-
-        console.rule(f'Commands: {command_group_name}', style='blue')
-        if args.apply:
-            for command in track(command_group, console=console):
-                try:
-                    #console.out(f'Run: {command}', highlight=False)
-                    command()
-                except sh.ErrorReturnCode_1 as e: #type: ignore
-                    console.print(f'\nCommand Error: {e}', highlight=False)
-                    group_report['failures'] += 1
-                else:
-                    group_report['successes'] += 1
-        else:
-            for command in command_group:
-                console.out(str(command), highlight=False)
-
-    print(json.dumps(report, indent=2)) 
-
-
 
 
 
