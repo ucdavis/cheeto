@@ -612,7 +612,6 @@ def create_home_storage(sitename: str,
 
 def add_site_user(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)
-    logger.info(f'Adding user {user.username} to site {sitename}')
     if type(user) is str:
         try:
             user = GlobalUser.objects.get(username=user)
@@ -622,6 +621,8 @@ def add_site_user(sitename: str, user: global_user_t):
         group = GlobalGroup.objects.get(groupname=user.username)
     except DoesNotExist:
         raise NonExistentGlobalGroup(user.username)
+
+    logger.info(f'Adding user {user.username} to site {sitename}')
 
     if query_user_exists(user.username, sitename):
         raise DuplicateSiteUser(user.username, sitename)

@@ -917,7 +917,7 @@ def group_show(args: Namespace):
 @commands.register('database', 'group', 'add', 'member',
                    help='Add user(s) to group(s)')
 def cmd_group_add_member(args: Namespace):
-    group_add_user_element(args.site, args.groups, args.users, '_members')
+    group_add_user_element(args.site, args.groups, args.user, '_members')
 
 
 @group_args.apply(required=True)
