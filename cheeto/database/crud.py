@@ -937,8 +937,9 @@ def user_to_puppet(user: SiteUser,
 
     try:
         home_storage = query_user_home_storage(user.sitename, user.parent)
-    except DoesNotExist:
+    except (DoesNotExist, NonExistentStorage):
         storage = None
+        logger.warning(f'No home storage found for {user.username} at {user.sitename}')
     else:
         storage = dict(autofs={'nas': home_storage.host,
                                'path': str(home_storage.host_path.parent)},

@@ -14,6 +14,7 @@ import logging
 from pathlib import Path
 import statistics as stat
 import sys
+from venv import logger
 
 from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
@@ -691,7 +692,7 @@ def user_new_system(args: Namespace):
     except DuplicateGlobalUser as e:
         console.print(f'[red]{e}')
     else:
-        console.print(f'Created user {args.username} on all sites.')
+        console.print(f'Created user {args.username}, use `cheeto db user add site` to add to sites and create home storages.')
         if password is not None:
             console.print(f'Password: {password}')
             console.print('[red] Make sure to save this password in 1password!')
@@ -817,8 +818,23 @@ def user_remove_access(args: Namespace):
 @commands.register('database', 'user', 'add', 'site',
                    help='Add user(s) to site')
 def user_add_site(args):
+    logger = logging.getLogger(__name__)
     for user in args.user:
-        add_site_user(args.site, user)
+        try:
+            add_site_user(args.site, user)
+        except DuplicateSiteUser:
+            logger.info(f'User {user} already exists in site {args.site}.')
+        if args.create_storage:
+            logger.info(f'Creating home storage for {user} in site {args.site}.')
+            try:
+                create_home_storage(args.site, user)
+            except (NotUniqueError, DuplicateKeyError):
+                logger.info(f'Home storage for {user} in site {args.site} already exists.')
+
+
+@user_add_site.args()
+def _(parser: ArgParser):
+    parser.add_argument('--create-storage', action='store_true', default=False)
 
 
 @arggroup()
