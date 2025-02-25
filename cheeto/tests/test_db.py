@@ -5,7 +5,7 @@ import pytest
 
 from ..database import *
 
-from .conftest import drop_database
+from .conftest import drop_database, run_shell_cmd
 
 
 def test_connect_to_database(db_config):
@@ -78,3 +78,46 @@ class TestUser:
         add_site_user('test-site', user)
         with pytest.raises(DuplicateSiteUser):
             add_site_user('test-site', user)
+
+
+class TestSlurm:
+
+    @pytest.fixture(autouse=True)
+    def setup_site(self, db_config):
+        drop_database(db_config)
+        create_site('test-site', 'test.site.com')
+        yield
+        drop_database(db_config)
+
+    def test_create_qos(self):
+        qos = create_slurm_qos('test-qos',
+                               'test-site',
+                               group_limits=SlurmTRES(cpus=16, mem='1000M', gpus=0),
+                               user_limits=SlurmTRES(cpus=16, mem='1000M', gpus=0),
+                               job_limits=SlurmTRES(cpus=16, mem='1000M', gpus=0))
+        assert qos.qosname == 'test-qos'
+        assert qos.sitename == 'test-site'
+        assert SiteSlurmQOS.objects.count() == 1
+
+    def test_create_qos_cleaning(self):
+        qos = create_slurm_qos('test-qos',
+                               'test-site',
+                               group_limits=SlurmTRES(cpus=16, mem='1G', gpus=0),
+                               user_limits=SlurmTRES(cpus=16, mem='1G', gpus=0),
+                               job_limits=SlurmTRES(cpus=16, mem='1G', gpus=0))
+        assert qos.group_limits.mem == '1024M'
+        assert qos.user_limits.mem == '1024M'
+        assert qos.job_limits.mem == '1024M'
+
+    def test_create_qos_command(self, config_file):
+        run_shell_cmd(['cheeto', 'database', 'slurm', 'new', 'qos',
+                       '--config', config_file,
+                       '--qosname', 'test-qos',
+                       '--site', 'test-site',
+                       '--group-limits', 'cpus=16,mem=1G,gpus=0',
+                       '--user-limits', 'cpus=16,mem=1G,gpus=0',
+                       '--job-limits', 'cpus=16,mem=1G,gpus=0'])
+        assert SiteSlurmQOS.objects.count() == 1
+        assert SiteSlurmQOS.objects.get(qosname='test-qos').group_limits.mem == '1024M'
+        assert SiteSlurmQOS.objects.get(qosname='test-qos').user_limits.mem == '1024M'
+        assert SiteSlurmQOS.objects.get(qosname='test-qos').job_limits.mem == '1024M'

@@ -19,6 +19,7 @@ from mongoengine import (IntField,
 
 from ..puppet import (SlurmQOSTRES as PuppetSlurmQOSTRES,
                       SlurmQOS as PuppetSlurmQOS)
+from ..utils import size_to_megs
 
 from .base import BaseDocument
 from .fields import (POSIXNameField,
