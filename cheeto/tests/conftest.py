@@ -133,9 +133,16 @@ def start_mongodb(tmp_path_factory):
 
 
 @pytest.fixture(scope='session')
-def config(request):
+def config_file(tmp_path_factory):
     data_dir = Path(__file__).parent / 'data'
-    return get_config(data_dir / 'config.yaml')
+    config_file = tmp_path_factory.mktemp('cheeto-config') / 'config.yaml'
+    shutil.copy(data_dir / 'config.yaml', config_file)
+    return config_file
+
+
+@pytest.fixture(scope='session')
+def config(config_file):
+    return get_config(config_file)
 
 
 @pytest.fixture(scope='session')
