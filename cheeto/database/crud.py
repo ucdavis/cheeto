@@ -882,6 +882,13 @@ def create_slurm_association(sitename: str, partitionname: str, groupname: str, 
     return assoc
 
 
+def query_slurm_association(sitename: str, qosname: str, partition: str, groupname: str):
+    qos = SiteSlurmQOS.objects.get(qosname=qosname, sitename=sitename)
+    group = SiteGroup.objects.get(groupname=groupname, sitename=sitename)
+    partition = SiteSlurmPartition.objects.get(partitionname=partition, sitename=sitename)
+    return SiteSlurmAssociation.objects.get(sitename=sitename, qos=qos, group=group, partition=partition)
+
+
 def slurm_qos_state(sitename: str) -> dict[str, SiteSlurmQOS]:
     return {s.qosname: s.to_puppet() for s in SiteSlurmQOS.objects(sitename=sitename)}
 

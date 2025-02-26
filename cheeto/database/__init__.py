@@ -72,6 +72,7 @@ from .crud import (
     query_user_access,
     query_user_status,
     query_group_exists,
+    query_slurm_association,
     tag_comment,
     add_user_comment,
     set_user_shell,
