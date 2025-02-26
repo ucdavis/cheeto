@@ -78,6 +78,19 @@ def run_shell_cmd(cmd, print_stderr=True, in_directory=None):
         os.chdir(cwd)
 
 
+@pytest.fixture
+def run_cmd(config_file):
+    def _run_cmd(*args):
+        from logging import getLogger
+        from ..cmds.__main__ import commands
+        logger = getLogger(__name__)
+        args = [str(arg) for arg in args]
+        args.extend(['--config', str(config_file)])
+        logger.info(f'running: {" ".join(args)}')
+        return commands.run(args)
+    return _run_cmd
+
+
 @pytest.fixture(scope='session', autouse=True)
 def setup_logging():
     _setup_logging(sys.stdout)

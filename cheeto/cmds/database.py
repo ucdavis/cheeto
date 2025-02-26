@@ -1190,7 +1190,18 @@ def cmd_slurm_new_assoc(args: Namespace):
         console.print(f'[red] QOS {args.qos} does not exist.')
         return ExitCode.DOES_NOT_EXIST
 
-    console.print(assoc.pretty())
+    output = dumps_yaml(_show_slurm_assoc(assoc))
+    console.print(highlight_yaml(output))
+
+
+def _show_slurm_assoc(assoc: SiteSlurmAssociation) -> dict:
+    return assoc._pretty(
+        lift=['partition'],
+        skip=('id',),
+        formatters={
+            'group': '{data.groupname}',
+        }
+    )
 
 
 #########################################

@@ -109,15 +109,35 @@ class TestSlurm:
         assert qos.user_limits.mem == '1024M'
         assert qos.job_limits.mem == '1024M'
 
-    def test_create_qos_command(self, config_file):
-        run_shell_cmd(['cheeto', 'database', 'slurm', 'new', 'qos',
-                       '--config', config_file,
-                       '--qosname', 'test-qos',
-                       '--site', 'test-site',
-                       '--group-limits', 'cpus=16,mem=1G,gpus=0',
-                       '--user-limits', 'cpus=16,mem=1G,gpus=0',
-                       '--job-limits', 'cpus=16,mem=1G,gpus=0'])
+    def test_create_qos_command(self, run_cmd):
+        run_cmd('database', 'slurm', 'new', 'qos',
+                '--qosname', 'test-qos',
+                '--site', 'test-site',
+                '--group-limits', 'cpus=16,mem=1G,gpus=0',
+                '--user-limits', 'cpus=16,mem=1G,gpus=0',
+                '--job-limits', 'cpus=16,mem=1G,gpus=0')
         assert SiteSlurmQOS.objects.count() == 1
         assert SiteSlurmQOS.objects.get(qosname='test-qos').group_limits.mem == '1024M'
         assert SiteSlurmQOS.objects.get(qosname='test-qos').user_limits.mem == '1024M'
         assert SiteSlurmQOS.objects.get(qosname='test-qos').job_limits.mem == '1024M'
+
+    def test_create_assoc_command(self, run_cmd):
+        create_group('test-group', 10000, sites=['test-site'])
+        create_slurm_partition('test-partition', 'test-site')
+
+        run_cmd('database', 'slurm', 'new', 'qos',
+                '--qosname', 'test-qos',
+                '--site', 'test-site',
+                '--group-limits', 'cpus=16,mem=1G,gpus=0',
+                '--user-limits', 'cpus=16,mem=1G,gpus=0',
+                '--job-limits', 'cpus=16,mem=1G,gpus=0')
+        run_cmd('database', 'slurm', 'new', 'assoc',
+                '--site', 'test-site',
+                '--group', 'test-group',
+                '--partition', 'test-partition',
+                '--qos', 'test-qos')
+        assert SiteSlurmAssociation.objects.count() == 1
+        assoc = query_slurm_association('test-site', 'test-qos', 'test-partition', 'test-group')
+        assert assoc.group.groupname == 'test-group'
+        assert assoc.partition.partitionname == 'test-partition'
+        assert assoc.qos.qosname == 'test-qos'
