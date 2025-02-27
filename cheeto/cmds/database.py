@@ -94,7 +94,10 @@ def site_args(parser: ArgParser,
 @site_args.postprocessor()
 def parse_site_arg(args: Namespace):
     if args.site is not None:
-        args.site = query_sitename(args.site)
+        if type(args.site) is list:
+            args.site = [query_sitename(s) for s in args.site]
+        else:
+            args.site = query_sitename(args.site)
 
 
 @commands.register('database', 'site', 'new',
@@ -837,6 +840,19 @@ def _(parser: ArgParser):
     parser.add_argument('--create-storage', action='store_true', default=False)
 
 
+@user_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'user', 'remove', 'site',
+                   help='Remove user(s) from site')
+def user_remove_site(args):
+    logger = logging.getLogger(__name__)
+    for user in args.user:
+        try:
+            remove_site_user(args.site, user)
+        except NonExistentSiteUser:
+            logger.warning(f'User {user} does not exist in site {args.site}.')
+
+
 @arggroup()
 def user_type_args(parser: ArgParser):
     parser.add_argument('type', choices=list(USER_TYPES))
@@ -890,6 +906,24 @@ def user_index(args: Namespace):
                    aliases=['g', 'grp'],
                    help='Operations on groups')
 def group_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'group', 'add',
+                   help='Add elements to groups, ie: members, sponsors, sudoers, slurmers, or sites.')
+def group_add_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'group', 'remove',
+                   help='Remove elements from groups, ie: members, sponsors, sudoers, slurmers, or sites.')
+def group_remove_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'group', 'new',
+                   help='Create a new group')
+def group_new_cmd(args: Namespace):
     pass
 
 
@@ -1008,6 +1042,15 @@ def cmd_group_add_site(args: Namespace):
         add_site_group(group, args.site)
 
 
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('database', 'group', 'remove', 'site',
+                   help='Remove a Global group from a site')
+def cmd_group_remove_site(args: Namespace):
+    for group in args.groups:
+        remove_site_group(group, args.site)
+
+
 @group_args.apply(required=True, single=True)
 @site_args.apply(single=False)
 @commands.register('database', 'group', 'new', 'system',
@@ -1015,12 +1058,13 @@ def cmd_group_add_site(args: Namespace):
 def cmd_group_new_system(args: Namespace):
     console = Console()
 
-    if args.sites == 'all':
+    if args.site == 'all':
         sites = [s.sitename for s in Site.objects()]
     else:
-        sites = args.sites
+        sites = args.site
 
-    create_system_group(args.group, sitenames=sites)
+    group = create_system_group(args.groups, sitenames=sites)
+    console.print(dumps_yaml(group._pretty()))
 
 
 @arggroup()
@@ -1127,14 +1171,38 @@ def slurm_cmd(args: Namespace):
     pass
 
 
+@commands.register('database', 'slurm', 'new',
+                   help='Create new Slurm entities')
+def slurm_new_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'slurm', 'remove',
+                   help='Remove Slurm entities')
+def slurm_remove_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'slurm', 'edit',
+                   help='Edit Slurm entities')
+def slurm_edit_cmd(args: Namespace):
+    pass
+
+
+@commands.register('database', 'slurm', 'show',
+                   help='Show Slurm entities')
+def slurm_show_cmd(args: Namespace):
+    pass
+
+
 @arggroup('Slurm QOS')
-def slurm_qos_args(parser: ArgParser):
+def slurm_qos_args(parser: ArgParser, required: bool = True):
     parser.add_argument('--group-limits', '-g', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--user-limits', '-u', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--job-limits', '-j', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--priority', default=0, type=int)
     parser.add_argument('--flags', nargs='+')
-    parser.add_argument('--qosname', '-n', required=True)
+    parser.add_argument('--qosname', '-n', required=required)
 
 
 @site_args.apply(required=True)
@@ -1146,8 +1214,6 @@ def cmd_slurm_new_qos(args: Namespace):
     user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
     job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
     
-    query_site_exists(args.site, raise_exc=True)
-
     qos = create_slurm_qos(args.qosname,
                            args.site,
                            group_limits=group_limits,
@@ -1160,11 +1226,107 @@ def cmd_slurm_new_qos(args: Namespace):
     console.print(highlight_yaml(qos.pretty()))
 
 
+@site_args.apply(required=True)
+@slurm_qos_args.apply()
+@commands.register('database', 'slurm', 'edit', 'qos',
+                   help='Edit a QOS')
+def cmd_slurm_edit_qos(args: Namespace):
+    console = Console()
+    group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
+    user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
+    job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
+
+    try:
+        qos = SiteSlurmQOS.objects.get(qosname=args.qosname, sitename=args.site)
+    except SiteSlurmQOS.DoesNotExist:
+        console.print(f'[red] QOS {args.qosname} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+    
+    update_kwargs = {}
+    if group_limits != qos.group_limits:
+        update_kwargs['group_limits'] = group_limits
+    if user_limits != qos.user_limits:
+        update_kwargs['user_limits'] = user_limits
+    if job_limits != qos.job_limits:
+        update_kwargs['job_limits'] = job_limits
+    if args.priority != qos.priority:
+        update_kwargs['priority'] = args.priority
+    if args.flags != qos.flags:
+        update_kwargs['flags'] = args.flags
+    
+    if update_kwargs:
+        qos.update(**update_kwargs)
+        qos.reload()
+    
+    console.print(highlight_yaml(qos.pretty()))
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'slurm', 'remove', 'qos',
+                   help='Remove a QOS')
+def cmd_slurm_remove_qos(args: Namespace):
+    console = Console()
+    try:
+        qos = SiteSlurmQOS.objects.get(qosname=args.qosname, sitename=args.site)
+    except SiteSlurmQOS.DoesNotExist:
+        console.print(f'[red] QOS {args.qosname} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+    
+    qos.delete()
+    console.print(f'[green] QOS {args.qosname} removed.')
+
+
+@site_args.apply(required=False)
+@slurm_qos_args.apply(required=False)
+@commands.register('database', 'slurm', 'show', 'qos',
+                   help='Show QOSes')
+def cmd_slurm_show_qos(args: Namespace):
+    console = Console(stderr=False)
+    query_kwargs = {}
+    if args.qosname:
+        query_kwargs['qosname'] = args.qosname
+    if args.site:
+        query_kwargs['sitename'] = args.site
+    qos = SiteSlurmQOS.objects(**query_kwargs)
+    raw = [qos._pretty() for qos in qos]
+    console.print(highlight_yaml(dumps_yaml(raw)))
+
+
+@cmd_slurm_remove_qos.args()
+def _(parser: ArgParser):
+    parser.add_argument('--qosname', '-n', required=True)
+
+
+@arggroup('Slurm Partition')
+def slurm_partition_args(parser: ArgParser):
+    parser.add_argument('--name', '-n', required=True)
+
+
+@site_args.apply(required=True)
+@slurm_partition_args.apply()
+@commands.register('database', 'slurm', 'new', 'partition',
+                   help='Create a new Slurm partition')
+def cmd_slurm_new_partition(args: Namespace):
+    console = Console()
+    partition = create_slurm_partition(args.name, args.site)
+    console.print(highlight_yaml(partition.pretty()))
+
+
+@site_args.apply(required=True)
+@slurm_partition_args.apply()
+@commands.register('database', 'slurm', 'remove', 'partition',
+                   help='Remove a Slurm partition')
+def cmd_slurm_remove_partition(args: Namespace):
+    console = Console()
+    partition = SiteSlurmPartition.objects.get(partitionname=args.name, sitename=args.site)
+    partition.delete()
+
+
 @arggroup('Slurm Association')
-def slurm_assoc_args(parser: ArgParser):
-    parser.add_argument('--group', '-g', required=True)
-    parser.add_argument('--partition', required=True)
-    parser.add_argument('--qos', required=True)
+def slurm_assoc_args(parser: ArgParser, required: bool = True):
+    parser.add_argument('--group', '-g', required=required)
+    parser.add_argument('--partition', required=required)
+    parser.add_argument('--qos', required=required)
 
 
 @site_args.apply(required=True)
@@ -1203,6 +1365,27 @@ def _show_slurm_assoc(assoc: SiteSlurmAssociation) -> dict:
         }
     )
 
+
+@site_args.apply(required=False)
+@slurm_assoc_args.apply(required=False)
+@commands.register('database', 'slurm', 'show', 'assoc',
+                   help='Show associations')
+def cmd_slurm_show_assoc(args: Namespace):
+    console = Console(stderr=False)
+    query_kwargs = {}
+    assoc_kwargs = {}
+    if args.site:
+        query_kwargs['sitename'] = args.site
+        assoc_kwargs['sitename'] = args.site
+    if args.group:
+        query_kwargs['group__in'] = SiteGroup.objects(groupname=args.group, **assoc_kwargs)
+    if args.partition:
+        query_kwargs['partition__in'] = SiteSlurmPartition.objects(partitionname=args.partition, **assoc_kwargs)
+    if args.qos:
+        query_kwargs['qos__in'] = SiteSlurmQOS.objects(qosname=args.qos, **assoc_kwargs)
+    assocs = SiteSlurmAssociation.objects(**query_kwargs)
+    raw = [_show_slurm_assoc(assoc) for assoc in assocs]
+    console.print(highlight_yaml(dumps_yaml(raw)))
 
 #########################################
 #
