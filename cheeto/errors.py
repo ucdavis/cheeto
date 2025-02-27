@@ -20,3 +20,4 @@ class ExitCode(IntEnum):
     NOT_UNIQUE = 7
     DOES_NOT_EXIST = 8
     INVALID_METADATA = 9
+    OPERATION_CANCELLED = 10
