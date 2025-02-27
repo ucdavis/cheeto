@@ -1,12 +1,4 @@
-from typing import (
-    Any,
-    Dict,
-    List,
-    Type,
-    TypeVar,
-    Union,
-    cast,
-)
+from typing import Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -25,7 +17,7 @@ class QueuedEventAccountModel:
         iam (str):
         mothra (str):
         key (Union[None, Unset, str]):
-        access_types (Union[List[str], None, Unset]):
+        access_types (Union[None, Unset, list[str]]):
     """
 
     kerberos: str
@@ -34,9 +26,9 @@ class QueuedEventAccountModel:
     iam: str
     mothra: str
     key: Union[None, Unset, str] = UNSET
-    access_types: Union[List[str], None, Unset] = UNSET
+    access_types: Union[None, Unset, list[str]] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         kerberos = self.kerberos
 
         name = self.name
@@ -53,7 +45,7 @@ class QueuedEventAccountModel:
         else:
             key = self.key
 
-        access_types: Union[List[str], None, Unset]
+        access_types: Union[None, Unset, list[str]]
         if isinstance(self.access_types, Unset):
             access_types = UNSET
         elif isinstance(self.access_types, list):
@@ -62,7 +54,7 @@ class QueuedEventAccountModel:
         else:
             access_types = self.access_types
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(
             {
                 "kerberos": kerberos,
@@ -80,7 +72,7 @@ class QueuedEventAccountModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         kerberos = d.pop("kerberos")
 
@@ -101,7 +93,7 @@ class QueuedEventAccountModel:
 
         key = _parse_key(d.pop("key", UNSET))
 
-        def _parse_access_types(data: object) -> Union[List[str], None, Unset]:
+        def _parse_access_types(data: object) -> Union[None, Unset, list[str]]:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -109,12 +101,12 @@ class QueuedEventAccountModel:
             try:
                 if not isinstance(data, list):
                     raise TypeError()
-                access_types_type_0 = cast(List[str], data)
+                access_types_type_0 = cast(list[str], data)
 
                 return access_types_type_0
             except:  # noqa: E722
                 pass
-            return cast(Union[List[str], None, Unset], data)
+            return cast(Union[None, Unset, list[str]], data)
 
         access_types = _parse_access_types(d.pop("accessTypes", UNSET))
 

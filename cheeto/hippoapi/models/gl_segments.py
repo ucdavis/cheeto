@@ -1,4 +1,4 @@
-from typing import Any, Dict, Type, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 
@@ -36,7 +36,7 @@ class GlSegments:
     flex1: Union[Unset, str] = UNSET
     flex2: Union[Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         account = self.account
 
         activity = self.activity
@@ -59,7 +59,7 @@ class GlSegments:
 
         flex2 = self.flex2
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update({})
         if account is not UNSET:
             field_dict["account"] = account
@@ -87,7 +87,7 @@ class GlSegments:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         account = d.pop("account", UNSET)
 
