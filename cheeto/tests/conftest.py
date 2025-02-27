@@ -87,7 +87,14 @@ def run_cmd(config_file):
         args = [str(arg) for arg in args]
         args.extend(['--config', str(config_file)])
         logger.info(f'running: {" ".join(args)}')
-        return commands.run(args)
+        try:
+            retval = commands.run(args)
+        except Exception as e:
+            logger.error(f'command failed: {" ".join(args)}')
+            raise e
+        finally:
+            commands.postprocessors_q = []
+        return retval
     return _run_cmd
 
 

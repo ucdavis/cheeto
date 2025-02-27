@@ -47,7 +47,7 @@ from ..types import (DEFAULT_SHELL,
                      SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access)
 from ..yaml import dumps as dumps_yaml
 
-from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser, NonExistentGlobalUser
+from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser, NonExistentGlobalUser, NonExistentSiteUser
 from .site import Site
 from .hippo import HippoEvent
 from .user import GlobalUser, SiteUser, User, UserSearch, global_user_t, site_user_t, handle_site_users
@@ -87,9 +87,11 @@ def query_site_exists(sitename: str, raise_exc: bool = False) -> bool:
 
 
 def query_sitename(site: str):
+    logger = logging.getLogger(__name__)
     try:
         Site.objects.get(sitename=site)
     except:
+        logger.warning(f'Site {site} does not exist.')
         site = Site.objects.get(fqdn=site)
         return site.sitename
     else:
@@ -644,6 +646,25 @@ def add_site_user(sitename: str, user: global_user_t):
     return site_user, site_group
 
 
+def remove_site_user(sitename: str, user: site_user_t):
+    logger = logging.getLogger(__name__)
+    if type(user) is str:
+        try:
+            user = SiteUser.objects.get(sitename=sitename, username=user)
+        except DoesNotExist:
+            raise NonExistentSiteUser(user, sitename)
+    with run_in_transaction():
+        user.delete()
+        try:
+            group = SiteGroup.objects.get(sitename=sitename, groupname=user.username)
+        except DoesNotExist:
+            logger.warning(f'SiteGroup {user.username} does not exist on site {sitename}')
+        else:
+            group.delete()
+
+    logger.info(f'Removed SiteUser {user.username} from site {sitename}')
+
+
 def create_user(username: str,
                 email: str,
                 uid: int,
@@ -815,6 +836,12 @@ def add_site_group(group: global_group_t, sitename: str):
     SiteGroup(groupname=group.groupname,
               sitename=sitename,
               parent=group).save(force_insert=True)
+
+
+def remove_site_group(group: global_group_t, sitename: str):
+    if type(group) is str:
+        group = GlobalGroup.objects.get(groupname=group)
+    SiteGroup.objects.get(parent=group, sitename=sitename).delete()
 
 
 def create_slurm_partition(partitionname: str, sitename: str):
