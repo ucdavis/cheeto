@@ -909,11 +909,21 @@ def create_slurm_association(sitename: str, partitionname: str, groupname: str, 
     return assoc
 
 
-def query_slurm_association(sitename: str, qosname: str, partition: str, groupname: str):
-    qos = SiteSlurmQOS.objects.get(qosname=qosname, sitename=sitename)
-    group = SiteGroup.objects.get(groupname=groupname, sitename=sitename)
-    partition = SiteSlurmPartition.objects.get(partitionname=partition, sitename=sitename)
-    return SiteSlurmAssociation.objects.get(sitename=sitename, qos=qos, group=group, partition=partition)
+def query_slurm_associations(sitename: str | None = None, 
+                            qosname: str | None = None, 
+                            partitionname: str | None = None, 
+                            groupname: str | None = None):
+    query_kwargs = {}
+    if sitename is not None:
+        query_kwargs['sitename'] = sitename
+    if qosname is not None:
+        query_kwargs['qos__in'] = SiteSlurmQOS.objects(qosname=qosname)
+    if partitionname is not None:
+        query_kwargs['partition__in'] = SiteSlurmPartition.objects(partitionname=partitionname)
+    if groupname is not None:
+        query_kwargs['group__in'] = SiteGroup.objects(groupname=groupname)
+        
+    return SiteSlurmAssociation.objects(**query_kwargs)
 
 
 def slurm_qos_state(sitename: str) -> dict[str, SiteSlurmQOS]:

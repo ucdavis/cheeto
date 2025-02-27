@@ -279,10 +279,24 @@ class TestSlurm:
                 '--partition', 'test-partition',
                 '--qos', 'test-qos')
         assert SiteSlurmAssociation.objects.count() == 1
-        assoc = query_slurm_association('test-site', 'test-qos', 'test-partition', 'test-group')
-        assert assoc.group.groupname == 'test-group'
-        assert assoc.partition.partitionname == 'test-partition'
-        assert assoc.qos.qosname == 'test-qos'
+        assoc = query_slurm_associations(sitename='test-site',
+                                        qosname='test-qos',
+                                        partitionname='test-partition',
+                                        groupname='test-group')
+        assert len(assoc) == 1
+        assert assoc[0].group.groupname == 'test-group'
+        assert assoc[0].partition.partitionname == 'test-partition'
+        assert assoc[0].qos.qosname == 'test-qos'
+
+    def test_remove_assoc_command(self, run_cmd):
+        create_group('test-group', 10000, sites=['test-site'])
+        create_slurm_partition('test-partition', 'test-site')
+        create_slurm_qos('test-qos', 'test-site')
+        create_slurm_association('test-site', 'test-partition', 'test-group', 'test-qos')
+        assert SiteSlurmAssociation.objects.count() == 1
+        run_cmd('database', 'slurm', 'remove', 'assoc', '--force',
+                '--site', 'test-site', '--group', 'test-group', '--partition', 'test-partition', '--qos', 'test-qos')
+        assert SiteSlurmAssociation.objects.count() == 0
 
     def test_remove_qos_assoc_cascade(self, run_cmd):
         create_group('test-group', 10000, sites=['test-site'])

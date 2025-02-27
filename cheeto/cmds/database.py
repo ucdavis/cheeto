@@ -1372,20 +1372,54 @@ def _show_slurm_assoc(assoc: SiteSlurmAssociation) -> dict:
                    help='Show associations')
 def cmd_slurm_show_assoc(args: Namespace):
     console = Console(stderr=False)
-    query_kwargs = {}
-    assoc_kwargs = {}
-    if args.site:
-        query_kwargs['sitename'] = args.site
-        assoc_kwargs['sitename'] = args.site
-    if args.group:
-        query_kwargs['group__in'] = SiteGroup.objects(groupname=args.group, **assoc_kwargs)
-    if args.partition:
-        query_kwargs['partition__in'] = SiteSlurmPartition.objects(partitionname=args.partition, **assoc_kwargs)
-    if args.qos:
-        query_kwargs['qos__in'] = SiteSlurmQOS.objects(qosname=args.qos, **assoc_kwargs)
-    assocs = SiteSlurmAssociation.objects(**query_kwargs)
+    assocs = query_slurm_associations(sitename=args.site,
+                                     groupname=args.group,
+                                     partitionname=args.partition,
+                                     qosname=args.qos)
     raw = [_show_slurm_assoc(assoc) for assoc in assocs]
     console.print(highlight_yaml(dumps_yaml(raw)))
+
+
+
+@site_args.apply(required=False)
+@slurm_assoc_args.apply(required=False)
+@commands.register('database', 'slurm', 'remove', 'assoc',
+                   help='Remove associations')
+def cmd_slurm_remove_assoc(args: Namespace):
+    from rich.prompt import Prompt
+    console = Console()
+    
+    # Query matching associations
+    assocs = query_slurm_associations(sitename=args.site,
+                                     groupname=args.group,
+                                     partitionname=args.partition,
+                                     qosname=args.qos)
+    
+    if not assocs:
+        console.warn("No matching associations found")
+        return ExitCode.DOES_NOT_EXIST
+
+    # Show associations that will be removed
+    console.info("The following associations will be removed:")
+    raw = [_show_slurm_assoc(assoc) for assoc in assocs]
+    console.print(highlight_yaml(dumps_yaml(raw)))
+    
+    # Confirm deletion unless force flag is set
+    if args.force or Prompt.ask(f"\n{Emotes.QUESTION.value} Do you want to proceed?",
+                                choices=["y", "n"],
+                                default="n") == "y":
+        assocs.delete()
+        console.print(f"{Emotes.DONE.value} Associations removed successfully")
+    else:
+        console.warn(f"{Emotes.STOP.value} Operation cancelled")
+        return ExitCode.OPERATION_CANCELLED
+
+
+@cmd_slurm_remove_assoc.args()
+def _(parser: ArgParser):
+    parser.add_argument('--force', '-f', action='store_true',
+                       help='Skip confirmation prompt')
+
 
 #########################################
 #
