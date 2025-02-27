@@ -44,6 +44,8 @@ class TestUser:
     def setup_site(self, db_config):
         drop_database(db_config)
         create_site('test-site', 'test.site.com')
+        ZFSSourceCollection(sitename='test-site', name='home').save()
+        AutomountMap(sitename='test-site', prefix='/home', tablename='home').save()
         for doc in (GlobalUser, GlobalGroup, SiteUser, SiteGroup):
             doc.ensure_indexes()
         yield
