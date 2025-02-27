@@ -1,4 +1,4 @@
-from typing import Any, Dict, Type, TypeVar, Union
+from typing import Any, TypeVar, Union
 
 from attrs import define as _attrs_define
 
@@ -19,12 +19,12 @@ class QueuedEventUpdateModel:
     status: str
     id: Union[Unset, int] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         status = self.status
 
         id = self.id
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(
             {
                 "status": status,
@@ -36,7 +36,7 @@ class QueuedEventUpdateModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         status = d.pop("status")
 

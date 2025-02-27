@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 
@@ -15,18 +15,18 @@ T = TypeVar("T", bound="QueuedEventDataModel")
 class QueuedEventDataModel:
     """
     Attributes:
-        groups (List['QueuedEventGroupModel']):
-        accounts (List['QueuedEventAccountModel']):
+        groups (list['QueuedEventGroupModel']):
+        accounts (list['QueuedEventAccountModel']):
         cluster (str):
         metadata (QueuedEventDataModelMetadata):
     """
 
-    groups: List["QueuedEventGroupModel"]
-    accounts: List["QueuedEventAccountModel"]
+    groups: list["QueuedEventGroupModel"]
+    accounts: list["QueuedEventAccountModel"]
     cluster: str
     metadata: "QueuedEventDataModelMetadata"
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         groups = []
         for groups_item_data in self.groups:
             groups_item = groups_item_data.to_dict()
@@ -41,7 +41,7 @@ class QueuedEventDataModel:
 
         metadata = self.metadata.to_dict()
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(
             {
                 "groups": groups,
@@ -54,7 +54,7 @@ class QueuedEventDataModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         from ..models.queued_event_account_model import QueuedEventAccountModel
         from ..models.queued_event_data_model_metadata import (
             QueuedEventDataModelMetadata,
