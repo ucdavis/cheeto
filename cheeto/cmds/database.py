@@ -113,7 +113,6 @@ def _(parser: ArgParser):
     parser.add_argument('--fqdn', required=True)
 
 
-
 @site_args.apply()
 @commands.register('database', 'site', 'add-global-slurm',
                    help='Add a group for which users are made slurmers') #type: ignore
@@ -1512,6 +1511,7 @@ def storage_common_args(parser: ArgParser,
                    help='Create a new Storage (source and mount)')
 def cmd_storage_new_storage(args: Namespace):
     logger = logging.getLogger(__name__)
+    console = Console()
 
     if args.collection is None:
         args.collection = args.table
@@ -1560,6 +1560,8 @@ def cmd_storage_new_storage(args: Namespace):
                       mount=mount,
                       globus=args.globus)
     storage.save()
+
+    console.print(highlight_yaml(storage.pretty()))
 
 
 @storage_common_args.apply(required=True)
@@ -1632,8 +1634,8 @@ def cmd_new_collection(args: Namespace):
         donor = ZFSSourceCollection.objects.get(sitename=args.site, name=args.clone)
         col_kwargs.update(donor.to_dict(raw=False))
         del col_kwargs['_cls']
-        col_kwargs['sitename'] = args.site
-        col_kwargs['name'] = args.name
+    col_kwargs['sitename'] = args.site
+    col_kwargs['name'] = args.name
 
     if args.host:
         col_kwargs['_host'] = args.host
@@ -1655,6 +1657,35 @@ def cmd_new_collection(args: Namespace):
 @cmd_new_collection.args()
 def _(parser: ArgParser):
     parser.add_argument('--name', required=True)
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'storage', 'new', 'automountmap',
+                   help='Create a new AutomountMap')
+def cmd_new_automountmap(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    
+    automap = AutomountMap(sitename=args.site,
+                           tablename=args.name,
+                           prefix=args.prefix if args.prefix else f'/{args.name}',
+                           _options=args.options)
+    try:
+        automap.save()
+    except NotUniqueError:
+        logger.error(f'AutomountMap with name {args.name} on site {args.site} already exists')
+        return ExitCode.NOT_UNIQUE
+    except:
+        raise
+
+    console.print(highlight_yaml(automap.pretty()))
+    
+
+@cmd_new_automountmap.args()
+def _(parser: ArgParser):
+    parser.add_argument('-n', '--name', required=True)
+    parser.add_argument('--prefix', default=None)
+    parser.add_argument('--options', nargs='+', default=['fstype=nfs', 'vers=4.2', 'actimeo=60'])
 
 
 @site_args.apply(required=True)
