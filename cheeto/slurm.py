@@ -114,7 +114,7 @@ class SAcctMgr:
         return self.modify.bake('qos',
                                 qos_name,
                                 'set',
-                                *qos.to_slurm())
+                                *qos.to_slurm(modify=True))
 
     def remove_qos(self, qos_name: str) -> sh.Command:
         return self.remove.bake('qos', qos_name)

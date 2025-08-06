@@ -93,7 +93,7 @@ class SiteSlurmQOS(BaseDocument):
         return self.job_limits
 
     @no_type_check
-    def to_slurm(self) -> list[str]:
+    def to_slurm(self, modify: bool = False) -> list[str]:
         tokens = []
         grptres = self.group_limits.to_slurm() \
             if self.group_limits is not None else SlurmTRES.negate() 
@@ -101,12 +101,13 @@ class SiteSlurmQOS(BaseDocument):
             if self.user_limits is not None else SlurmTRES.negate()
         jobtres = self.job_limits.to_slurm() \
             if self.job_limits is not None else SlurmTRES.negate()
-        flags = ','.join(self.flags) if self.flags else '-1'
+        flags = ','.join(self.flags) if self.flags else ('-1' if modify else None)
         
         tokens.append(f'GrpTres={grptres}')
         tokens.append(f'MaxTRESPerUser={usertres}')
         tokens.append(f'MaxTresPerJob={jobtres}')
-        tokens.append(f'Flags={flags}')
+        if flags:
+            tokens.append(f'Flags={flags}')
         tokens.append(f'Priority={self.priority}')
 
         return tokens
