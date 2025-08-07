@@ -94,17 +94,18 @@ class SlurmQOS(BaseModel):
     priority: Optional[int] = 0
     flags: Optional[List[SlurmQOSFlag]] = None 
 
-    def to_slurm(self) -> List[str]:
+    def to_slurm(self, modify: bool = False) -> List[str]:
         tokens = []
         grptres = self.group.to_slurm() if self.group is not None else SlurmQOSTRES.negate()
         usertres = self.user.to_slurm() if self.user is not None else SlurmQOSTRES.negate()
         jobtres = self.job.to_slurm() if self.job is not None else SlurmQOSTRES.negate()
-        flags = ','.join(self.flags) if self.flags is not None else '-1'
+        flags = ','.join(self.flags) if self.flags is not None else ('-1' if modify else None)
         
         tokens.append(f'GrpTres={grptres}')
         tokens.append(f'MaxTRESPerUser={usertres}')
         tokens.append(f'MaxTresPerJob={jobtres}')
-        tokens.append(f'Flags={flags}')
+        if flags:
+            tokens.append(f'Flags={flags}')
         tokens.append(f'Priority={self.priority}')
 
         return tokens
