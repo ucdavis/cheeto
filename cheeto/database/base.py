@@ -87,6 +87,8 @@ class BaseDocument(Document):
         'abstract': True
     }
 
+    PRETTY_ORDER = []
+
     def to_dict(self, strip_id=True, strip_empty=False, raw=False, rekey=False, **kwargs):
         data = self.to_mongo(use_db_field=False).to_dict()
         if strip_id:
@@ -128,7 +130,7 @@ class BaseDocument(Document):
         if lift:
             lift_values(data, lift)
         if order is None:
-            order = []
+            order = self.PRETTY_ORDER
         if extra is not None:
             data.update(extra)
         _data = {key: data[key] for key in order if key in data}
