@@ -50,7 +50,9 @@ class SlurmTRES(EmbeddedDocument):
         return 'cpu=-1,mem=-1,gres/gpu=-1'
 
     def clean(self):
-        if self.mem:
+        if self.mem == -1:
+            self.mem = None
+        elif self.mem is not None:
             self.mem = f'{size_to_megs(self.mem)}M' #type: ignore
 
     @classmethod
@@ -70,6 +72,14 @@ class SlurmTRES(EmbeddedDocument):
         data.pop('_id', None)
         return data
 
+    def update_from_dict(self, data: dict):
+        if 'cpus' in data and data['cpus'] is not None:
+            self.cpus = data['cpus']
+        if 'gpus' in data and data['gpus'] is not None:
+            self.gpus = data['gpus']
+        if 'mem' in data and data['mem'] is not None:
+            self.mem = data['mem']
+
 
 class SiteSlurmQOS(BaseDocument):
     sitename = StringField(required=True)
@@ -79,6 +89,8 @@ class SiteSlurmQOS(BaseDocument):
     job_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
     priority = IntField()
     flags = ListField(SlurmQOSFlagField())
+
+    PRETTY_ORDER = ['qosname', 'sitename', 'group_limits', 'user_limits', 'job_limits', 'priority', 'flags']
 
     @property
     def group(self):

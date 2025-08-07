@@ -1231,9 +1231,9 @@ def cmd_slurm_new_qos(args: Namespace):
                    help='Edit a QOS')
 def cmd_slurm_edit_qos(args: Namespace):
     console = Console()
-    group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
-    user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
-    job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
+    new_group_limits = parse_qos_tres(args.group_limits)
+    new_user_limits = parse_qos_tres(args.user_limits)
+    new_job_limits = parse_qos_tres(args.job_limits)
 
     try:
         qos = SiteSlurmQOS.objects.get(qosname=args.qosname, sitename=args.site)
@@ -1242,12 +1242,13 @@ def cmd_slurm_edit_qos(args: Namespace):
         return ExitCode.DOES_NOT_EXIST
     
     update_kwargs = {}
-    if group_limits != qos.group_limits:
-        update_kwargs['group_limits'] = group_limits
-    if user_limits != qos.user_limits:
-        update_kwargs['user_limits'] = user_limits
-    if job_limits != qos.job_limits:
-        update_kwargs['job_limits'] = job_limits
+    if new_group_limits is not None:
+        qos.group_limits.update_from_dict(new_group_limits)
+    if new_user_limits is not None:
+        qos.user_limits.update_from_dict(new_user_limits)
+    if new_job_limits is not None:
+        qos.job_limits.update_from_dict(new_job_limits)
+    qos.save()
     if args.priority != qos.priority:
         update_kwargs['priority'] = args.priority
     if args.flags != qos.flags:
@@ -1276,7 +1277,6 @@ def cmd_slurm_remove_qos(args: Namespace):
 
 
 @site_args.apply(required=False)
-@slurm_qos_args.apply(required=False)
 @commands.register('database', 'slurm', 'show', 'qos',
                    help='Show QOSes')
 def cmd_slurm_show_qos(args: Namespace):
@@ -1290,6 +1290,10 @@ def cmd_slurm_show_qos(args: Namespace):
     raw = [qos._pretty() for qos in qos]
     console.print(highlight_yaml(dumps_yaml(raw)))
 
+
+@cmd_slurm_show_qos.args()
+def _(parser: ArgParser):
+    parser.add_argument('--qosname', '-n', required=False)
 
 @cmd_slurm_remove_qos.args()
 def _(parser: ArgParser):
