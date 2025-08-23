@@ -1,4 +1,4 @@
-from typing import Any, Dict, Type, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -18,7 +18,7 @@ class KeyValuePairOfStringAndString:
     key: Union[None, Unset, str] = UNSET
     value: Union[None, Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         key: Union[None, Unset, str]
         if isinstance(self.key, Unset):
             key = UNSET
@@ -31,7 +31,7 @@ class KeyValuePairOfStringAndString:
         else:
             value = self.value
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update({})
         if key is not UNSET:
             field_dict["key"] = key
@@ -41,7 +41,7 @@ class KeyValuePairOfStringAndString:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
 
         def _parse_key(data: object) -> Union[None, Unset, str]:

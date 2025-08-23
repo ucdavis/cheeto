@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Type, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -11,20 +11,20 @@ T = TypeVar("T", bound="EmailModel")
 class EmailModel:
     """
     Attributes:
-        emails (List[str]):
-        cc_emails (List[str]):
+        emails (list[str]):
+        cc_emails (list[str]):
         subject (str):
         text_body (str):
         html_body (Union[None, Unset, str]):
     """
 
-    emails: List[str]
-    cc_emails: List[str]
+    emails: list[str]
+    cc_emails: list[str]
     subject: str
     text_body: str
     html_body: Union[None, Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         emails = self.emails
 
         cc_emails = self.cc_emails
@@ -39,7 +39,7 @@ class EmailModel:
         else:
             html_body = self.html_body
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(
             {
                 "emails": emails,
@@ -54,11 +54,11 @@ class EmailModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
-        emails = cast(List[str], d.pop("emails"))
+        emails = cast(list[str], d.pop("emails"))
 
-        cc_emails = cast(List[str], d.pop("ccEmails"))
+        cc_emails = cast(list[str], d.pop("ccEmails"))
 
         subject = d.pop("subject")
 

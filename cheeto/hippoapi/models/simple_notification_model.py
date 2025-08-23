@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Type, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -11,20 +11,20 @@ T = TypeVar("T", bound="SimpleNotificationModel")
 class SimpleNotificationModel:
     """
     Attributes:
-        emails (List[str]):
-        cc_emails (List[str]):
+        emails (list[str]):
+        cc_emails (list[str]):
         subject (str):
-        paragraphs (List[str]):
+        paragraphs (list[str]):
         header (Union[None, Unset, str]):
     """
 
-    emails: List[str]
-    cc_emails: List[str]
+    emails: list[str]
+    cc_emails: list[str]
     subject: str
-    paragraphs: List[str]
+    paragraphs: list[str]
     header: Union[None, Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         emails = self.emails
 
         cc_emails = self.cc_emails
@@ -39,7 +39,7 @@ class SimpleNotificationModel:
         else:
             header = self.header
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update(
             {
                 "emails": emails,
@@ -54,15 +54,15 @@ class SimpleNotificationModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
-        emails = cast(List[str], d.pop("emails"))
+        emails = cast(list[str], d.pop("emails"))
 
-        cc_emails = cast(List[str], d.pop("ccEmails"))
+        cc_emails = cast(list[str], d.pop("ccEmails"))
 
         subject = d.pop("subject")
 
-        paragraphs = cast(List[str], d.pop("paragraphs"))
+        paragraphs = cast(list[str], d.pop("paragraphs"))
 
         def _parse_header(data: object) -> Union[None, Unset, str]:
             if data is None:
