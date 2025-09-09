@@ -167,7 +167,7 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
             mgr.remove_users_from_group([user.username], groupname, user.sitename)
 
     if user.type == 'system':
-        keys = query_admin_keys(sitename=user.sitename)
+        keys = query_admin_keys(sitename=user.sitename) + user.ssh_key
         mgr.update_user(user.username, ssh_keys=keys)
 
     user.ldap_synced = True
