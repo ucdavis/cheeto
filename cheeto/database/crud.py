@@ -611,6 +611,8 @@ def create_home_storage(sitename: str,
                       mount=mount)
     storage.save()
 
+    return storage
+
 
 def add_site_user(sitename: str, user: global_user_t):
     logger = logging.getLogger(__name__)

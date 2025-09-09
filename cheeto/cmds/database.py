@@ -1481,6 +1481,47 @@ def cmd_storage_show(args: Namespace):
         console.print(highlight_yaml(storage.pretty()))
 
 
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'storage', 'remove', 'home',
+                   help='Remove a home storage')
+def cmd_storage_remove_home(args: Namespace):
+    console = Console()
+    for user in args.user:
+        global_user = GlobalUser.objects.get(username=user)
+        try:
+            home_storage = query_user_home_storage(args.site, global_user)
+        except NonExistentStorage:
+            console.error(f'Home storage for {global_user.username} does not exist')
+            return ExitCode.DOES_NOT_EXIST
+        else:
+            with run_in_transaction():
+                home_storage.source.delete()
+                home_storage.mount.delete()
+                home_storage.delete()
+            console.success(f'Home storage for {global_user.username} removed')
+
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'storage', 'new', 'home',
+                   help='Create a new home storage')
+def cmd_storage_new_home(args: Namespace):
+    console = Console()
+    for user in args.user:
+        global_user = GlobalUser.objects.get(username=user)
+        try:
+            home_storage = query_user_home_storage(args.site, global_user)
+        except NonExistentStorage:
+            home_storage = create_home_storage(args.site, global_user)
+            console.success(f'Home storage for {global_user.username} created')
+            console.print(highlight_yaml(home_storage.pretty()))
+        else:
+            console.error(f'Home storage for {global_user.username} already exists')
+
+
+
 @arggroup('Storage Source')
 def storage_source_args(parser: ArgParser,
                         required: bool = False):
