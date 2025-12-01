@@ -119,6 +119,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
                 shell=user.shell,
                 home_directory=user.home_directory,
                 fullname=user.fullname,
+                password=f'{{CRYPT}}{user.password}' if user.password else '',
                 surname=user.fullname.split()[-1]) #type: ignore
 
     if user.ssh_key:
