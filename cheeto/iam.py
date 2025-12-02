@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 03.02.2025
 
+import datetime
 from http import HTTPStatus
 import json
 import logging
@@ -88,4 +89,5 @@ def sync_user_iam(user: GlobalUser, api: IAMAPI):
             logger.info(f'Updating user {user.username} colleges from {user.colleges} to {colleges}')
             user.colleges = colleges
         user.iam_synced = True
+        user.iam_last_synced = datetime.datetime.now(datetime.UTC)
         user.save()
