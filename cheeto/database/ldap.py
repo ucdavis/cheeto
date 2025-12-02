@@ -27,6 +27,7 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
         if ldap_sync_globaluser(user.parent, ldap_mgr, force=force):
             user.ldap_synced = False
             user.save()
+            user.reload()
 
     for group in SiteGroup.objects(sitename=sitename):
         ldap_sync_group(group, ldap_mgr, force=force)
@@ -100,6 +101,7 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
 
     group.save()
     group.parent.save()
+    group.reload()
 
 
 def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False):
@@ -136,6 +138,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
     else:
         user.ldap_synced = True
         user.save()
+        user.reload()
     
     return True
 
@@ -173,3 +176,4 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
 
     user.ldap_synced = True
     user.save()
+    user.reload()
