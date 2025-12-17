@@ -66,6 +66,35 @@ class IAMAPI:
         return [div['deptOfficialName'] for div in divisions_info]
 
 
+def iam_sync_unknown_user(user: GlobalUser, api: IAMAPI):
+    logger = logging.getLogger(__name__)
+    user_data = api.query_user_iamid(str(user.username))
+    if not user_data:
+        logger.warning(f'No IAM ID found for {user.username}')
+        user.iam_has_entry = False
+        user.save()
+        return
+    user.iam_id = int(user_data['iamId'])
+    logger.info(f'Query IAM ID for {user.username}: got {user.iam_id}')
+    with run_in_transaction():
+        user.iam_has_entry = True
+        user.iam_last_synced = datetime.datetime.now(datetime.UTC)
+        user.save()
+    user.reload()
+
+
+def iam_sync_known_user(user: GlobalUser, api: IAMAPI):
+    logger = logging.getLogger(__name__)
+    user_data = api.query_user_info(user.iam_id)
+    if not user_data:
+        logger.warning(f'User has IAM ID but no IAM data found for {user.username}')
+        with run_in_transaction():
+            user.iam_has_entry = False
+            user.iam_last_synced = datetime.datetime.now(datetime.UTC)
+            user.save()
+        user.reload()
+        return
+
 def sync_user_iam(user: GlobalUser, api: IAMAPI):
     logger = logging.getLogger(__name__)
     with run_in_transaction():
