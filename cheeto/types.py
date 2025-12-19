@@ -40,13 +40,11 @@ MAX_LABGROUP_ID = 3_910_000_000
 
 DATA_QUOTA_REGEX = r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'
 
-#QOS_TRES_REGEX = (
-#    r"^(?=.*\bcpus=(?P<cpus>inf|\d+)\b)"
-#    r"(?=.*\bgpus=(?P<gpus>inf|\d+)\b)"
-#    r"(?=.*\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b).*$"
-#)
 QOS_TRES_REGEX = (
-    r'^(?:.*?\bcpus=(?P<cpus>inf|\d+)\b)?(?:.*?\bgpus=(?P<gpus>inf|\d+)\b)?(?:.*?\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b)?.*$'
+    r'^(?=.*\bcpus=(?P<cpus>-1|inf|\d+)\b)?'
+    r'(?=.*\bgpus=(?P<gpus>-1|inf|\d+)\b)?'
+    r'(?=.*\bmem=(?P<mem>-1|inf|(?:\d+(?:\.\d+)?|\.\d+)[MmGgTtPp])\b)?'
+    r'.*$'
 )
 
 DEFAULT_SHELL = '/usr/bin/bash'
