@@ -49,12 +49,14 @@ class GlobalUser(BaseDocument):
     access = ListField(UserAccessField(), default=lambda: ['login-ssh'])
     comments = ListField(StringField())
 
+    iam_last_synced = DateField()
     iam_has_entry = BooleanField(default=True)
     iam_id = POSIXIDField()
     colleges = ListField(StringField())
+    iam_synced = BooleanField(default=False)
 
     ldap_synced = BooleanField(default=False)
-    iam_synced = BooleanField(default=False)
+    
 
     meta = {
         'queryset_class': SyncQuerySet,

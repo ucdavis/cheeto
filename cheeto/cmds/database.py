@@ -1147,7 +1147,7 @@ def _(parser: ArgParser):
 def cmd_group_new_lab(args: Namespace):
     console = Console()
 
-    group : SiteGroup = create_lab_group(args.groups, sitename=args.site)
+    group  = create_lab_group(args.groups, sitename=args.site)
     for sponsor in args.sponsors:
         if not query_user_exists(sponsor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{sponsor} is not a valid user on {args.site}, skipping.')
@@ -1156,6 +1156,27 @@ def cmd_group_new_lab(args: Namespace):
         add_group_sponsor(args.site, sponsor, group)
 
     console.print(group.pretty())
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True, single=True)
+@commands.register('database', 'group', 'new', 'sponsor',
+                   help='Create a new sponsor group from a user\'s IAM entry')
+def cmd_group_new_sponsor(args: Namespace):
+    console = Console()
+    user : SiteUser = query_user(username=args.user, sitename=args.site)
+
+    try:
+        sync_user_iam(user.parent, api=IAMAPI(args.config.ucdiam))
+    except Exception as e:
+        console.error(f'Error syncing user {user.username}: {e}')
+        return ExitCode.DOES_NOT_EXIST
+    if not user.parent.iam_synced:
+        console.error(f'User {user.username} does not have an IAM entry.')
+        return ExitCode.DOES_NOT_EXIST
+
+    group : SiteGroup = create_group_from_sponsor(user, base_uid=user.parent.iam_id)
+    console.print(dumps_yaml(group._pretty()))
 
 
 #########################################
@@ -1231,9 +1252,9 @@ def cmd_slurm_new_qos(args: Namespace):
                    help='Edit a QOS')
 def cmd_slurm_edit_qos(args: Namespace):
     console = Console()
-    group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
-    user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
-    job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
+    new_group_limits = parse_qos_tres(args.group_limits)
+    new_user_limits = parse_qos_tres(args.user_limits)
+    new_job_limits = parse_qos_tres(args.job_limits)
 
     try:
         qos = SiteSlurmQOS.objects.get(qosname=args.qosname, sitename=args.site)
@@ -1242,12 +1263,13 @@ def cmd_slurm_edit_qos(args: Namespace):
         return ExitCode.DOES_NOT_EXIST
     
     update_kwargs = {}
-    if group_limits != qos.group_limits:
-        update_kwargs['group_limits'] = group_limits
-    if user_limits != qos.user_limits:
-        update_kwargs['user_limits'] = user_limits
-    if job_limits != qos.job_limits:
-        update_kwargs['job_limits'] = job_limits
+    if new_group_limits is not None:
+        qos.group_limits.update_from_dict(new_group_limits)
+    if new_user_limits is not None:
+        qos.user_limits.update_from_dict(new_user_limits)
+    if new_job_limits is not None:
+        qos.job_limits.update_from_dict(new_job_limits)
+    qos.save()
     if args.priority != qos.priority:
         update_kwargs['priority'] = args.priority
     if args.flags != qos.flags:
@@ -1276,7 +1298,6 @@ def cmd_slurm_remove_qos(args: Namespace):
 
 
 @site_args.apply(required=False)
-@slurm_qos_args.apply(required=False)
 @commands.register('database', 'slurm', 'show', 'qos',
                    help='Show QOSes')
 def cmd_slurm_show_qos(args: Namespace):
@@ -1290,6 +1311,10 @@ def cmd_slurm_show_qos(args: Namespace):
     raw = [qos._pretty() for qos in qos]
     console.print(highlight_yaml(dumps_yaml(raw)))
 
+
+@cmd_slurm_show_qos.args()
+def _(parser: ArgParser):
+    parser.add_argument('--qosname', '-n', required=False)
 
 @cmd_slurm_remove_qos.args()
 def _(parser: ArgParser):
@@ -1475,6 +1500,47 @@ def cmd_storage_show(args: Namespace):
     
     for storage in storages:
         console.print(highlight_yaml(storage.pretty()))
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'storage', 'remove', 'home',
+                   help='Remove a home storage')
+def cmd_storage_remove_home(args: Namespace):
+    console = Console()
+    for user in args.user:
+        global_user = GlobalUser.objects.get(username=user)
+        try:
+            home_storage = query_user_home_storage(args.site, global_user)
+        except NonExistentStorage:
+            console.error(f'Home storage for {global_user.username} does not exist')
+            return ExitCode.DOES_NOT_EXIST
+        else:
+            with run_in_transaction():
+                home_storage.source.delete()
+                home_storage.mount.delete()
+                home_storage.delete()
+            console.success(f'Home storage for {global_user.username} removed')
+
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('database', 'storage', 'new', 'home',
+                   help='Create a new home storage')
+def cmd_storage_new_home(args: Namespace):
+    console = Console()
+    for user in args.user:
+        global_user = GlobalUser.objects.get(username=user)
+        try:
+            home_storage = query_user_home_storage(args.site, global_user)
+        except NonExistentStorage:
+            home_storage = create_home_storage(args.site, global_user)
+            console.success(f'Home storage for {global_user.username} created')
+            console.print(highlight_yaml(home_storage.pretty()))
+        else:
+            console.error(f'Home storage for {global_user.username} already exists')
+
 
 
 @arggroup('Storage Source')

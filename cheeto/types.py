@@ -40,10 +40,13 @@ MAX_LABGROUP_ID = 3_910_000_000
 
 DATA_QUOTA_REGEX = r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'
 
+#QOS_TRES_REGEX = (
+#    r"^(?=.*\bcpus=(?P<cpus>inf|\d+)\b)"
+#    r"(?=.*\bgpus=(?P<gpus>inf|\d+)\b)"
+#    r"(?=.*\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b).*$"
+#)
 QOS_TRES_REGEX = (
-    r"^(?=.*\bcpus=(?P<cpus>inf|\d+)\b)"
-    r"(?=.*\bgpus=(?P<gpus>inf|\d+)\b)"
-    r"(?=.*\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b).*$"
+    r'^(?:.*?\bcpus=(?P<cpus>inf|\d+)\b)?(?:.*?\bgpus=(?P<gpus>inf|\d+)\b)?(?:.*?\bmem=(?P<mem>inf|[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp])\b)?.*$'
 )
 
 DEFAULT_SHELL = '/usr/bin/bash'
@@ -219,7 +222,7 @@ def parse_qos_tres(tres: str | None):
     parsed = parsed.groupdict()
     for key in parsed.keys():
         if parsed[key] == 'inf':
-            parsed[key] = None
+            parsed[key] = -1
     return parsed
 
 

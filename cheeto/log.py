@@ -53,3 +53,15 @@ class Console(_Console):
 
     def info(self, *args, **kwargs):
         self.print(Emotes.INFO.value, *args, style='italic blue', **kwargs)
+    
+    def success(self, *args, **kwargs):
+        self.print(Emotes.SUCCESS.value, *args, style='italic green', **kwargs)
+    
+    def fail(self, *args, **kwargs):
+        self.print(Emotes.FAIL.value, *args, style='italic red', **kwargs)
+    
+    def wait(self, *args, **kwargs):
+        self.print(Emotes.WAIT.value, *args, style='italic yellow', **kwargs)
+    
+    def done(self, *args, **kwargs):
+        self.print(Emotes.DONE.value, *args, style='italic green', **kwargs)

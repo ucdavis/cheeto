@@ -273,11 +273,13 @@ def handle_site_groups(sitename: str, groups: Iterable[site_group_t]):
 
 
 
-def create_group_from_sponsor(sponsor_user: SiteUser):
+def create_group_from_sponsor(sponsor_user: SiteUser, base_uid: int | None = None):
     logger = logging.getLogger(__name__)
 
     groupname = f'{sponsor_user.username}grp'
-    gid = MIN_PIGROUP_GID + sponsor_user.parent.uid
+    if base_uid is None:
+        base_uid = sponsor_user.parent.uid
+    gid = MIN_PIGROUP_GID + base_uid
 
     global_group = GlobalGroup(groupname=groupname, gid=gid)
     global_group.save()
@@ -610,6 +612,8 @@ def create_home_storage(sitename: str,
                       source=source,
                       mount=mount)
     storage.save()
+
+    return storage
 
 
 def add_site_user(sitename: str, user: global_user_t):
