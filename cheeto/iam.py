@@ -120,3 +120,4 @@ def sync_user_iam(user: GlobalUser, api: IAMAPI):
         user.iam_synced = True
         user.iam_last_synced = datetime.datetime.now(datetime.UTC)
         user.save()
+        user.reload()

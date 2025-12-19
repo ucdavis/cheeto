@@ -1147,7 +1147,7 @@ def _(parser: ArgParser):
 def cmd_group_new_lab(args: Namespace):
     console = Console()
 
-    group : SiteGroup = create_lab_group(args.groups, sitename=args.site)
+    group  = create_lab_group(args.groups, sitename=args.site)
     for sponsor in args.sponsors:
         if not query_user_exists(sponsor, sitename=args.site):
             console.print(f':warning: [italic dark_orange]{sponsor} is not a valid user on {args.site}, skipping.')
@@ -1156,6 +1156,27 @@ def cmd_group_new_lab(args: Namespace):
         add_group_sponsor(args.site, sponsor, group)
 
     console.print(group.pretty())
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True, single=True)
+@commands.register('database', 'group', 'new', 'sponsor',
+                   help='Create a new sponsor group from a user\'s IAM entry')
+def cmd_group_new_sponsor(args: Namespace):
+    console = Console()
+    user : SiteUser = query_user(username=args.user, sitename=args.site)
+
+    try:
+        sync_user_iam(user.parent, api=IAMAPI(args.config.ucdiam))
+    except Exception as e:
+        console.error(f'Error syncing user {user.username}: {e}')
+        return ExitCode.DOES_NOT_EXIST
+    if not user.parent.iam_synced:
+        console.error(f'User {user.username} does not have an IAM entry.')
+        return ExitCode.DOES_NOT_EXIST
+
+    group : SiteGroup = create_group_from_sponsor(user, base_uid=user.parent.iam_id)
+    console.print(dumps_yaml(group._pretty()))
 
 
 #########################################
