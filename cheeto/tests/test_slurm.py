@@ -5,15 +5,20 @@ from ..puppet import SlurmQOS, SlurmQOSTRES
 
 def test_parse_qos_tres():
     assert parse_qos_tres('mem=1000M,cpus=16,gpus=0') == {'mem': '1000M', 'cpus': '16', 'gpus': '0'}
+    assert parse_qos_tres('cpus=16,mem=1000M,gpus=0') == {'mem': '1000M', 'cpus': '16', 'gpus': '0'}
+    assert parse_qos_tres('cpus=16,gpus=0,mem=1000M') == {'mem': '1000M', 'cpus': '16', 'gpus': '0'}
 
+def test_parse_qos_tres_partial():
+    assert parse_qos_tres('mem=1000M') == {'mem': '1000M', 'cpus': None, 'gpus': None}
+    assert parse_qos_tres('cpus=16') == {'mem': None, 'cpus': '16', 'gpus': None}
+    assert parse_qos_tres('gpus=2') == {'mem': None, 'cpus': None, 'gpus': '2'}
 
 def test_parse_qos_tres_none():
     assert parse_qos_tres(None) == {'mem': None, 'cpus': None, 'gpus': None}
 
 
 def test_parse_qos_tres_empty():
-    with pytest.raises(ValueError):
-        print(parse_qos_tres(''))
+    assert parse_qos_tres('') == {'mem': None, 'cpus': None, 'gpus': None}
 
 
 class TestSlurmQOS:

@@ -1216,13 +1216,14 @@ def slurm_show_cmd(args: Namespace):
 
 
 @arggroup('Slurm QOS')
-def slurm_qos_args(parser: ArgParser, required: bool = True):
-    parser.add_argument('--group-limits', '-g', type=regex_argtype(QOS_TRES_REGEX))
-    parser.add_argument('--user-limits', '-u', type=regex_argtype(QOS_TRES_REGEX))
-    parser.add_argument('--job-limits', '-j', type=regex_argtype(QOS_TRES_REGEX))
+def slurm_qos_args(parser: ArgParser, required: bool = True, add_qosname: bool = True):
+    parser.add_argument('--group-limits', type=regex_argtype(QOS_TRES_REGEX))
+    parser.add_argument('--user-limits', type=regex_argtype(QOS_TRES_REGEX))
+    parser.add_argument('--job-limits', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--priority', default=0, type=int)
     parser.add_argument('--flags', nargs='+')
-    parser.add_argument('--qosname', '-n', required=required)
+    if add_qosname:
+        parser.add_argument('--qosname', '-n', required=required)
 
 
 @site_args.apply(required=True)
@@ -1347,10 +1348,11 @@ def cmd_slurm_remove_partition(args: Namespace):
 
 
 @arggroup('Slurm Association')
-def slurm_assoc_args(parser: ArgParser, required: bool = True):
+def slurm_assoc_args(parser: ArgParser, required: bool = True, add_qos: bool = True):
     parser.add_argument('--group', '-g', required=required)
     parser.add_argument('--partition', required=required)
-    parser.add_argument('--qos', required=required)
+    if add_qos:
+        parser.add_argument('--qos', required=required)
 
 
 @site_args.apply(required=True)
@@ -1378,6 +1380,29 @@ def cmd_slurm_new_assoc(args: Namespace):
 
     output = dumps_yaml(_show_slurm_assoc(assoc))
     console.print(highlight_yaml(output))
+
+
+@site_args.apply(required=True)
+@slurm_assoc_args.apply(add_qos=False)
+@slurm_qos_args.apply(add_qosname=False)
+@commands.register('database', 'slurm', 'new', 'alloc',
+                   help='Create a new QoS and association for the given group.')
+def cmd_slurm_new_alloc(args: Namespace):
+    console = Console()
+    group_limits = SlurmTRES(**parse_qos_tres(args.group_limits))
+    user_limits = SlurmTRES(**parse_qos_tres(args.user_limits))
+    job_limits = SlurmTRES(**parse_qos_tres(args.job_limits))
+    with run_in_transaction():
+        qosname = f'{args.group}-{args.partition}-qos'
+        create_slurm_qos(qosname,
+                         args.site,
+                         group_limits=group_limits,
+                         user_limits=user_limits,
+                         job_limits=job_limits,
+                         priority=args.priority,
+                         flags=args.flags)
+        assoc = create_slurm_association(args.site, args.partition, args.group, qosname)
+    console.print(highlight_yaml(dumps_yaml(_show_slurm_assoc(assoc))))
 
 
 def _show_slurm_assoc(assoc: SiteSlurmAssociation) -> dict:
