@@ -1344,8 +1344,20 @@ def cmd_slurm_new_partition(args: Namespace):
 def cmd_slurm_remove_partition(args: Namespace):
     console = Console()
     partition = SiteSlurmPartition.objects.get(partitionname=args.name, sitename=args.site)
-    partition.delete()
+    
+    with run_in_transaction():
+        assocs = SiteSlurmAssociation.objects(sitename=args.site, partition=partition)
+        qoses = set((assoc.qos for assoc in assocs))
+        console.info(f'Deleting partition {partition.partitionname} and {len(assocs)} associations')
+        partition.delete()
+        if args.with_qoses:
+            for qos in qoses:
+                console.info(f'Deleting QOS {qos.qosname}')
+                qos.delete()    
 
+@cmd_slurm_remove_partition.args()
+def _(parser: ArgParser):
+    parser.add_argument('--with-qoses', action='store_true', help='Remove QOSes associated with the partition')
 
 @arggroup('Slurm Association')
 def slurm_assoc_args(parser: ArgParser, required: bool = True, add_qos: bool = True):
