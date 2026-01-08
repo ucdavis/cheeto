@@ -245,7 +245,7 @@ def handle_createaccount_event(event: QueuedEventDataModel,
     except DuplicateGlobalUser:
         logger.info(f'GlobalUser for {username} already exists.')
         guser = GlobalUser.objects.get(username=username)
-        if hippo_account.key not in guser.ssh_key:
+        if hippo_account.key and hippo_account.key not in guser.ssh_key:
             logger.info(f'Updating SSH key for {username}')
             guser.update(ssh_key=[hippo_account.key], ldap_synced=False)
     
