@@ -59,6 +59,17 @@ class TestCreateAccount:
         assert SiteUser.objects.count() == 1
         assert Storage.objects.count() == 1
 
+    def test_handler_unset_ssh_key(self, hippo_config):
+        event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
+        client = object()
+        handle_createaccount_event(event, client, hippo_config, notify=False)
+        assert GlobalUser.objects.get(username='test-user').ssh_key == ['ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment']
+        event_data = self.EVENT_DATA.copy()
+        event_data['accounts'][0]['key'] = ''
+        event = QueuedEventDataModel.from_dict(event_data)
+        handle_createaccount_event(event, client, hippo_config, notify=False)
+        assert GlobalUser.objects.get(username='test-user').ssh_key == ['ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment']
+
     def test_handler_updated_ssh(self, hippo_config):
         event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
         client = object()

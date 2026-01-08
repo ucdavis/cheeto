@@ -1221,7 +1221,7 @@ def slurm_qos_args(parser: ArgParser, required: bool = True, add_qosname: bool =
     parser.add_argument('--user-limits', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--job-limits', type=regex_argtype(QOS_TRES_REGEX))
     parser.add_argument('--priority', default=0, type=int)
-    parser.add_argument('--flags', nargs='+')
+    parser.add_argument('--flags', nargs='+', default=['DenyOnLimit'])
     if add_qosname:
         parser.add_argument('--qosname', '-n', required=required)
 

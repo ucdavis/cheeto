@@ -88,7 +88,7 @@ class SiteSlurmQOS(BaseDocument):
     user_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
     job_limits = EmbeddedDocumentField(SlurmTRES, default=lambda: SlurmTRES())
     priority = IntField()
-    flags = ListField(SlurmQOSFlagField())
+    flags = ListField(SlurmQOSFlagField(default=lambda: ['DenyOnLimit']))
 
     PRETTY_ORDER = ['qosname', 'sitename', 'group_limits', 'user_limits', 'job_limits', 'priority', 'flags']
 
