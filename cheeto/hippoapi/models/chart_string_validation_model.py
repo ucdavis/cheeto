@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union, cast
+from typing import TYPE_CHECKING, Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -28,10 +28,10 @@ class ChartStringValidationModel:
         account_manager (Union[None, Unset, str]):
         account_manager_email (Union[None, Unset, str]):
         description (Union[None, Unset, str]):
-        details (Union[List['KeyValuePairOfStringAndString'], None, Unset]):
-        warnings (Union[List['KeyValuePairOfStringAndString'], None, Unset]):
+        details (Union[None, Unset, list['KeyValuePairOfStringAndString']]):
+        warnings (Union[None, Unset, list['KeyValuePairOfStringAndString']]):
         message (Union[None, Unset, str]):
-        messages (Union[List[str], None, Unset]):
+        messages (Union[None, Unset, list[str]]):
         warning (Union[None, Unset, str]):
     """
 
@@ -43,13 +43,13 @@ class ChartStringValidationModel:
     account_manager: Union[None, Unset, str] = UNSET
     account_manager_email: Union[None, Unset, str] = UNSET
     description: Union[None, Unset, str] = UNSET
-    details: Union[List["KeyValuePairOfStringAndString"], None, Unset] = UNSET
-    warnings: Union[List["KeyValuePairOfStringAndString"], None, Unset] = UNSET
+    details: Union[None, Unset, list["KeyValuePairOfStringAndString"]] = UNSET
+    warnings: Union[None, Unset, list["KeyValuePairOfStringAndString"]] = UNSET
     message: Union[None, Unset, str] = UNSET
-    messages: Union[List[str], None, Unset] = UNSET
+    messages: Union[None, Unset, list[str]] = UNSET
     warning: Union[None, Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         from ..models.gl_segments import GlSegments
         from ..models.ppm_segments import PpmSegments
 
@@ -65,7 +65,7 @@ class ChartStringValidationModel:
         if not isinstance(self.chart_type, Unset):
             chart_type = self.chart_type.value
 
-        gl_segments: Union[Dict[str, Any], None, Unset]
+        gl_segments: Union[None, Unset, dict[str, Any]]
         if isinstance(self.gl_segments, Unset):
             gl_segments = UNSET
         elif isinstance(self.gl_segments, GlSegments):
@@ -73,7 +73,7 @@ class ChartStringValidationModel:
         else:
             gl_segments = self.gl_segments
 
-        ppm_segments: Union[Dict[str, Any], None, Unset]
+        ppm_segments: Union[None, Unset, dict[str, Any]]
         if isinstance(self.ppm_segments, Unset):
             ppm_segments = UNSET
         elif isinstance(self.ppm_segments, PpmSegments):
@@ -99,7 +99,7 @@ class ChartStringValidationModel:
         else:
             description = self.description
 
-        details: Union[List[Dict[str, Any]], None, Unset]
+        details: Union[None, Unset, list[dict[str, Any]]]
         if isinstance(self.details, Unset):
             details = UNSET
         elif isinstance(self.details, list):
@@ -111,7 +111,7 @@ class ChartStringValidationModel:
         else:
             details = self.details
 
-        warnings: Union[List[Dict[str, Any]], None, Unset]
+        warnings: Union[None, Unset, list[dict[str, Any]]]
         if isinstance(self.warnings, Unset):
             warnings = UNSET
         elif isinstance(self.warnings, list):
@@ -129,7 +129,7 @@ class ChartStringValidationModel:
         else:
             message = self.message
 
-        messages: Union[List[str], None, Unset]
+        messages: Union[None, Unset, list[str]]
         if isinstance(self.messages, Unset):
             messages = UNSET
         elif isinstance(self.messages, list):
@@ -144,7 +144,7 @@ class ChartStringValidationModel:
         else:
             warning = self.warning
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update({})
         if is_valid is not UNSET:
             field_dict["isValid"] = is_valid
@@ -176,7 +176,7 @@ class ChartStringValidationModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         from ..models.gl_segments import GlSegments
         from ..models.key_value_pair_of_string_and_string import (
             KeyValuePairOfStringAndString,
@@ -267,7 +267,7 @@ class ChartStringValidationModel:
 
         def _parse_details(
             data: object,
-        ) -> Union[List["KeyValuePairOfStringAndString"], None, Unset]:
+        ) -> Union[None, Unset, list["KeyValuePairOfStringAndString"]]:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -287,13 +287,13 @@ class ChartStringValidationModel:
                 return details_type_0
             except:  # noqa: E722
                 pass
-            return cast(Union[List["KeyValuePairOfStringAndString"], None, Unset], data)
+            return cast(Union[None, Unset, list["KeyValuePairOfStringAndString"]], data)
 
         details = _parse_details(d.pop("details", UNSET))
 
         def _parse_warnings(
             data: object,
-        ) -> Union[List["KeyValuePairOfStringAndString"], None, Unset]:
+        ) -> Union[None, Unset, list["KeyValuePairOfStringAndString"]]:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -313,7 +313,7 @@ class ChartStringValidationModel:
                 return warnings_type_0
             except:  # noqa: E722
                 pass
-            return cast(Union[List["KeyValuePairOfStringAndString"], None, Unset], data)
+            return cast(Union[None, Unset, list["KeyValuePairOfStringAndString"]], data)
 
         warnings = _parse_warnings(d.pop("warnings", UNSET))
 
@@ -326,7 +326,7 @@ class ChartStringValidationModel:
 
         message = _parse_message(d.pop("message", UNSET))
 
-        def _parse_messages(data: object) -> Union[List[str], None, Unset]:
+        def _parse_messages(data: object) -> Union[None, Unset, list[str]]:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -334,12 +334,12 @@ class ChartStringValidationModel:
             try:
                 if not isinstance(data, list):
                     raise TypeError()
-                messages_type_0 = cast(List[str], data)
+                messages_type_0 = cast(list[str], data)
 
                 return messages_type_0
             except:  # noqa: E722
                 pass
-            return cast(Union[List[str], None, Unset], data)
+            return cast(Union[None, Unset, list[str]], data)
 
         messages = _parse_messages(d.pop("messages", UNSET))
 

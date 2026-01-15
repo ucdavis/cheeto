@@ -1,4 +1,4 @@
-from typing import Any, Dict, Type, TypeVar, Union, cast
+from typing import Any, TypeVar, Union, cast
 
 from attrs import define as _attrs_define
 
@@ -26,7 +26,7 @@ class PpmSegments:
     award: Union[None, Unset, str] = UNSET
     funding_source: Union[None, Unset, str] = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         project = self.project
 
         task = self.task
@@ -47,7 +47,7 @@ class PpmSegments:
         else:
             funding_source = self.funding_source
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
         field_dict.update({})
         if project is not UNSET:
             field_dict["project"] = project
@@ -65,7 +65,7 @@ class PpmSegments:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: dict[str, Any]) -> T:
         d = src_dict.copy()
         project = d.pop("project", UNSET)
 
