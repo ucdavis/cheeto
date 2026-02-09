@@ -9,6 +9,8 @@
 
 import logging
 
+from cheeto.log import Console
+
 from ..config import Config
 from ..ldap import LDAPCommitFailed, LDAPManager, LDAPUser, LDAPGroup
 
@@ -25,8 +27,7 @@ def ldap_sync(sitename: str, config: Config, force: bool = False):
 
     for user in SiteUser.objects(sitename=sitename):
         if ldap_sync_globaluser(user.parent, ldap_mgr, force=force):
-            user.ldap_synced = False
-            user.save()
+            user.update()
             user.reload()
 
     for group in SiteGroup.objects(sitename=sitename):
@@ -96,13 +97,9 @@ def ldap_sync_group(group: SiteGroup, mgr: LDAPManager, force: bool = False):
     mgr.remove_users_from_group(to_remove, group.groupname, group.sitename)
     mgr.add_user_to_group(to_add, group.groupname, group.sitename)
 
-    group.ldap_synced = True
-    group.parent.ldap_synced = True
-
-    group.save()
-    group.parent.save()
+    group.update()
+    group.parent.update()
     group.reload()
-
 
 def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
@@ -136,8 +133,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
     except LDAPCommitFailed as e:
         logger.error(f'Failed to sync GlobalUser {user.username}: {e}')
     else:
-        user.ldap_synced = True
-        user.save()
+        user.update()
         user.reload()
     
     return True
@@ -145,6 +141,8 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
 
 def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
+    console = Console()
+    console.info(f'ldap_sync_siteuser: {user.username} {user.status}')
     if not force and (user.ldap_synced and user.parent.ldap_synced):
         logger.info(f'SiteUser {user.username} does not need to be synced.')
         return
@@ -153,7 +151,7 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
         ldap_sync_globaluser(user.parent, mgr, force=force)
 
     ldap_groups = mgr.query_user_memberships(user.username, user.sitename)
-
+    console.info(f'ldap_groups: {ldap_groups}')
     for status, groupname in mgr.config.user_status_groups.items():
         if status == user.status and groupname not in ldap_groups:
             logger.info(f'add status {status} for {user.username}')
@@ -174,6 +172,11 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
         keys = list(set(query_admin_keys(sitename=user.sitename) + user.ssh_key)) #type: ignore
         mgr.update_user(user.username, ssh_keys=keys)
 
-    user.ldap_synced = True
-    user.save()
+    user.update()
     user.reload()
+
+
+#def ldap_sync_special_groups(sitename: str, mgr: LDAPManager):
+#    logger = logging.getLogger(__name__)
+#    for status, groupname in mgr.config.user_status_groups.items():
+#        pass
