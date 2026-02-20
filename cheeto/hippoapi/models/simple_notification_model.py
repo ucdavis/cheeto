@@ -1,4 +1,7 @@
-from typing import Any, Dict, List, Type, TypeVar, Union, cast
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
@@ -11,20 +14,20 @@ T = TypeVar("T", bound="SimpleNotificationModel")
 class SimpleNotificationModel:
     """
     Attributes:
-        emails (List[str]):
-        cc_emails (List[str]):
+        emails (list[str]):
+        cc_emails (list[str]):
         subject (str):
-        paragraphs (List[str]):
-        header (Union[None, Unset, str]):
+        paragraphs (list[str]):
+        header (None | str | Unset):
     """
 
-    emails: List[str]
-    cc_emails: List[str]
+    emails: list[str]
+    cc_emails: list[str]
     subject: str
-    paragraphs: List[str]
-    header: Union[None, Unset, str] = UNSET
+    paragraphs: list[str]
+    header: None | str | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         emails = self.emails
 
         cc_emails = self.cc_emails
@@ -33,13 +36,14 @@ class SimpleNotificationModel:
 
         paragraphs = self.paragraphs
 
-        header: Union[None, Unset, str]
+        header: None | str | Unset
         if isinstance(self.header, Unset):
             header = UNSET
         else:
             header = self.header
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update(
             {
                 "emails": emails,
@@ -54,22 +58,22 @@ class SimpleNotificationModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
-        emails = cast(List[str], d.pop("emails"))
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
+        emails = cast(list[str], d.pop("emails"))
 
-        cc_emails = cast(List[str], d.pop("ccEmails"))
+        cc_emails = cast(list[str], d.pop("ccEmails"))
 
         subject = d.pop("subject")
 
-        paragraphs = cast(List[str], d.pop("paragraphs"))
+        paragraphs = cast(list[str], d.pop("paragraphs"))
 
-        def _parse_header(data: object) -> Union[None, Unset, str]:
+        def _parse_header(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         header = _parse_header(d.pop("header", UNSET))
 

@@ -1,12 +1,7 @@
-from typing import (
-    Any,
-    Dict,
-    List,
-    Type,
-    TypeVar,
-    Union,
-    cast,
-)
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
@@ -24,8 +19,8 @@ class QueuedEventAccountModel:
         email (str):
         iam (str):
         mothra (str):
-        key (Union[None, Unset, str]):
-        access_types (Union[List[str], None, Unset]):
+        key (None | str | Unset):
+        access_types (list[str] | None | Unset):
     """
 
     kerberos: str
@@ -33,10 +28,10 @@ class QueuedEventAccountModel:
     email: str
     iam: str
     mothra: str
-    key: Union[None, Unset, str] = UNSET
-    access_types: Union[List[str], None, Unset] = UNSET
+    key: None | str | Unset = UNSET
+    access_types: list[str] | None | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         kerberos = self.kerberos
 
         name = self.name
@@ -47,13 +42,13 @@ class QueuedEventAccountModel:
 
         mothra = self.mothra
 
-        key: Union[None, Unset, str]
+        key: None | str | Unset
         if isinstance(self.key, Unset):
             key = UNSET
         else:
             key = self.key
 
-        access_types: Union[List[str], None, Unset]
+        access_types: list[str] | None | Unset
         if isinstance(self.access_types, Unset):
             access_types = UNSET
         elif isinstance(self.access_types, list):
@@ -62,7 +57,8 @@ class QueuedEventAccountModel:
         else:
             access_types = self.access_types
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update(
             {
                 "kerberos": kerberos,
@@ -80,8 +76,8 @@ class QueuedEventAccountModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
         kerberos = d.pop("kerberos")
 
         name = d.pop("name")
@@ -92,16 +88,16 @@ class QueuedEventAccountModel:
 
         mothra = d.pop("mothra")
 
-        def _parse_key(data: object) -> Union[None, Unset, str]:
+        def _parse_key(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         key = _parse_key(d.pop("key", UNSET))
 
-        def _parse_access_types(data: object) -> Union[List[str], None, Unset]:
+        def _parse_access_types(data: object) -> list[str] | None | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
@@ -109,12 +105,12 @@ class QueuedEventAccountModel:
             try:
                 if not isinstance(data, list):
                     raise TypeError()
-                access_types_type_0 = cast(List[str], data)
+                access_types_type_0 = cast(list[str], data)
 
                 return access_types_type_0
-            except:  # noqa: E722
+            except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(Union[List[str], None, Unset], data)
+            return cast(list[str] | None | Unset, data)
 
         access_types = _parse_access_types(d.pop("accessTypes", UNSET))
 

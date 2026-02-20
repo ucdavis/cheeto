@@ -1,4 +1,7 @@
-from typing import Any, Dict, Type, TypeVar, Union, cast
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
@@ -11,27 +14,28 @@ T = TypeVar("T", bound="KeyValuePairOfStringAndString")
 class KeyValuePairOfStringAndString:
     """
     Attributes:
-        key (Union[None, Unset, str]):
-        value (Union[None, Unset, str]):
+        key (None | str | Unset):
+        value (None | str | Unset):
     """
 
-    key: Union[None, Unset, str] = UNSET
-    value: Union[None, Unset, str] = UNSET
+    key: None | str | Unset = UNSET
+    value: None | str | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
-        key: Union[None, Unset, str]
+    def to_dict(self) -> dict[str, Any]:
+        key: None | str | Unset
         if isinstance(self.key, Unset):
             key = UNSET
         else:
             key = self.key
 
-        value: Union[None, Unset, str]
+        value: None | str | Unset
         if isinstance(self.value, Unset):
             value = UNSET
         else:
             value = self.value
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update({})
         if key is not UNSET:
             field_dict["key"] = key
@@ -41,24 +45,24 @@ class KeyValuePairOfStringAndString:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
 
-        def _parse_key(data: object) -> Union[None, Unset, str]:
+        def _parse_key(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         key = _parse_key(d.pop("key", UNSET))
 
-        def _parse_value(data: object) -> Union[None, Unset, str]:
+        def _parse_value(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         value = _parse_value(d.pop("value", UNSET))
 

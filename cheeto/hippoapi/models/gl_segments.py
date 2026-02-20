@@ -1,4 +1,7 @@
-from typing import Any, Dict, Type, TypeVar, Union
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 
@@ -11,32 +14,32 @@ T = TypeVar("T", bound="GlSegments")
 class GlSegments:
     """
     Attributes:
-        account (Union[Unset, str]):
-        activity (Union[Unset, str]):
-        department (Union[Unset, str]):
-        entity (Union[Unset, str]):
-        fund (Union[Unset, str]):
-        program (Union[Unset, str]):
-        project (Union[Unset, str]):
-        purpose (Union[Unset, str]):
-        inter_entity (Union[Unset, str]):
-        flex1 (Union[Unset, str]):
-        flex2 (Union[Unset, str]):
+        account (str | Unset):
+        activity (str | Unset):
+        department (str | Unset):
+        entity (str | Unset):
+        fund (str | Unset):
+        program (str | Unset):
+        project (str | Unset):
+        purpose (str | Unset):
+        inter_entity (str | Unset):
+        flex1 (str | Unset):
+        flex2 (str | Unset):
     """
 
-    account: Union[Unset, str] = UNSET
-    activity: Union[Unset, str] = UNSET
-    department: Union[Unset, str] = UNSET
-    entity: Union[Unset, str] = UNSET
-    fund: Union[Unset, str] = UNSET
-    program: Union[Unset, str] = UNSET
-    project: Union[Unset, str] = UNSET
-    purpose: Union[Unset, str] = UNSET
-    inter_entity: Union[Unset, str] = UNSET
-    flex1: Union[Unset, str] = UNSET
-    flex2: Union[Unset, str] = UNSET
+    account: str | Unset = UNSET
+    activity: str | Unset = UNSET
+    department: str | Unset = UNSET
+    entity: str | Unset = UNSET
+    fund: str | Unset = UNSET
+    program: str | Unset = UNSET
+    project: str | Unset = UNSET
+    purpose: str | Unset = UNSET
+    inter_entity: str | Unset = UNSET
+    flex1: str | Unset = UNSET
+    flex2: str | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         account = self.account
 
         activity = self.activity
@@ -59,7 +62,8 @@ class GlSegments:
 
         flex2 = self.flex2
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update({})
         if account is not UNSET:
             field_dict["account"] = account
@@ -87,8 +91,8 @@ class GlSegments:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
         account = d.pop("account", UNSET)
 
         activity = d.pop("activity", UNSET)

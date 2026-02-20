@@ -1,4 +1,7 @@
-from typing import Any, Dict, Type, TypeVar, Union, cast
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar, cast
 
 from attrs import define as _attrs_define
 
@@ -11,22 +14,22 @@ T = TypeVar("T", bound="PpmSegments")
 class PpmSegments:
     """
     Attributes:
-        project (Union[Unset, str]):
-        task (Union[Unset, str]):
-        organization (Union[Unset, str]):
-        expenditure_type (Union[Unset, str]):
-        award (Union[None, Unset, str]):
-        funding_source (Union[None, Unset, str]):
+        project (str | Unset):
+        task (str | Unset):
+        organization (str | Unset):
+        expenditure_type (str | Unset):
+        award (None | str | Unset):
+        funding_source (None | str | Unset):
     """
 
-    project: Union[Unset, str] = UNSET
-    task: Union[Unset, str] = UNSET
-    organization: Union[Unset, str] = UNSET
-    expenditure_type: Union[Unset, str] = UNSET
-    award: Union[None, Unset, str] = UNSET
-    funding_source: Union[None, Unset, str] = UNSET
+    project: str | Unset = UNSET
+    task: str | Unset = UNSET
+    organization: str | Unset = UNSET
+    expenditure_type: str | Unset = UNSET
+    award: None | str | Unset = UNSET
+    funding_source: None | str | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         project = self.project
 
         task = self.task
@@ -35,19 +38,20 @@ class PpmSegments:
 
         expenditure_type = self.expenditure_type
 
-        award: Union[None, Unset, str]
+        award: None | str | Unset
         if isinstance(self.award, Unset):
             award = UNSET
         else:
             award = self.award
 
-        funding_source: Union[None, Unset, str]
+        funding_source: None | str | Unset
         if isinstance(self.funding_source, Unset):
             funding_source = UNSET
         else:
             funding_source = self.funding_source
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update({})
         if project is not UNSET:
             field_dict["project"] = project
@@ -65,8 +69,8 @@ class PpmSegments:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
         project = d.pop("project", UNSET)
 
         task = d.pop("task", UNSET)
@@ -75,21 +79,21 @@ class PpmSegments:
 
         expenditure_type = d.pop("expenditureType", UNSET)
 
-        def _parse_award(data: object) -> Union[None, Unset, str]:
+        def _parse_award(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         award = _parse_award(d.pop("award", UNSET))
 
-        def _parse_funding_source(data: object) -> Union[None, Unset, str]:
+        def _parse_funding_source(data: object) -> None | str | Unset:
             if data is None:
                 return data
             if isinstance(data, Unset):
                 return data
-            return cast(Union[None, Unset, str], data)
+            return cast(None | str | Unset, data)
 
         funding_source = _parse_funding_source(d.pop("fundingSource", UNSET))
 
