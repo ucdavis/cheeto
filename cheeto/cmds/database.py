@@ -20,9 +20,10 @@ from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
-from cheeto.config import IAMConfig
+from ..config import IAMConfig
+from ..ldap import LDAPManager
 from ..database.user import DuplicateGlobalUser, DuplicateUser
-from cheeto.iam import IAMAPI, sync_user_iam
+from ..iam import IAMAPI, sync_user_iam
 
 from . import commands
 from .puppet import repo_args
@@ -154,13 +155,14 @@ def sync_old_puppet(args: Namespace):
                      push_merge=args.push_merge) as add:
         puppet_map.save_yaml(yaml_path)
 
-        for user in SiteUser.objects(sitename=args.site).only('parent'):
-            if not user.parent.ssh_key:
-                continue
-            keyfile = (args.repo / 'keys' / f'{user.parent.username}.pub').absolute()
-            with keyfile.open('w') as fp:
-                for key in user.parent.ssh_key:
-                    print(key, file=fp)
+        if args.write_keys:
+            for user in SiteUser.objects(sitename=args.site).only('parent'):
+                if not user.parent.ssh_key:
+                    continue
+                keyfile = (args.repo / 'keys' / f'{user.parent.username}.pub').absolute()
+                with keyfile.open('w') as fp:
+                    for key in user.parent.ssh_key:
+                        print(key, file=fp)
         add(args.repo.absolute())
 
 
@@ -169,6 +171,7 @@ def _(parser: ArgParser):
     parser.add_argument('repo', type=Path)
     parser.add_argument('--base-branch', default='main')
     parser.add_argument('--push-merge', default=False, action='store_true')
+    parser.add_argument('--write-keys', default=False, action='store_true')
 
 
 @site_args.apply(required=True)
@@ -181,6 +184,26 @@ def sync_to_ldap(args: Namespace):
 @sync_to_ldap.args()
 def _(parser: ArgParser):
     parser.add_argument('--force', '-f', default=False, action='store_true')
+
+
+@site_args.apply(required=True)
+@commands.register('database', 'site', 'check-ldap',
+                   help='Check LDAP server for site')
+def site_check_ldap(args: Namespace):
+    logger = logging.getLogger(__name__)
+    console = Console()
+    ldap_mgr = LDAPManager(args.config.ldap, pool_keepalive=15, pool_lifetime=30)
+    db_users = set((user.username for user in SiteUser.objects(sitename=args.site, ) if user.status == 'active'))
+    ldap_login_users = set(ldap_mgr.query_group('login-ssh-users', args.site).members) #type: ignore
+    ldap_inactive_users = set(ldap_mgr.query_group('inactive-users', args.site).members) #type: ignore
+    ldap_disabled_users = set(ldap_mgr.query_group('disabled-users', args.site).members) #type: ignore
+    ldap_users = ldap_login_users - ldap_inactive_users - ldap_disabled_users
+    if db_users == ldap_users:
+        console.success(f'All users in LDAP login-ssh-users group')
+    else:
+        console.warn('Databse users do not matchLDAP users.')
+        console.info(f'Users in LDAP login-ssh-users group but not in database: {sorted(ldap_users - db_users)}')
+        console.info(f'Users in database but not in LDAP login-ssh-users group: {sorted(db_users - ldap_users)}')
 
 
 @site_args.apply(required=True)
