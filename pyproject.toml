@@ -40,7 +40,7 @@ jinja2 = "^3.1.6"
 sh = "^2.0.7"
 pytest = "^7.4.4"
 filelock = "^3.16.1"
-python-ldap = "^3.4.4"
+python-ldap = "^3.4.5"
 ldap3 = {git = "https://github.com/ucdavis/ldap3.git", rev = "dev"}
 gssapi = "^1.9.0"
 pymongo = "^4.10.1"
