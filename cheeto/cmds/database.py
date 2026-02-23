@@ -155,13 +155,14 @@ def sync_old_puppet(args: Namespace):
                      push_merge=args.push_merge) as add:
         puppet_map.save_yaml(yaml_path)
 
-        for user in SiteUser.objects(sitename=args.site).only('parent'):
-            if not user.parent.ssh_key:
-                continue
-            keyfile = (args.repo / 'keys' / f'{user.parent.username}.pub').absolute()
-            with keyfile.open('w') as fp:
-                for key in user.parent.ssh_key:
-                    print(key, file=fp)
+        if args.write_keys:
+            for user in SiteUser.objects(sitename=args.site).only('parent'):
+                if not user.parent.ssh_key:
+                    continue
+                keyfile = (args.repo / 'keys' / f'{user.parent.username}.pub').absolute()
+                with keyfile.open('w') as fp:
+                    for key in user.parent.ssh_key:
+                        print(key, file=fp)
         add(args.repo.absolute())
 
 
@@ -170,6 +171,7 @@ def _(parser: ArgParser):
     parser.add_argument('repo', type=Path)
     parser.add_argument('--base-branch', default='main')
     parser.add_argument('--push-merge', default=False, action='store_true')
+    parser.add_argument('--write-keys', default=False, action='store_true')
 
 
 @site_args.apply(required=True)
