@@ -1,0 +1,11 @@
+---
+globs: cheeto/database/**/*.py
+alwaysApply: false
+---
+# Overview
+
+Standards for database models and CRUD functions.
+
+This project uses the following libraries for its database components:
+
+- mongoengine object-document mapper: https://mongoengine-odm.readthedocs.io
