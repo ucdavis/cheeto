@@ -15,8 +15,10 @@ from ponderosa import ArgParser, arggroup
 
 from . import commands
 from ..database import connect_to_database
-from ..hippo import (hippoapi_client, process_hippoapi_events,
-                     event_queue_pending_events,
+from ..hippoapi.api.action import action_sync_puppet_accounts
+from ..hippoapi.api.event_queue import event_queue_pending_events
+from ..hippo import (hippoapi_client,
+                     process_hippoapi_events,
                      filter_events,
                      HIPPO_EVENT_ACTIONS)
 from ..log import Console
@@ -62,3 +64,11 @@ def cmd_hippoapi_events(args: Namespace):
 
     for event in filter_events(events, event_type=args.type, event_id=args.event_id):
         console.print(event)
+
+@commands.register('hippo', 'sync-puppet',
+                   help='Force a HiPPO sync from puppet YAML files')
+def cmd_hippoapi_sync_puppet(args: Namespace):
+    console = Console()
+    with hippoapi_client(args.config.hippo) as client:
+        response = action_sync_puppet_accounts.sync_detailed(client=client)
+        console.info(response)

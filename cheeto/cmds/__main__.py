@@ -16,7 +16,8 @@ from . import (commands,
                monitor,
                nocloud,
                puppet,
-               slurm)
+               slurm,
+               ipython)
 
 
 def main():

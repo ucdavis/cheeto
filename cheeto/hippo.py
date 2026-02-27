@@ -10,18 +10,18 @@
 import argparse
 import logging
 import shlex
-import site
 import socket
 import sys
 import traceback
 from typing import Callable, Optional, List
 
+import httpx
 from jinja2 import Environment, FileSystemLoader
+from mongoengine import DoesNotExist
 from mongoengine.context_managers import run_in_transaction
 from rich.console import Console
 
-from cheeto.database.crud import query_user_home_storage
-from cheeto.database.ldap import ldap_sync
+from cheeto.database.crud import query_user_home_storage, remove_group_member
 from cheeto.database.storage import NonExistentStorage
 
 from .config import HippoConfig
@@ -33,14 +33,12 @@ from .database import (Site,
                        DuplicateSiteUser,
                        GlobalUser,
                        SiteUser,
-                       GlobalGroup,
                        SiteGroup,
                        HippoEvent,
                        create_group_from_sponsor,
                        create_user_from_hippo,
                        create_home_storage,
                        query_associated_storages,
-                       query_user_exists,
                        query_user_groups,
                        query_user_slurm, 
                        set_user_status)
@@ -54,12 +52,21 @@ from .hippoapi.models import (QueuedEventModel,
                               QueuedEventUpdateModel,
                               SimpleNotificationModel)
 
-from .mail import Email, NewAccountEmail, NewMembershipEmail, NewSponsorEmail, UpdateSSHKeyEmail
+from .mail import Email, NewAccountEmail, NewMembershipEmail, NewSponsorEmail, RemovedFromGroupEmail, UpdateSSHKeyEmail
 from .templating import PKG_TEMPLATES
 from .types import *
 from .utils import (_ctx_name,
                     human_timestamp,
                     TIMESTAMP_NOW)
+
+def log_request(request: httpx.Request):
+    logger = logging.getLogger(__name__)
+    logger.info(f'{request.method} {request.url}')
+
+
+def log_response(response: httpx.Response):
+    logger = logging.getLogger(__name__)
+    logger.info(f'{response.status_code} {response.url}')
 
 
 EVENT_HANDLERS = {}
@@ -79,7 +86,7 @@ def hippoapi_client(config: HippoConfig, quiet: bool = False):
     return AuthenticatedClient(follow_redirects=True,
                                base_url=config.base_url,
                                token=config.api_key,
-                               #httpx_args={"event_hooks": {"request": [log_request]}},
+                               httpx_args={"event_hooks": {"request": [log_request], "response": [log_response]}},
                                auth_header_name='X-API-Key',
                                prefix='')
 
@@ -144,14 +151,12 @@ def _process_hippoapi_events(events: Iterable[QueuedEventModel],
         if event.status != 'Pending':
             logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
 
-        event_record = HippoEvent.objects(hippo_id=event.id).modify(upsert=True, #type: ignore
-                                                                    set_on_insert__action=event.action, 
-                                                                    set_on_insert__data=event.to_dict(),
-                                                                    new=True)
-        if post_back and event_record.status == 'Complete':
-            logger.info(f'Event id={event.id} already marked complete, attempting postback')
-            postback_event_complete(event.id, client)
-            continue
+        event_record = HippoEvent.objects(hippo_id=event.id,
+                                          hippo_endpoint=config.base_url).modify(upsert=True, #type: ignore
+                                                                                 new=True,
+                                                                                 set__action=event.action, 
+                                                                                 set__data=event.to_dict(),
+                                                                                 set__status='Pending')
 
         try:
             handler = EVENT_HANDLERS.get(event.action)
@@ -177,13 +182,13 @@ def _process_hippoapi_events(events: Iterable[QueuedEventModel],
 def postback_event_complete(event_id: int,
                             client: AuthenticatedClient):
     update = QueuedEventUpdateModel(status='Complete', id=event_id)
-    response = event_queue_update_status.sync_detailed(client=client, body=update)
+    return event_queue_update_status.sync_detailed(client=client, body=update)
 
 
 def postback_event_failed(event_id: int,
                          client: AuthenticatedClient):
     update = QueuedEventUpdateModel(status='Failed', id=event_id)
-    response = event_queue_update_status.sync_detailed(client=client, body=update)
+    return event_queue_update_status.sync_detailed(client=client, body=update)
 
 
 @event_handler('UpdateSshKey')
@@ -235,7 +240,6 @@ def handle_createaccount_event(event: QueuedEventDataModel,
     hippo_account = event.accounts[0]
     sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
     username = hippo_account.kerberos
-    is_sponsor_account = any((group.name == 'sponsors' for group in event.groups))
 
     logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
 
@@ -281,13 +285,8 @@ def handle_createaccount_event(event: QueuedEventDataModel,
             logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
             raise
 
-    if is_sponsor_account:
-        sponsor_group = create_group_from_sponsor(suser)
-
     if notify:
         hippoapi_send_email(get_createaccount_email(suser), client)
-        if is_sponsor_account:
-            hippoapi_send_email(get_newsponsor_email(suser, sponsor_group), client)
 
 
 
@@ -327,7 +326,6 @@ def handle_addaccounttogroup_event(event: QueuedEventDataModel,
     logger = logging.getLogger(__name__)
     hippo_account = event.accounts[0]
     sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    is_sponsor_account = any((group.name == 'sponsors' for group in event.groups))
     logger.info(f'Process AddAccountToGroup for site {sitename}, event: {event}')
 
     try:
@@ -336,13 +334,9 @@ def handle_addaccounttogroup_event(event: QueuedEventDataModel,
             for group in event.groups:
                 add_group_member(sitename, site_user, group.name)
 
-            if is_sponsor_account:
-                sponsor_group = create_group_from_sponsor(site_user)
     except Exception:
         raise
     else:
-        if is_sponsor_account:
-            hippoapi_send_email(get_newsponsor_email(site_user, sponsor_group), client)
         hippoapi_send_email(get_newmembership_email(site_user), client)
 
 
@@ -366,6 +360,72 @@ def get_newmembership_email(user: SiteUser):
                                slurm_accounts=slurm_accounts,
                                group_storages=group_storages)
     return email
+
+
+@event_handler('RemoveAccountFromGroup')
+def handle_removeaccountfromgroup_event(event: QueuedEventDataModel,
+                                        client: AuthenticatedClient,
+                                        config: HippoConfig):
+    logger = logging.getLogger(__name__)
+    hippo_account = event.accounts[0]
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
+    groupname = event.groups[0].name
+    username = hippo_account.kerberos
+    logger.info(f'Process RemoveAccountFromGroup for site {sitename}, event: {event}')
+
+    try:
+        user = SiteUser.objects.get(sitename=sitename, username=username)
+    except DoesNotExist:
+        logger.error(f'SiteUser {username} does not exist on site {sitename}')
+        raise
+
+    try:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+    except DoesNotExist:
+        logger.error(f'SiteGroup {groupname} does not exist on site {sitename}')
+        raise
+    
+    try:
+        with run_in_transaction():
+            remove_group_member(sitename, user, group)
+    except Exception:
+        raise
+    else:
+        logger.info(f'Removed user {user.username} from group {group.groupname} on site {sitename}')
+        hippoapi_send_email(get_removemembership_email(user, group), client)
+
+
+def get_removemembership_email(user: SiteUser, group: SiteGroup):
+    sponsors = []
+    for sponsor in group._sponsors:
+        sponsors.append((sponsor.fullname, sponsor.email))
+    email = RemovedFromGroupEmail(to=[user.parent.email],
+                                  group=group.groupname,
+                                  sitename=user.sitename.capitalize(),
+                                  sponsors=sponsors)
+    return email
+
+
+@event_handler('CreateGroup')
+def handle_creategroup_event(event: QueuedEventDataModel,
+                             client: AuthenticatedClient,
+                             config: HippoConfig,
+                             notify: bool = True):
+    logger = logging.getLogger(__name__)
+    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
+    hippo_account = event.accounts[0]
+    username = hippo_account.kerberos
+    logger.info(f'Process CreateGroup for site {sitename}, event: {event}')
+    try:
+        with run_in_transaction():
+            sponsor = SiteUser.objects.get(sitename=sitename, username=username)
+            group = create_group_from_sponsor(sponsor)
+    except Exception:
+        raise
+    else:
+        logger.info(f'Processed CreateGroup for group {group.groupname} for sponsor {username} on site {sitename}')
+        if notify:
+            hippoapi_send_email(get_newsponsor_email(sponsor, group), client)
 
 
 def sync(args: argparse.Namespace):

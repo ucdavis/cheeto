@@ -13,14 +13,13 @@ import logging
 from operator import attrgetter
 from pathlib import Path
 from typing import Iterable, Optional
-from venv import create
 
-from httpx import get
 from mongoengine import DoesNotExist, NotUniqueError
 from mongoengine.context_managers import run_in_transaction
 from mongoengine.queryset.visitor import Q as Qv
 
 import pyescrypt
+from pymongo.errors import DuplicateKeyError
 
 from cheeto import iam
 from cheeto.hippoapi.models.queued_event_account_model import QueuedEventAccountModel
@@ -47,16 +46,14 @@ from ..types import (DEFAULT_SHELL,
                      SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access)
 from ..yaml import dumps as dumps_yaml
 
-from .user import DuplicateGlobalUser, DuplicateSiteUser, DuplicateUser, NonExistentGlobalUser, NonExistentSiteUser
+from .user import DuplicateGlobalUser, DuplicateSiteUser, NonExistentGlobalUser, NonExistentSiteUser
 from .site import Site
-from .hippo import HippoEvent
 from .user import GlobalUser, SiteUser, User, UserSearch, global_user_t, site_user_t, handle_site_users
 from .group import DuplicateGlobalGroup, DuplicateSiteGroup, GlobalGroup, NonExistentGlobalGroup, SiteGroup, global_group_t, site_group_t
 from .slurm import SiteSlurmAssociation, SiteSlurmPartition, SiteSlurmQOS, SlurmTRES
 from .storage import (Automount,
                       AutomountMap, NonExistentStorage,
                       Storage,
-                      StorageMount,
                       StorageMountSource,
                       NFSMountSource,
                       ZFSMountSource,
@@ -272,7 +269,6 @@ def handle_site_groups(sitename: str, groups: Iterable[site_group_t]):
         yield group
 
 
-
 def create_group_from_sponsor(sponsor_user: SiteUser, base_uid: int | None = None):
     logger = logging.getLogger(__name__)
 
@@ -281,19 +277,32 @@ def create_group_from_sponsor(sponsor_user: SiteUser, base_uid: int | None = Non
         base_uid = sponsor_user.parent.uid
     gid = MIN_PIGROUP_GID + base_uid
 
-    global_group = GlobalGroup(groupname=groupname, gid=gid)
-    global_group.save()
-    logger.info(f'Created GlobalGroup from sponsor {sponsor_user.username}: {global_group.to_dict()}')
+    with run_in_transaction():
+        try:
+            global_group = create_group(groupname, gid)
+        except DuplicateGlobalGroup:
+            logger.info(f'GlobalGroup {groupname} already exists, using existing group')
+            global_group = GlobalGroup.objects.get(groupname=groupname)
+        else:
+            logger.info(f'Created GlobalGroup {groupname} gid={gid}')
 
-    site_group = SiteGroup(groupname=groupname,
-                           sitename=sponsor_user.sitename,
-                           parent=global_group,
-                           _members=[sponsor_user],
-                           _sponsors=[sponsor_user])
-    site_group.save()
-    logger.info(f'Created SiteGroup from sponsor {sponsor_user.username}: {site_group.to_dict()}')
+        if not query_group_exists(groupname, sponsor_user.sitename):
+            site_group = SiteGroup(groupname=groupname,
+                                   sitename=sponsor_user.sitename,
+                                   parent=global_group,
+                                   _members=[sponsor_user])
+            site_group.save()
+            logger.info(f'Created SiteGroup {groupname} for sponsor {sponsor_user.username}: {site_group.to_dict()}')
+        else:
+            logger.warning(f'SiteGroup {groupname} already exists, using existing group')
+            site_group = SiteGroup.objects.get(groupname=groupname, sitename=sponsor_user.sitename)
+            add_group_sponsor(sponsor_user.sitename, sponsor_user, site_group)
+            add_group_member(sponsor_user.sitename, sponsor_user, site_group)
+            logger.info(f'Added sponsor and member {sponsor_user.username} to existing SiteGroup {groupname}')
+    
+        site_group.reload()
     return site_group
-
+    
 
 def query_group_slurm_associations(sitename: str, group: site_group_t):
     if type(group) is str:
