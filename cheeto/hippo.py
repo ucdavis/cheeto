@@ -13,7 +13,9 @@ import shlex
 import socket
 import sys
 import traceback
-from typing import Callable, Optional, List
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Iterable, List, Optional
 
 import httpx
 from jinja2 import Environment, FileSystemLoader
@@ -69,13 +71,51 @@ def log_response(response: httpx.Response):
     logger.info(f'{response.status_code} {response.url}')
 
 
-EVENT_HANDLERS = {}
+@dataclass
+class EventContext:
+    """Encapsulates shared handler dependencies. Extensible for future async migration."""
 
-def event_handler(event_name: str):
-    def wrapper(func: Callable[[QueuedEventDataModel, AuthenticatedClient, HippoConfig], None]):
-        EVENT_HANDLERS[event_name] = func
-        return func
-    return wrapper
+    client: AuthenticatedClient
+    config: HippoConfig
+    event_record: HippoEvent
+
+
+class BaseEventHandler(ABC):
+    """Base class for HiPPO event handlers. Designed for future async migration."""
+
+    event_name: str
+
+    @abstractmethod
+    def handle(self, event: QueuedEventDataModel, context: EventContext) -> None:
+        """Process the event. Future: async def handle(...) -> None"""
+        ...
+
+
+class HandlerRegistry:
+    """Registry of event handlers. Extensible for custom handlers."""
+
+    def __init__(self) -> None:
+        self._handlers: dict[str, BaseEventHandler] = {}
+
+    def register(self, handler: BaseEventHandler) -> None:
+        self._handlers[handler.event_name] = handler
+
+    def get(self, action: str) -> BaseEventHandler | None:
+        return self._handlers.get(action)
+
+    @classmethod
+    def default(cls) -> "HandlerRegistry":
+        """Build registry with all built-in handlers."""
+        registry = cls()
+        for handler in [
+            UpdateSshKeyHandler(),
+            CreateAccountHandler(),
+            AddAccountToGroupHandler(),
+            RemoveAccountFromGroupHandler(),
+            CreateGroupHandler(),
+        ]:
+            registry.register(handler)
+        return registry
 
 
 def hippoapi_client(config: HippoConfig, quiet: bool = False):
@@ -107,11 +147,12 @@ def hippoapi_send_email(data: Email,
     return result
 
 
-def filter_events(events: List[QueuedEventModel],
-                  event_type: Optional[str] = None,
-                  event_id: Optional[str] = None):
-
-    if event_type is event_id is None:
+def filter_events(
+    events: List[QueuedEventModel],
+    event_type: Optional[str] = None,
+    event_id: Optional[int] = None,
+) -> Iterable[QueuedEventModel]:
+    if event_type is None and event_id is None:
         yield from events
     else:
         for event in events:
@@ -121,62 +162,101 @@ def filter_events(events: List[QueuedEventModel],
                 yield event
 
 
-def process_hippoapi_events(config: HippoConfig,
-                            post_back: bool = False,
-                            event_type: Optional[str] = None,
-                            event_id: Optional[str] = None):
-    logger = logging.getLogger(__name__)
-    with hippoapi_client(config) as client:
-        events = event_queue_pending_events.sync(client=client)
+class EventProcessor:
+    """Orchestrates HiPPO event processing. Designed for future async migration."""
 
-        if events:
-            _process_hippoapi_events(filter_events(events,
-                                                   event_type=event_type,
-                                                   event_id=event_id),
-                                     client,
-                                     config,
-                                     post_back=post_back)
-        else:
-            logger.warning(f'Got no events to process.')
+    def __init__(self, config: HippoConfig, registry: HandlerRegistry | None = None) -> None:
+        self.config = config
+        self.registry = registry or HandlerRegistry.default()
 
+    def process(
+        self,
+        post_back: bool = False,
+        event_type: Optional[str] = None,
+        event_id: Optional[int] = None,
+    ) -> None:
+        """Main entry point. Future: async def process(...)"""
+        logger = logging.getLogger(__name__)
+        with hippoapi_client(self.config) as client:
+            events = event_queue_pending_events.sync(client=client)
+            if events:
+                self._process_events(
+                    filter_events(events, event_type=event_type, event_id=event_id),
+                    client,
+                    post_back,
+                )
+            else:
+                logger.warning("Got no events to process.")
 
-def _process_hippoapi_events(events: Iterable[QueuedEventModel],
-                             client: AuthenticatedClient,
-                             config: HippoConfig,
-                             post_back: bool = False):
-    logger = logging.getLogger(__name__)
+    def _process_events(
+        self,
+        events: Iterable[QueuedEventModel],
+        client: AuthenticatedClient,
+        post_back: bool,
+    ) -> None:
+        logger = logging.getLogger(__name__)
+        for event in events:
+            logger.info(f"Process hippoapi {event.action} id={event.id}")
+            if event.status != "Pending":
+                logger.info(f"Skipping hippoapi id={event.id} because status is {event.status}")
+                continue
 
-    for event in events:
-        logger.info(f'Process hippoapi {event.action} id={event.id}')
-        if event.status != 'Pending':
-            logger.info(f'Skipping hippoapi id={event.id} because status is {event.status}')
+            event_record = HippoEvent.objects(
+                hippo_id=event.id,
+                hippo_endpoint=self.config.base_url,
+            ).modify(
+                upsert=True,
+                new=True,
+                set__action=event.action,
+                set__data=event.to_dict(),
+                set__status="Pending",
+            )
 
-        event_record = HippoEvent.objects(hippo_id=event.id,
-                                          hippo_endpoint=config.base_url).modify(upsert=True, #type: ignore
-                                                                                 new=True,
-                                                                                 set__action=event.action, 
-                                                                                 set__data=event.to_dict(),
-                                                                                 set__status='Pending')
-
-        try:
-            handler = EVENT_HANDLERS.get(event.action)
-            handler(event.data, client, config)
-        except Exception as e:
-            event_record.modify(inc__n_tries=True)
-            logger.critical(f'Error processing event id={event.id}, n_tries={event_record.n_tries}: {e}')
-            logger.critical(traceback.format_exc())
-            if event_record.n_tries >= config.max_tries:
-                logger.warning(f'Event id={event.id} failed {event_record.n_tries}, POST back that it Failed.')
-                event_record.modify(set__status='Failed')
+            handler = self.registry.get(event.action)
+            if handler is None:
+                logger.error(f"No handler registered for event action: {event.action}")
+                event_record.modify(inc__n_tries=True, set__status="Failed")
                 if post_back:
-                    logger.info(f'Event id={event.id}: attempt postback')
                     postback_event_failed(event.id, client)
-        else:
-            event_record.modify(inc__n_tries=True, set__status='Complete')
-            logger.info(f'Event id={event.id} completed.')
-            if post_back:
-                logger.info(f'Event id={event.id}: attempt postback')
-                postback_event_complete(event.id, client)
+                continue
+
+            context = EventContext(client=client, config=self.config, event_record=event_record)
+            try:
+                handler.handle(event.data, context)
+            except Exception as e:
+                event_record.modify(inc__n_tries=True)
+                logger.critical(
+                    f"Error processing event id={event.id}, n_tries={event_record.n_tries}: {e}"
+                )
+                logger.critical(traceback.format_exc())
+                if event_record.n_tries >= self.config.max_tries:
+                    logger.warning(
+                        f"Event id={event.id} failed {event_record.n_tries}, POST back that it Failed."
+                    )
+                    event_record.modify(set__status="Failed")
+                    if post_back:
+                        logger.info(f"Event id={event.id}: attempt postback")
+                        postback_event_failed(event.id, client)
+            else:
+                event_record.modify(inc__n_tries=True, set__status="Complete")
+                logger.info(f"Event id={event.id} completed.")
+                if post_back:
+                    logger.info(f"Event id={event.id}: attempt postback")
+                    postback_event_complete(event.id, client)
+
+
+def process_hippoapi_events(
+    config: HippoConfig,
+    post_back: bool = False,
+    event_type: Optional[str] = None,
+    event_id: Optional[int] = None,
+) -> None:
+    """Thin wrapper for backward compatibility."""
+    EventProcessor(config).process(
+        post_back=post_back,
+        event_type=event_type,
+        event_id=event_id,
+    )
 
 
 def postback_event_complete(event_id: int,
@@ -191,36 +271,7 @@ def postback_event_failed(event_id: int,
     return event_queue_update_status.sync_detailed(client=client, body=update)
 
 
-@event_handler('UpdateSshKey')
-def handle_updatesshkey_event(event: QueuedEventDataModel,
-                              client: AuthenticatedClient,
-                              config: HippoConfig,
-                              notify: bool = True):
-    logger = logging.getLogger(__name__)
-    hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    username = hippo_account.kerberos
-    ssh_key = hippo_account.key
-
-    logger.info(f'Process UpdateSshKey for user {username}')
-    try:
-        with run_in_transaction():
-            user = SiteUser.objects.get(username=username, sitename=sitename)
-            global_user = user.parent
-            global_user.ssh_key = [ssh_key]
-            global_user.ldap_synced = False
-            global_user.save()
-
-            logger.info(f'Add login-ssh access to user {username}, site {sitename}')
-            add_user_access(user, 'login-ssh')
-    except Exception:
-        raise
-    else:
-        if notify:
-            hippoapi_send_email(get_updatesshkey_email(user), client)
-
-
-def get_updatesshkey_email(user: SiteUser):
+def _get_updatesshkey_email(user: SiteUser) -> UpdateSSHKeyEmail:
     sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
     email = UpdateSSHKeyEmail(to=[user.parent.email],
                               username=user.username,
@@ -229,69 +280,94 @@ def get_updatesshkey_email(user: SiteUser):
     return email
 
 
-@event_handler('CreateAccount')
-def handle_createaccount_event(event: QueuedEventDataModel,
-                               client: AuthenticatedClient,
-                               config: HippoConfig,
-                               notify: bool = True):
+class UpdateSshKeyHandler(BaseEventHandler):
+    event_name = "UpdateSshKey"
 
-    logger = logging.getLogger(__name__)
+    def handle(self, event: QueuedEventDataModel, context: EventContext, notify: bool = True) -> None:
+        logger = logging.getLogger(__name__)
+        hippo_account = event.accounts[0]
+        sitename = context.config.site_aliases.get(event.cluster, event.cluster).lower()
+        username = hippo_account.kerberos
+        ssh_key = hippo_account.key
 
-    hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    username = hippo_account.kerberos
-
-    logger.info(f'Process CreateAccount for site {sitename}, event: {event}')
-
-    try:
-        guser, ggroup = create_user_from_hippo(hippo_account)
-        logger.info(f'Created GlobalUser and GlobalGroup for {username}')
-    except DuplicateGlobalUser:
-        logger.info(f'GlobalUser for {username} already exists.')
-        guser = GlobalUser.objects.get(username=username)
-        if hippo_account.key and hippo_account.key not in guser.ssh_key:
-            logger.info(f'Updating SSH key for {username}')
-            guser.update(ssh_key=[hippo_account.key], ldap_synced=False)
-    
-    if guser.status == 'inactive':
-        logger.info(f'GlobalUser for {username} is inactive, setting to "active"')
-        set_user_status(username, 'active', 'Activated from HiPPO')
-
-    try:
-        suser, sgroup = add_site_user(sitename, guser)
-    except DuplicateSiteUser:
-        logger.warning(f'SiteUser for {username} already exists. This should not happen!')
-        suser = SiteUser.objects.get(username=username, sitename=sitename)
-       
-    # Reactivate the user _only_ if inactive (ie, not if disabled)
-    if suser.status == 'inactive':
-        logger.info(f'SiteUser for {username} is inactive, setting to "active"')
-        set_user_status(username, 'active', 'Activated from HiPPO', sitename=sitename)
-
-    add_user_access(suser, list(hippo_to_cheeto_access(hippo_account.access_types) | {'slurm'}))
-
-    try:
-        query_user_home_storage(sitename, guser)
-    except NonExistentStorage:
-        logger.info(f'Creating home storage for {username}')
-        create_home_storage(sitename, guser)
-    else:
-        logger.warning(f'Home storage for {username} already exists. This should not happen!')
-
-    for group in event.groups:
+        logger.info(f"Process UpdateSshKey for user {username}")
         try:
-            add_group_member(sitename, suser, group.name)
-        except Exception as e:
-            logger.error(f'{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}')
+            with run_in_transaction():
+                user = SiteUser.objects.get(username=username, sitename=sitename)
+                global_user = user.parent
+                global_user.ssh_key = [ssh_key]
+                global_user.ldap_synced = False
+                global_user.save()
+
+                logger.info(f"Add login-ssh access to user {username}, site {sitename}")
+                add_user_access(user, "login-ssh")
+        except Exception:
             raise
+        else:
+            if notify:
+                hippoapi_send_email(_get_updatesshkey_email(user), context.client)
 
-    if notify:
-        hippoapi_send_email(get_createaccount_email(suser), client)
+
+class CreateAccountHandler(BaseEventHandler):
+    event_name = "CreateAccount"
+
+    def handle(self, event: QueuedEventDataModel, context: EventContext, notify: bool = True) -> None:
+        logger = logging.getLogger(__name__)
+        hippo_account = event.accounts[0]
+        sitename = context.config.site_aliases.get(event.cluster, event.cluster).lower()
+        username = hippo_account.kerberos
+
+        logger.info(f"Process CreateAccount for site {sitename}, event: {event}")
+
+        try:
+            guser, ggroup = create_user_from_hippo(hippo_account)
+            logger.info(f"Created GlobalUser and GlobalGroup for {username}")
+        except DuplicateGlobalUser:
+            logger.info(f"GlobalUser for {username} already exists.")
+            guser = GlobalUser.objects.get(username=username)
+            if hippo_account.key and hippo_account.key not in guser.ssh_key:
+                logger.info(f"Updating SSH key for {username}")
+                guser.update(ssh_key=[hippo_account.key], ldap_synced=False)
+
+        if guser.status == "inactive":
+            logger.info(f"GlobalUser for {username} is inactive, setting to 'active'")
+            set_user_status(username, "active", "Activated from HiPPO")
+
+        try:
+            suser, sgroup = add_site_user(sitename, guser)
+        except DuplicateSiteUser:
+            logger.warning(f"SiteUser for {username} already exists. This should not happen!")
+            suser = SiteUser.objects.get(username=username, sitename=sitename)
+
+        if suser.status == "inactive":
+            logger.info(f"SiteUser for {username} is inactive, setting to 'active'")
+            set_user_status(username, "active", "Activated from HiPPO", sitename=sitename)
+
+        add_user_access(suser, list(hippo_to_cheeto_access(hippo_account.access_types) | {"slurm"}))
+
+        try:
+            query_user_home_storage(sitename, guser)
+        except NonExistentStorage:
+            logger.info(f"Creating home storage for {username}")
+            create_home_storage(sitename, guser)
+        else:
+            logger.warning(f"Home storage for {username} already exists. This should not happen!")
+
+        for group in event.groups:
+            try:
+                add_group_member(sitename, suser, group.name)
+            except Exception as e:
+                logger.error(
+                    f"{_ctx_name()}: error adding user {username} to group {group.name} on site {sitename}: {e}"
+                )
+                raise
+
+        if notify:
+            hippoapi_send_email(_get_createaccount_email(suser), context.client)
 
 
-
-def get_user_email_info(user: SiteUser):
-    groups = query_user_groups(user.sitename, user, types=['group', 'class', 'admin'])
+def _get_user_email_info(user: SiteUser):
+    groups = query_user_groups(user.sitename, user, types=["group", "class", "admin"])
     sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
     slurm_accounts = {}
     for assoc in query_user_slurm(user.sitename, user.username):
@@ -306,8 +382,8 @@ def get_user_email_info(user: SiteUser):
     return groups, sitefqdn, slurm_accounts, group_storages
 
 
-def get_createaccount_email(user: SiteUser):
-    groups, sitefqdn, slurm_accounts, group_storages = get_user_email_info(user)
+def _get_createaccount_email(user: SiteUser):
+    groups, sitefqdn, slurm_accounts, group_storages = _get_user_email_info(user)
 
     email = NewAccountEmail(to=[user.parent.email],
                             username=user.username,
@@ -319,28 +395,27 @@ def get_createaccount_email(user: SiteUser):
     return email
 
 
-@event_handler('AddAccountToGroup')
-def handle_addaccounttogroup_event(event: QueuedEventDataModel,
-                                   client: AuthenticatedClient,
-                                   config: HippoConfig):
-    logger = logging.getLogger(__name__)
-    hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    logger.info(f'Process AddAccountToGroup for site {sitename}, event: {event}')
+class AddAccountToGroupHandler(BaseEventHandler):
+    event_name = "AddAccountToGroup"
 
-    try:
-        with run_in_transaction():
-            site_user = SiteUser.objects.get(sitename=sitename, username=hippo_account.kerberos)
-            for group in event.groups:
-                add_group_member(sitename, site_user, group.name)
+    def handle(self, event: QueuedEventDataModel, context: EventContext) -> None:
+        logger = logging.getLogger(__name__)
+        hippo_account = event.accounts[0]
+        sitename = context.config.site_aliases.get(event.cluster, event.cluster).lower()
+        logger.info(f"Process AddAccountToGroup for site {sitename}, event: {event}")
 
-    except Exception:
-        raise
-    else:
-        hippoapi_send_email(get_newmembership_email(site_user), client)
+        try:
+            with run_in_transaction():
+                site_user = SiteUser.objects.get(sitename=sitename, username=hippo_account.kerberos)
+                for group in event.groups:
+                    add_group_member(sitename, site_user, group.name)
+        except Exception:
+            raise
+        else:
+            hippoapi_send_email(_get_newmembership_email(site_user), context.client)
 
 
-def get_newsponsor_email(user: SiteUser, group: SiteGroup):
+def _get_newsponsor_email(user: SiteUser, group: SiteGroup):
     sitefqdn = Site.objects.get(sitename=user.sitename).fqdn
     email = NewSponsorEmail(to=[user.parent.email],
                             username=user.username,
@@ -350,8 +425,8 @@ def get_newsponsor_email(user: SiteUser, group: SiteGroup):
     return email
 
 
-def get_newmembership_email(user: SiteUser):
-    groups, sitefqdn, slurm_accounts, group_storages = get_user_email_info(user)
+def _get_newmembership_email(user: SiteUser):
+    groups, sitefqdn, slurm_accounts, group_storages = _get_user_email_info(user)
     email = NewMembershipEmail(to=[user.parent.email],
                                username=user.username,
                                groups=groups,
@@ -362,40 +437,40 @@ def get_newmembership_email(user: SiteUser):
     return email
 
 
-@event_handler('RemoveAccountFromGroup')
-def handle_removeaccountfromgroup_event(event: QueuedEventDataModel,
-                                        client: AuthenticatedClient,
-                                        config: HippoConfig):
-    logger = logging.getLogger(__name__)
-    hippo_account = event.accounts[0]
-    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    groupname = event.groups[0].name
-    username = hippo_account.kerberos
-    logger.info(f'Process RemoveAccountFromGroup for site {sitename}, event: {event}')
+class RemoveAccountFromGroupHandler(BaseEventHandler):
+    event_name = "RemoveAccountFromGroup"
 
-    try:
-        user = SiteUser.objects.get(sitename=sitename, username=username)
-    except DoesNotExist:
-        logger.error(f'SiteUser {username} does not exist on site {sitename}')
-        raise
+    def handle(self, event: QueuedEventDataModel, context: EventContext) -> None:
+        logger = logging.getLogger(__name__)
+        hippo_account = event.accounts[0]
+        sitename = context.config.site_aliases.get(event.cluster, event.cluster).lower()
+        groupname = event.groups[0].name
+        username = hippo_account.kerberos
+        logger.info(f"Process RemoveAccountFromGroup for site {sitename}, event: {event}")
 
-    try:
-        group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
-    except DoesNotExist:
-        logger.error(f'SiteGroup {groupname} does not exist on site {sitename}')
-        raise
-    
-    try:
-        with run_in_transaction():
-            remove_group_member(sitename, user, group)
-    except Exception:
-        raise
-    else:
-        logger.info(f'Removed user {user.username} from group {group.groupname} on site {sitename}')
-        hippoapi_send_email(get_removemembership_email(user, group), client)
+        try:
+            user = SiteUser.objects.get(sitename=sitename, username=username)
+        except DoesNotExist:
+            logger.error(f"SiteUser {username} does not exist on site {sitename}")
+            raise
+
+        try:
+            group = SiteGroup.objects.get(sitename=sitename, groupname=groupname)
+        except DoesNotExist:
+            logger.error(f"SiteGroup {groupname} does not exist on site {sitename}")
+            raise
+
+        try:
+            with run_in_transaction():
+                remove_group_member(sitename, user, group)
+        except Exception:
+            raise
+        else:
+            logger.info(f"Removed user {user.username} from group {group.groupname} on site {sitename}")
+            hippoapi_send_email(_get_removemembership_email(user, group), context.client)
 
 
-def get_removemembership_email(user: SiteUser, group: SiteGroup):
+def _get_removemembership_email(user: SiteUser, group: SiteGroup):
     sponsors = []
     for sponsor in group._sponsors:
         sponsors.append((sponsor.fullname, sponsor.email))
@@ -406,26 +481,27 @@ def get_removemembership_email(user: SiteUser, group: SiteGroup):
     return email
 
 
-@event_handler('CreateGroup')
-def handle_creategroup_event(event: QueuedEventDataModel,
-                             client: AuthenticatedClient,
-                             config: HippoConfig,
-                             notify: bool = True):
-    logger = logging.getLogger(__name__)
-    sitename = config.site_aliases.get(event.cluster, event.cluster).lower()
-    hippo_account = event.accounts[0]
-    username = hippo_account.kerberos
-    logger.info(f'Process CreateGroup for site {sitename}, event: {event}')
-    try:
-        with run_in_transaction():
-            sponsor = SiteUser.objects.get(sitename=sitename, username=username)
-            group = create_group_from_sponsor(sponsor)
-    except Exception:
-        raise
-    else:
-        logger.info(f'Processed CreateGroup for group {group.groupname} for sponsor {username} on site {sitename}')
-        if notify:
-            hippoapi_send_email(get_newsponsor_email(sponsor, group), client)
+class CreateGroupHandler(BaseEventHandler):
+    event_name = "CreateGroup"
+
+    def handle(self, event: QueuedEventDataModel, context: EventContext, notify: bool = True) -> None:
+        logger = logging.getLogger(__name__)
+        sitename = context.config.site_aliases.get(event.cluster, event.cluster).lower()
+        hippo_account = event.accounts[0]
+        username = hippo_account.kerberos
+        logger.info(f"Process CreateGroup for site {sitename}, event: {event}")
+        try:
+            with run_in_transaction():
+                sponsor = SiteUser.objects.get(sitename=sitename, username=username)
+                group = create_group_from_sponsor(sponsor)
+        except Exception:
+            raise
+        else:
+            logger.info(
+                f"Processed CreateGroup for group {group.groupname} for sponsor {username} on site {sitename}"
+            )
+            if notify:
+                hippoapi_send_email(_get_newsponsor_email(sponsor, group), context.client)
 
 
 def sync(args: argparse.Namespace):

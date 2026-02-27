@@ -99,7 +99,9 @@ ACCESS_TYPES = {
 HIPPO_EVENT_ACTIONS = {
     'CreateAccount',
     'AddAccountToGroup',
-    'UpdateSshKey'
+    'UpdateSshKey',
+    'RemoveAccountFromGroup',
+    'CreateGroup'
 }
 
 

@@ -103,6 +103,13 @@ def setup_logging():
     _setup_logging(sys.stdout)
 
 
+# Timeouts for MongoDB replica set startup. Replica set election can take several
+# seconds; 5ms was too short and caused intermittent ServerSelectionTimeoutError.
+MONGODB_SERVER_SELECTION_TIMEOUT_MS = 30_000
+MONGODB_INIT_RETRY_SLEEP_SEC = 0.5
+MONGODB_INIT_MAX_WAIT_SEC = 30
+
+
 @pytest.fixture(scope='session', autouse=True)
 def start_mongodb(tmp_path_factory):
     '''
@@ -112,40 +119,63 @@ def start_mongodb(tmp_path_factory):
     data_dir = db_dir / 'data'
     data_dir.mkdir()
     log_file = db_dir / 'mongod.log'
-    
-    proc = subprocess.Popen(['mongod', '--dbpath', str(data_dir), '--port', str(MONGODB_PORT), '--logpath', str(log_file), '--replSet', 'mongoengine'])
-    time.sleep(1)
-    client = MongoClient(port=MONGODB_PORT, serverSelectionTimeoutMS=5)
+
+    proc = subprocess.Popen(
+        [
+            'mongod',
+            '--dbpath', str(data_dir),
+            '--port', str(MONGODB_PORT),
+            '--logpath', str(log_file),
+            '--replSet', 'mongoengine',
+        ]
+    )
+    time.sleep(2)  # Give mongod time to bind and accept connections
+
     n_tries = 3
-    while n_tries:
-        retcode, err, p = run_shell_cmd(['mongosh', '--port', str(MONGODB_PORT), '--eval', '"rs.initiate()"'], print_stderr=False)
+    retcode = -1
+    err = ''
+    for _ in range(n_tries):
+        retcode, err, _ = run_shell_cmd(
+            ['mongosh', '--port', str(MONGODB_PORT), '--eval', '"rs.initiate()"'],
+            print_stderr=False,
+        )
         if retcode == 0:
             break
-        else:
-            n_tries -= 1
-            time.sleep(1)
-    
+        time.sleep(1)
+
     if retcode != 0:
         print('Failed to initiate MongoDB replica set')
-        print('mongosh log:')
-        print(err)
+        print('mongosh output:', err)
         print('mongod log:')
-        with open(log_file, 'r') as f:
+        with open(log_file) as f:
             print(f.read())
         proc.terminate()
         proc.wait()
-        raise Exception('Failed to start MongoDB')
+        raise Exception('Failed to initiate MongoDB replica set')
 
-    try:
-        client.server_info()
-    except Exception as e:
-        print(f'Failed to start MongoDB: {e}')
+    # Wait for replica set to elect primary. Election can take several seconds;
+    # serverSelectionTimeoutMS must be long enough for discovery + election.
+    client = MongoClient(
+        port=MONGODB_PORT,
+        serverSelectionTimeoutMS=MONGODB_SERVER_SELECTION_TIMEOUT_MS,
+    )
+    deadline = time.monotonic() + MONGODB_INIT_MAX_WAIT_SEC
+    last_error = None
+    while time.monotonic() < deadline:
+        try:
+            client.server_info()
+            break
+        except Exception as e:
+            last_error = e
+            time.sleep(MONGODB_INIT_RETRY_SLEEP_SEC)
+    else:
+        print(f'Failed to connect to MongoDB primary: {last_error}')
         print('mongod log:')
-        with open(log_file, 'r') as f:
+        with open(log_file) as f:
             print(f.read())
         proc.terminate()
         proc.wait()
-        raise e
+        raise last_error
 
     yield
     proc.terminate()

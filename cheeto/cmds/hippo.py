@@ -17,8 +17,8 @@ from . import commands
 from ..database import connect_to_database
 from ..hippoapi.api.action import action_sync_puppet_accounts
 from ..hippoapi.api.event_queue import event_queue_pending_events
-from ..hippo import (hippoapi_client,
-                     process_hippoapi_events,
+from ..hippo import (EventProcessor,
+                     hippoapi_client,
                      filter_events,
                      HIPPO_EVENT_ACTIONS)
 from ..log import Console
@@ -43,10 +43,11 @@ def event_args(parser: ArgParser):
 def cmd_hippoapi_process(args: Namespace):
     connect_to_database(args.config.mongo)
     console = Console()
-    process_hippoapi_events(args.config.hippo,
-                            event_type=args.type,
-                            event_id=args.event_id,
-                            post_back=args.post)
+    EventProcessor(args.config.hippo).process(
+        post_back=args.post,
+        event_type=args.type,
+        event_id=args.event_id,
+    )
 
 
 @event_args.apply()
