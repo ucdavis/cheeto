@@ -1,4 +1,7 @@
-from typing import Any, Dict, Type, TypeVar, Union
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any, TypeVar
 
 from attrs import define as _attrs_define
 
@@ -13,18 +16,19 @@ class QueuedEventUpdateModel:
     Attributes:
         status (str): The new status of the event. Marking it as 'Complete' will trigger Action-specific processing in
             Hippo.
-        id (Union[Unset, int]):
+        id (int | Unset):
     """
 
     status: str
-    id: Union[Unset, int] = UNSET
+    id: int | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         status = self.status
 
         id = self.id
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update(
             {
                 "status": status,
@@ -36,8 +40,8 @@ class QueuedEventUpdateModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
-        d = src_dict.copy()
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
+        d = dict(src_dict)
         status = d.pop("status")
 
         id = d.pop("id", UNSET)

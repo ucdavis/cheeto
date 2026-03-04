@@ -1,5 +1,6 @@
 from http import HTTPStatus
-from typing import Any, Dict, Optional, Union
+from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -12,12 +13,12 @@ from ...types import Response
 def _get_kwargs(
     chart_string: str,
     direction: str,
-) -> Dict[str, Any]:
-    _kwargs: Dict[str, Any] = {
+) -> dict[str, Any]:
+    _kwargs: dict[str, Any] = {
         "method": "get",
         "url": "/api/order/validateChartString/{chart_string}/{direction}".format(
-            chart_string=chart_string,
-            direction=direction,
+            chart_string=quote(str(chart_string), safe=""),
+            direction=quote(str(direction), safe=""),
         ),
     }
 
@@ -25,12 +26,13 @@ def _get_kwargs(
 
 
 def _parse_response(
-    *, client: Union[AuthenticatedClient, Client], response: httpx.Response
-) -> Optional[ChartStringValidationModel]:
-    if response.status_code == HTTPStatus.OK:
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> ChartStringValidationModel | None:
+    if response.status_code == 200:
         response_200 = ChartStringValidationModel.from_dict(response.json())
 
         return response_200
+
     if client.raise_on_unexpected_status:
         raise errors.UnexpectedStatus(response.status_code, response.content)
     else:
@@ -38,7 +40,7 @@ def _parse_response(
 
 
 def _build_response(
-    *, client: Union[AuthenticatedClient, Client], response: httpx.Response
+    *, client: AuthenticatedClient | Client, response: httpx.Response
 ) -> Response[ChartStringValidationModel]:
     return Response(
         status_code=HTTPStatus(response.status_code),
@@ -84,7 +86,7 @@ def sync(
     direction: str,
     *,
     client: AuthenticatedClient,
-) -> Optional[ChartStringValidationModel]:
+) -> ChartStringValidationModel | None:
     """
     Args:
         chart_string (str):
@@ -139,7 +141,7 @@ async def asyncio(
     direction: str,
     *,
     client: AuthenticatedClient,
-) -> Optional[ChartStringValidationModel]:
+) -> ChartStringValidationModel | None:
     """
     Args:
         chart_string (str):

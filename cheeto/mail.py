@@ -151,3 +151,20 @@ class NewMembershipEmail(Email):
     @property
     def header(self) -> str:
         return 'Your new group membership has been processed'
+
+
+class RemovedFromGroupEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'removed-from-group.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        return 'UCD HPC: Removed from Group'
+
+    @property
+    def header(self) -> str:
+        return 'You have been removed from a group'

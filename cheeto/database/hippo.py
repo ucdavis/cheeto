@@ -19,7 +19,10 @@ from .base import BaseDocument
 
 
 class HippoEvent(BaseDocument):
-    hippo_id = IntField(required=True, unique=True)
+    hippo_id = IntField(required=True)
+    hippo_endpoint = StringField(required=True,
+                                 default='endpoint-unspecified',
+                                 unique_with='hippo_id')
     action = StringField(required=True,
                          choices=HIPPO_EVENT_ACTIONS)
     n_tries = IntField(required=True, default=0)
@@ -28,6 +31,15 @@ class HippoEvent(BaseDocument):
                          choices=HIPPO_EVENT_STATUSES)
     #created_at = DateTimeField()
     data = DictField()
+
+    #meta = {
+    #    'indexes': [
+    #        {
+    #            'fields': ('hippo_id', 'hippo_endpoint'),
+    #            'unique': True
+    #        }
+    #    ],
+    #}
 
     def to_event_model(self) -> QueuedEventModel:
         return QueuedEventModel.from_dict(self.data)

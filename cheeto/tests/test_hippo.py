@@ -1,11 +1,9 @@
 import pytest
 
-from cheeto.hippoapi.api import notify
-
 from ..hippoapi.models.queued_event_data_model import QueuedEventDataModel
 
 from ..database import *
-from ..hippo import handle_createaccount_event
+from ..hippo import CreateAccountHandler, EventContext
 
 from .conftest import drop_database
 
@@ -42,7 +40,8 @@ class TestCreateAccount:
     def test_handler(self, hippo_config):
         event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
         client = object()
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        context = EventContext(client=client, config=hippo_config, event_record=object())
+        CreateAccountHandler().handle(event, context, notify=False)
         assert GlobalUser.objects.count() == 1
         assert GlobalUser.objects.get(username='test-user').iam_id == 1000999999
         assert SiteUser.objects.count() == 1
@@ -53,8 +52,10 @@ class TestCreateAccount:
     def test_handler_duplicate(self, hippo_config):
         event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
         client = object()
-        handle_createaccount_event(event, client, hippo_config, notify=False)
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        context = EventContext(client=client, config=hippo_config, event_record=object())
+        handler = CreateAccountHandler()
+        handler.handle(event, context, notify=False)
+        handler.handle(event, context, notify=False)
         assert GlobalUser.objects.count() == 1
         assert SiteUser.objects.count() == 1
         assert Storage.objects.count() == 1
@@ -62,21 +63,25 @@ class TestCreateAccount:
     def test_handler_unset_ssh_key(self, hippo_config):
         event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
         client = object()
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        context = EventContext(client=client, config=hippo_config, event_record=object())
+        handler = CreateAccountHandler()
+        handler.handle(event, context, notify=False)
         assert GlobalUser.objects.get(username='test-user').ssh_key == ['ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment']
         event_data = self.EVENT_DATA.copy()
         event_data['accounts'][0]['key'] = ''
         event = QueuedEventDataModel.from_dict(event_data)
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        handler.handle(event, context, notify=False)
         assert GlobalUser.objects.get(username='test-user').ssh_key == ['ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment']
 
     def test_handler_updated_ssh(self, hippo_config):
         event = QueuedEventDataModel.from_dict(self.EVENT_DATA)
         client = object()
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        context = EventContext(client=client, config=hippo_config, event_record=object())
+        handler = CreateAccountHandler()
+        handler.handle(event, context, notify=False)
         event_data = self.EVENT_DATA.copy()
         event_data['accounts'][0]['key'] = 'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment2'
         event = QueuedEventDataModel.from_dict(event_data)
-        handle_createaccount_event(event, client, hippo_config, notify=False)
+        handler.handle(event, context, notify=False)
         assert GlobalUser.objects.count() == 1
         assert GlobalUser.objects.get(username='test-user').ssh_key == ['ssh-rsa AAAAB3NzaC1yc2EAAAADAQABwWSyQAeCDeKyiCsiVv comment2']

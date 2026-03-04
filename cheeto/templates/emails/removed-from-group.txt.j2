@@ -1,0 +1,6 @@
+Your membership in the group **{{ group }}** on **{{ sitename }}** has been removed.
+
+If you believe this is an error, please contact the group's sponsors:
+{%- for sponsor_name, sponsor_email in sponsors %}
+- {{sponsor_name}} ({{sponsor_email}})
+{%- endfor %}

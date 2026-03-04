@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import datetime
-from typing import TYPE_CHECKING, Any, Dict, Type, TypeVar, Union
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from attrs import define as _attrs_define
 from dateutil.parser import isoparse
@@ -20,19 +23,19 @@ class QueuedEventModel:
         action (str):
         status (str):
         data (QueuedEventDataModel):
-        id (Union[Unset, int]):
-        created_at (Union[Unset, datetime.datetime]):
-        updated_at (Union[Unset, datetime.datetime]):
+        id (int | Unset):
+        created_at (datetime.datetime | Unset):
+        updated_at (datetime.datetime | Unset):
     """
 
     action: str
     status: str
-    data: "QueuedEventDataModel"
-    id: Union[Unset, int] = UNSET
-    created_at: Union[Unset, datetime.datetime] = UNSET
-    updated_at: Union[Unset, datetime.datetime] = UNSET
+    data: QueuedEventDataModel
+    id: int | Unset = UNSET
+    created_at: datetime.datetime | Unset = UNSET
+    updated_at: datetime.datetime | Unset = UNSET
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         action = self.action
 
         status = self.status
@@ -41,15 +44,16 @@ class QueuedEventModel:
 
         id = self.id
 
-        created_at: Union[Unset, str] = UNSET
+        created_at: str | Unset = UNSET
         if not isinstance(self.created_at, Unset):
             created_at = self.created_at.isoformat()
 
-        updated_at: Union[Unset, str] = UNSET
+        updated_at: str | Unset = UNSET
         if not isinstance(self.updated_at, Unset):
             updated_at = self.updated_at.isoformat()
 
-        field_dict: Dict[str, Any] = {}
+        field_dict: dict[str, Any] = {}
+
         field_dict.update(
             {
                 "action": action,
@@ -67,10 +71,10 @@ class QueuedEventModel:
         return field_dict
 
     @classmethod
-    def from_dict(cls: Type[T], src_dict: Dict[str, Any]) -> T:
+    def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         from ..models.queued_event_data_model import QueuedEventDataModel
 
-        d = src_dict.copy()
+        d = dict(src_dict)
         action = d.pop("action")
 
         status = d.pop("status")
@@ -80,14 +84,14 @@ class QueuedEventModel:
         id = d.pop("id", UNSET)
 
         _created_at = d.pop("createdAt", UNSET)
-        created_at: Union[Unset, datetime.datetime]
+        created_at: datetime.datetime | Unset
         if isinstance(_created_at, Unset):
             created_at = UNSET
         else:
             created_at = isoparse(_created_at)
 
         _updated_at = d.pop("updatedAt", UNSET)
-        updated_at: Union[Unset, datetime.datetime]
+        updated_at: datetime.datetime | Unset
         if isinstance(_updated_at, Unset):
             updated_at = UNSET
         else:
