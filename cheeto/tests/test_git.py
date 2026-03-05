@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 import pytest
 import sh
@@ -9,9 +10,11 @@ from ..git import Git, GitRepo
 def test_repo(tmpdir):
     root = Path(tmpdir.join('repo'))
     repo = GitRepo(root)
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        repo.git.cmd('config', '--global', 'user.name', 'Test User')
+        repo.git.cmd('config', '--global', 'user.email', 'test@example.com')
     repo.create()
-    repo.git.cmd('config', 'user.name', 'Test User')
-    repo.git.cmd('config', 'user.email', 'test@example.com')
+
     return repo
 
 class TestGitRepo:
