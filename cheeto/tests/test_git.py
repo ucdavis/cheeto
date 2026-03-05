@@ -8,13 +8,13 @@ from ..git import Git, GitRepo
 
 @pytest.fixture
 def test_repo(tmpdir):
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        git = Git()
+        git.cmd('config', '--global', 'user.name', 'Test User')
+        git.cmd('config', '--global', 'user.email', 'test@example.com')
     root = Path(tmpdir.join('repo'))
     repo = GitRepo(root)
-    if os.getenv('GITHUB_ACTIONS') == 'true':
-        repo.git.cmd('config', '--global', 'user.name', 'Test User')
-        repo.git.cmd('config', '--global', 'user.email', 'test@example.com')
     repo.create()
-
     return repo
 
 class TestGitRepo:
