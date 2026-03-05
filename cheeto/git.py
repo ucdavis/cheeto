@@ -7,7 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 31.05.2023
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum, auto
 import logging
 import os
@@ -29,6 +29,16 @@ class Git:
                                      else working_dir
         self.cmd = sh.Command('git').bake(_cwd=self.working_dir)
         logger.info(f'`git` working in: {self.working_dir}')
+
+    def create(self, directory: Path):
+        """
+        Yield sh baked commands to (1) create the directory (mkdir -p directory),
+        and (2) initialize a git repo within it ("git init").
+        """
+        mkdir_cmd = sh.Command('mkdir').bake('-p', directory)
+        yield mkdir_cmd
+        yield self.cmd.bake('init', '-b', 'main', _cwd=directory)
+        yield self.cmd.bake('commit', '--allow-empty', '-m', 'Root commit')
 
     def checkout(self, branch: Optional[str] = '',
                        create: Optional[bool] = False) -> sh.Command:
@@ -53,6 +63,9 @@ class Git:
 
     def merge(self, branch: str):
         return self.cmd.bake('merge', branch)
+
+    def remove_branch(self, branch: str):
+        return self.cmd.bake('branch', '-D', branch)
 
     def clean(self, force: Optional[bool] = True,
                     exclude: Optional[str] = None) -> sh.Command:
@@ -149,6 +162,9 @@ def branch_name_title(prefix: Optional[str] = 'cheeto-puppet-sync') -> Tuple[str
     return branch_name, title
 
 
+class GitEmptyCommitError(Exception):
+    pass
+
 class GitRepo:
 
     def __init__(self,
@@ -157,47 +173,68 @@ class GitRepo:
         self.root = root
         self.lock_file = self.root / '.cheeto.lock'
         self.base_branch = base_branch
-        self.cmd = Git(working_dir=self.root.absolute())
+        self.git = Git(working_dir=self.root.absolute())
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def lock(self, timeout: int):
         return FileLock(self.lock_file, timeout=timeout)
 
+    def create(self):
+        for cmd in self.git.create(self.root):
+            cmd()
+
     @contextmanager
     def commit(self,
                message: str,
-               working_branch: Optional[str] = None,
-               clean: bool = False,
-               timeout: int = 30,
-               push_merge: bool = True):
+               lock: bool = True,
+               timeout: int = 30):
+
+        with self.lock(timeout) if lock else nullcontext():
+            yield self.git.add()
+            try:
+                self.git.commit(message)()
+            except sh.ErrorReturnCode_1: #type: ignore
+                raise GitEmptyCommitError('Nothing to commit.')
+
+    @contextmanager
+    def roundtrip(self,
+                  message: str,
+                  working_branch: Optional[str] = None,
+                  clean: bool = False,
+                  timeout: int = 30,
+                  push_merge: bool = True,
+                  delete_branch: Optional[bool] = False):
         
         if working_branch is None:
             working_branch, _ = branch_name_title()
 
         with self.lock(timeout):
-            self.cmd.checkout(self.base_branch)()
-            if clean:
-                self.cmd.clean(force=True, exclude=self.lock_file.name)()
-            self.cmd.pull()()
-            self.cmd.checkout(branch=working_branch, create=True)()
+            self.git.checkout(self.base_branch)()
 
-            yield self.cmd.add()
-            
+            if clean:
+                self.git.clean(force=True, exclude=self.lock_file.name)()
+            self.git.pull()()
+            self.git.checkout(branch=working_branch, create=True)()
+
             try:
-                self.cmd.commit(message)()
-            except sh.ErrorReturnCode_1: #type: ignore
-                self.logger.info(f'Nothing to commit.')
-                self.cmd.checkout(self.base_branch)()
+                with self.commit(message, lock=False) as add:
+                    yield add
+            except GitEmptyCommitError:
+                self.git.checkout(self.base_branch)()
                 return
 
             if push_merge:
                 self.logger.info(f'Pushing and creating branch: {working_branch}.')
-                self.cmd.push(remote_create=working_branch)()
+                self.git.push(remote_create=working_branch)()
 
                 self.logger.info(f'merge {working_branch} into {self.base_branch}')
-                self.cmd.checkout(self.base_branch)()
-                self.cmd.merge(working_branch)()
+                self.git.checkout(self.base_branch)()
+                self.git.merge(working_branch)()
 
-                self.cmd.push()()
+                self.git.push()()
             else:
-                self.cmd.checkout(self.base_branch)()
+                self.git.checkout(self.base_branch)()
+
+            if delete_branch:
+                self.logger.info(f'Deleting branch: {working_branch}.')
+                self.git.remove_branch(working_branch)()
