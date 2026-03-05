@@ -150,9 +150,10 @@ def sync_old_puppet(args: Namespace):
     yaml_path = prefix / 'merged' / 'all.yaml'
     puppet_map = site_to_puppet(args.site)
 
-    with repo.commit(f'Update merged yaml for {args.site}',
-                     clean=True,
-                     push_merge=args.push_merge) as add:
+    with repo.roundtrip(f'Update merged yaml for {args.site}',
+                       clean=True,
+                       push_merge=args.push_merge,
+                       delete_branch=args.delete_branch) as add:
         puppet_map.save_yaml(yaml_path)
 
         if args.write_keys:
@@ -172,6 +173,7 @@ def _(parser: ArgParser):
     parser.add_argument('--base-branch', default='main')
     parser.add_argument('--push-merge', default=False, action='store_true')
     parser.add_argument('--write-keys', default=False, action='store_true')
+    parser.add_argument('--delete-branch', default=False, action='store_true')
 
 
 @site_args.apply(required=True)
@@ -258,9 +260,10 @@ def site_sync_new_puppet(args: Namespace):
     repo = GitRepo(args.repo)
     prefix = (args.repo / 'domains' / site.fqdn).absolute()
 
-    with repo.commit(f'Update root.pub, storage.yaml, and sympa.txt for {site.fqdn}.',
-                     clean=True,
-                     push_merge=args.push_merge) as add:
+    with repo.roundtrip(f'Update root.pub, storage.yaml, and sympa.txt for {site.fqdn}.',
+                        clean=True,
+                        push_merge=args.push_merge,
+                        delete_branch=args.delete_branch) as add:
         root_key_path = prefix / 'root.pub'
         _site_write_root_key(args.site, root_key_path)
 
@@ -278,6 +281,7 @@ def _(parser: ArgParser):
     parser.add_argument('repo', type=Path)
     parser.add_argument('--ignore-emails', nargs='+',  default=['hpc-help@ucdavis.edu'])
     parser.add_argument('--push-merge', default=False, action='store_true')
+    parser.add_argument('--delete-branch', default=False, action='store_true')
 
 
 @commands.register('database', 'site', 'list',
