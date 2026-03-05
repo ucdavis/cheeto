@@ -37,7 +37,7 @@ from ..errors import ExitCode
 from ..git import GitRepo
 from ..log import Emotes, Console
 from ..puppet import  SiteData
-from ..types import (USER_TYPES,
+from ..types import (GROUP_TYPES, USER_TYPES,
                      USER_STATUSES,
                      ENABLED_SHELLS,
                      ACCESS_TYPES,
@@ -999,6 +999,39 @@ def group_show(args: Namespace):
 @group_show.args()
 def _(parser: ArgParser):
     parser.add_argument('--short', action='store_true', help='Show short output')
+
+
+@site_args.apply()
+@commands.register('database', 'group', 'list',
+                   help='List groups')
+def group_list(args: Namespace):
+    console = Console()
+    output = []
+    global_groups = GlobalGroup.objects(type__in=args.types)
+    if args.site is not None:
+        output.extend([group.groupname for group in SiteGroup.objects(sitename=args.site, parent__in=global_groups)])
+    else:
+        output.extend([group.groupname for group in global_groups])
+    if args.format == 'yaml':
+        console.print(highlight_yaml(dumps_yaml(sorted(output))))
+    else:
+        console.print(' '.join(sorted(output)))
+
+
+@group_list.args()
+def _(parser: ArgParser):
+    parser.add_argument('--types',
+                        choices=list(GROUP_TYPES),
+                        nargs='+', 
+                        required=False, 
+                        default=['group'], 
+                        help='Filter groups by type')
+    parser.add_argument('--format',
+                        choices=['list','yaml'],
+                        required=False,
+                        default='list',
+                        help='Format output')
+
 
 @group_args.apply(required=True)
 @user_args.apply(required=True)
