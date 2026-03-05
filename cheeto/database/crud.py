@@ -366,6 +366,24 @@ def query_user_partitions(sitename: str, user: site_user_t):
     return dict(partitions)
 
 
+def query_group_qoses(sitename: str, group: site_group_t):
+    if type(group) is str:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=group)
+    qoses = set()
+    for assoc in SiteSlurmAssociation.objects(sitename=sitename, group=group):
+        qoses.add(assoc.qos)
+    return list(qoses)
+
+
+def query_group_partitions(sitename: str, group: site_group_t):
+    if type(group) is str:
+        group = SiteGroup.objects.get(sitename=sitename, groupname=group)
+    partitions = defaultdict(list)
+    for assoc in SiteSlurmAssociation.objects(sitename=sitename, group=group):
+        partitions[assoc.partition.partitionname].append(assoc.qos.qosname)
+    return dict(partitions)
+
+
 def query_user_sponsor_of(sitename: str, user: site_user_t):
     if type(user) is str:
         user = SiteUser.objects.get(sitename=sitename, username=user)

@@ -20,6 +20,8 @@ from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
+from cheeto.database.crud import query_group_partitions
+
 from ..config import IAMConfig
 from ..ldap import LDAPManager
 from ..database.user import DuplicateGlobalUser, DuplicateUser
@@ -35,7 +37,7 @@ from ..errors import ExitCode
 from ..git import GitRepo
 from ..log import Emotes, Console
 from ..puppet import  SiteData
-from ..types import (USER_TYPES,
+from ..types import (GROUP_TYPES, USER_TYPES,
                      USER_STATUSES,
                      ENABLED_SHELLS,
                      ACCESS_TYPES,
@@ -953,7 +955,7 @@ def group_new_cmd(args: Namespace):
     pass
 
 
-@arggroup('Group')
+@arggroup('group')
 def group_args(parser: ArgParser,
                required: bool = False,
                single: bool = False):
@@ -980,11 +982,55 @@ def group_show(args: Namespace):
         scope = 'Global' if args.site is None else args.site
         console.warn(f'Group {args.groups} with scope {scope} does not exist.')
     else:
-        output = group.pretty(formatters={'_sponsors': '{data.username} <{data.email}>'}, 
+        if args.short:
+            skip = ('id', 'sitename', 'iam_synced', 'ldap_synced', 'slurm')
+        else:
+            skip = ('id', 'sitename', 'iam_synced')
+        output = group._pretty(formatters={'_sponsors': '{data.username} <{data.email}>'}, 
                               lift=['parent'], 
-                              order=['groupname', 'gid', 'type', 'members', 'sponsors', 'sudoers', 'slurmers', 'slurm'], 
-                              skip=('id', 'sitename', 'iam_synced'))
-        console.print(highlight_yaml(output))
+                              order=['groupname', 'gid', 'type', 'ldap_synced', 'members', 'sponsors', 'sudoers', 'slurmers', 'slurm'], 
+                              skip=skip)
+        if args.site is not None and not args.short:
+            output['slurm']['partitions'] = query_group_partitions(args.site, group)
+            output['slurm']['qoses'] = [qos._pretty(skip=('sitename', )) for qos in query_group_qoses(args.site, group)]
+        console.print(highlight_yaml(dumps_yaml(output)))
+
+
+@group_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--short', action='store_true', help='Show short output')
+
+
+@site_args.apply()
+@commands.register('database', 'group', 'list',
+                   help='List groups')
+def group_list(args: Namespace):
+    console = Console()
+    output = []
+    global_groups = GlobalGroup.objects(type__in=args.types)
+    if args.site is not None:
+        output.extend([group.groupname for group in SiteGroup.objects(sitename=args.site, parent__in=global_groups)])
+    else:
+        output.extend([group.groupname for group in global_groups])
+    if args.format == 'yaml':
+        console.print(highlight_yaml(dumps_yaml(sorted(output))))
+    else:
+        console.print(' '.join(sorted(output)))
+
+
+@group_list.args()
+def _(parser: ArgParser):
+    parser.add_argument('--types',
+                        choices=list(GROUP_TYPES),
+                        nargs='+', 
+                        required=False, 
+                        default=['group'], 
+                        help='Filter groups by type')
+    parser.add_argument('--format',
+                        choices=['list','yaml'],
+                        required=False,
+                        default='list',
+                        help='Format output')
 
 
 @group_args.apply(required=True)
