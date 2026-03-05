@@ -86,6 +86,8 @@ from .crud import (
     handle_site_groups,
     create_group_from_sponsor,
     query_group_slurm_associations,
+    query_group_qoses,
+    query_group_partitions,
     query_user_groups,
     query_user_slurmership,
     query_user_sudogroups,
