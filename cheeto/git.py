@@ -37,7 +37,7 @@ class Git:
         """
         mkdir_cmd = sh.Command('mkdir').bake('-p', directory)
         yield mkdir_cmd
-        yield self.cmd.bake('init', _cwd=directory)
+        yield self.cmd.bake('init', '-b', 'main', _cwd=directory)
         yield self.cmd.bake('commit', '--allow-empty', '-m', 'Root commit')
 
     def checkout(self, branch: Optional[str] = '',
