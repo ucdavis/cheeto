@@ -173,14 +173,14 @@ class GitRepo:
         self.root = root
         self.lock_file = self.root / '.cheeto.lock'
         self.base_branch = base_branch
-        self.cmd = Git(working_dir=self.root.absolute())
+        self.git = Git(working_dir=self.root.absolute())
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def lock(self, timeout: int):
         return FileLock(self.lock_file, timeout=timeout)
 
     def create(self):
-        for cmd in self.cmd.create(self.root):
+        for cmd in self.git.create(self.root):
             cmd()
 
     @contextmanager
@@ -190,9 +190,9 @@ class GitRepo:
                timeout: int = 30):
 
         with self.lock(timeout) if lock else nullcontext():
-            yield self.cmd.add()
+            yield self.git.add()
             try:
-                self.cmd.commit(message)()
+                self.git.commit(message)()
             except sh.ErrorReturnCode_1: #type: ignore
                 raise GitEmptyCommitError('Nothing to commit.')
 
@@ -209,32 +209,32 @@ class GitRepo:
             working_branch, _ = branch_name_title()
 
         with self.lock(timeout):
-            self.cmd.checkout(self.base_branch)()
+            self.git.checkout(self.base_branch)()
 
             if clean:
-                self.cmd.clean(force=True, exclude=self.lock_file.name)()
-            self.cmd.pull()()
-            self.cmd.checkout(branch=working_branch, create=True)()
+                self.git.clean(force=True, exclude=self.lock_file.name)()
+            self.git.pull()()
+            self.git.checkout(branch=working_branch, create=True)()
 
             try:
                 with self.commit(message, lock=False) as add:
                     yield add
             except GitEmptyCommitError:
-                self.cmd.checkout(self.base_branch)()
+                self.git.checkout(self.base_branch)()
                 return
 
             if push_merge:
                 self.logger.info(f'Pushing and creating branch: {working_branch}.')
-                self.cmd.push(remote_create=working_branch)()
+                self.git.push(remote_create=working_branch)()
 
                 self.logger.info(f'merge {working_branch} into {self.base_branch}')
-                self.cmd.checkout(self.base_branch)()
-                self.cmd.merge(working_branch)()
+                self.git.checkout(self.base_branch)()
+                self.git.merge(working_branch)()
 
-                self.cmd.push()()
+                self.git.push()()
             else:
-                self.cmd.checkout(self.base_branch)()
+                self.git.checkout(self.base_branch)()
 
             if delete_branch:
                 self.logger.info(f'Deleting branch: {working_branch}.')
-                self.cmd.remove_branch(working_branch)()
+                self.git.remove_branch(working_branch)()
