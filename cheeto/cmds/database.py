@@ -1910,7 +1910,7 @@ def _(parser: ArgParser):
 def _create_user_from_iam(config: IAMConfig, username: str, email: str, comment: str):
     logger = logging.getLogger(__name__ )
 
-    api = IAMAPI(config.ucdiam)
+    api = IAMAPI(config)
     info_from_email = api.query_user_iamid_by_email(email)
     info_from_username = api.query_user_iamid(username)
     if info_from_email and info_from_username:
