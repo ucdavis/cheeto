@@ -54,6 +54,8 @@ class MongoConfig(BaseModel):
     tls: bool
     password: str
     database: str
+    tls_ca_file: Optional[str] = None
+
 
 
 @require_kwargs
