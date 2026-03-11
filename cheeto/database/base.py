@@ -205,10 +205,12 @@ def connect_to_database(config: MongoConfig, quiet: bool = False):
                        username=config.user,
                        password=config.password,
                        tls=config.tls,
+                       tlsCAFile=config.tls_ca_file,
                        uuidRepresentation='standard')
     else:
         return connect(config.database,
                        host=f'{config.uri}:{config.port}',
                        tls=config.tls,
+                       tlsCAFile=config.tls_ca_file,
                        uuidRepresentation='standard')
 

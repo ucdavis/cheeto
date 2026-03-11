@@ -797,7 +797,7 @@ def create_class_user(username: str,
                 fullname,
                 type='class',
                 password=password,
-                access=['login-ssh', 'compute-ssh'],
+                access=['login-ssh', 'slurm'],
                 sitenames=[sitename])
 
 
