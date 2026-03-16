@@ -17,14 +17,10 @@ from mongoengine import (BooleanField,
                          StringField,
                          CASCADE)
 
-from ..types import MOUNT_OPTS
+from ..constants import (MOUNT_OPTS)
 from ..yaml import dumps as dumps_yaml
-
-
-
 from .base import BaseDocument
-from .fields import (DataQuotaField,
-                     )
+from .fields import DataQuotaField
 from .user import GlobalUser
 from .group import GlobalGroup
 

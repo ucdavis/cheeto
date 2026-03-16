@@ -37,13 +37,13 @@ from ..puppet import (PuppetAccountMap,
                       PuppetUserRecord,
                       SlurmQOS as PuppetSlurmQOS,
                       SlurmQOSTRES as PuppetSlurmQOSTRES)
-from ..types import (DEFAULT_SHELL,
-                     DISABLED_SHELLS,
-                     MIN_CLASS_ID,
-                     MIN_LABGROUP_ID,
-                     MAX_LABGROUP_ID,
-                     GROUP_TYPES,
-                     SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access)
+from ..types import SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access
+from ..constants import (DEFAULT_SHELL,
+                         DISABLED_SHELLS,
+                         MIN_CLASS_ID,
+                         MIN_LABGROUP_ID,
+                         MAX_LABGROUP_ID,
+                         GROUP_TYPES)
 from ..yaml import dumps as dumps_yaml
 
 from .user import DuplicateGlobalUser, DuplicateSiteUser, NonExistentGlobalUser, NonExistentSiteUser

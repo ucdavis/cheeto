@@ -9,16 +9,16 @@
 
 from mongoengine import IntField, StringField
 
-from ..types import (DATA_QUOTA_REGEX,
-                     DEFAULT_SHELL,
-                     DISABLED_SHELLS, 
-                     ENABLED_SHELLS, 
-                     GROUP_TYPES,
-                     UINT_MAX,
-                     USER_TYPES,
-                     USER_STATUSES, 
-                     ACCESS_TYPES,
-                     SlurmQOSValidFlags)
+from ..constants import (DATA_QUOTA_REGEX,
+                         DEFAULT_SHELL,
+                         DISABLED_SHELLS, 
+                         ENABLED_SHELLS, 
+                         GROUP_TYPES,
+                         UINT_MAX,
+                         USER_TYPES,
+                         USER_STATUSES, 
+                         ACCESS_TYPES)
+from ..types import SlurmQOSValidFlags
 
 
 def POSIXNameField(**kwargs):

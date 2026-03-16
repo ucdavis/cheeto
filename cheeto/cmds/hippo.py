@@ -19,8 +19,8 @@ from ..hippoapi.api.action import action_sync_puppet_accounts
 from ..hippoapi.api.event_queue import event_queue_pending_events
 from ..hippo import (EventProcessor,
                      hippoapi_client,
-                     filter_events,
-                     HIPPO_EVENT_ACTIONS)
+                     filter_events)
+from ..constants import (HIPPO_EVENT_ACTIONS)
 from ..log import Console
 
 

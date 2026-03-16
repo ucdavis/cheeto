@@ -23,7 +23,8 @@ from mongoengine import (EmailField,
 from ..hippoapi.models import QueuedEventAccountModel
 from ..utils import make_ngrams
 from ..puppet import PuppetUserRecord
-from ..types import DEFAULT_SHELL, hippo_to_cheeto_access
+from ..types import hippo_to_cheeto_access
+from ..constants import DEFAULT_SHELL
 
 from .base import BaseDocument, handler, SyncQuerySet
 from .fields import (POSIXNameField,

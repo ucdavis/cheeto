@@ -28,10 +28,7 @@ from .types import *
 from .utils import (require_kwargs,
                     size_to_megs,
                     link_relative)
-
-
-MIN_PIGROUP_GID = 100_000_000
-MIN_SYSTEM_UID  = 4_000_000_000
+from .constants import MIN_PIGROUP_GID, MIN_SYSTEM_UID
 
 
 @require_kwargs

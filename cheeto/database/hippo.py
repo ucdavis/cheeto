@@ -13,7 +13,8 @@ from mongoengine import (DictField,
                          DateTimeField)
 
 from ..hippoapi.models import QueuedEventModel
-from ..types import HIPPO_EVENT_ACTIONS, HIPPO_EVENT_STATUSES
+from ..constants import (HIPPO_EVENT_ACTIONS, 
+                         HIPPO_EVENT_STATUSES)
 
 from .base import BaseDocument
 

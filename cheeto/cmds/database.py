@@ -37,13 +37,13 @@ from ..errors import ExitCode
 from ..git import GitRepo
 from ..log import Emotes, Console
 from ..puppet import  SiteData
-from ..types import (GROUP_TYPES, USER_TYPES,
-                     USER_STATUSES,
-                     ENABLED_SHELLS,
-                     ACCESS_TYPES,
-                     QOS_TRES_REGEX,
-                     DATA_QUOTA_REGEX,
-                     parse_qos_tres)
+from ..constants import (GROUP_TYPES, USER_TYPES,
+                         USER_STATUSES,
+                         ENABLED_SHELLS,
+                         ACCESS_TYPES,
+                         QOS_TRES_REGEX,
+                         DATA_QUOTA_REGEX)
+from ..types import parse_qos_tres
 from ..utils import slugify, removed, make_ngrams
 from ..yaml import highlight_yaml, parse_yaml, puppet_merge, dumps as dumps_yaml
 
