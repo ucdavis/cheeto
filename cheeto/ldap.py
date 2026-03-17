@@ -22,7 +22,8 @@ from marshmallow import post_load
 from marshmallow_dataclass import dataclass
 
 from .config import LDAPConfig
-from .types import DEFAULT_SHELL, BaseModel, KerberosID, LinuxGID, LinuxUID, SEQUENCE_FIELDS, is_listlike
+from .types import BaseModel, KerberosID, LinuxGID, LinuxUID, SEQUENCE_FIELDS, is_listlike
+from .constants import DEFAULT_SHELL
 from .utils import require_kwargs
 
 

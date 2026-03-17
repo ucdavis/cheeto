@@ -37,13 +37,13 @@ from ..puppet import (PuppetAccountMap,
                       PuppetUserRecord,
                       SlurmQOS as PuppetSlurmQOS,
                       SlurmQOSTRES as PuppetSlurmQOSTRES)
-from ..types import (DEFAULT_SHELL,
-                     DISABLED_SHELLS,
-                     MIN_CLASS_ID,
-                     MIN_LABGROUP_ID,
-                     MAX_LABGROUP_ID,
-                     GROUP_TYPES,
-                     SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access)
+from ..types import SlurmAccount as SlurmAccountTuple, hippo_to_cheeto_access
+from ..constants import (DEFAULT_SHELL,
+                         DISABLED_SHELLS,
+                         MIN_CLASS_ID,
+                         MIN_LABGROUP_ID,
+                         MAX_LABGROUP_ID,
+                         GROUP_TYPES, MIN_SHARED_UID)
 from ..yaml import dumps as dumps_yaml
 
 from .user import DuplicateGlobalUser, DuplicateSiteUser, NonExistentGlobalUser, NonExistentSiteUser
@@ -596,6 +596,17 @@ def get_next_lab_id() -> int:
         return max(ids) + 1
 
 
+def get_next_shared_id() -> int:
+    ids = set((u.uid for u in GlobalUser.objects(uid__gte=MIN_SHARED_UID, 
+                                                 uid__lt=MIN_SHARED_UID+100000000))) \
+        | set((g.gid for g in GlobalGroup.objects(gid__gte=MIN_SHARED_UID, 
+                                                  gid__lt=MIN_SHARED_UID+100000000)))
+    if not ids:
+        return MIN_SHARED_UID
+    else:
+        return max(ids) + 1
+
+
 def create_home_storage(sitename: str,
                         user: global_user_t,
                         source: NFSMountSource | None = None):
@@ -776,13 +787,34 @@ def create_system_user(username: str,
                        fullname: str,
                        password: str | None = None):
     uid = get_next_system_id()
-    create_user(username,
+    user, group = create_user(username,
                 email,
                 uid,
                 fullname,
                 type='system',
                 password=password,
                 access=['login-ssh', 'compute-ssh'])
+
+    return user, group
+
+
+def create_shared_user(username: str,
+                       email: str,
+                       fullname: str,
+                       owner: GlobalUser,
+                       password: str | None = None,
+                       sitenames: list[str] | None = None):
+    uid = get_next_shared_id()
+    user, group = create_user(username,
+                email,
+                uid,
+                fullname,
+                type='shared',
+                password=password,
+                access=['login-ssh', 'slurm'],
+                sitenames=sitenames)
+    add_user_comment(user.username, f'owner={owner.username}')
+    return user, group
 
 
 def create_class_user(username: str,
@@ -791,7 +823,7 @@ def create_class_user(username: str,
                       password: str | None = None,
                       sitename: str | None = None):
     uid = get_next_class_id()
-    create_user(username,
+    user, group = create_user(username,
                 email,
                 uid,
                 fullname,
@@ -799,6 +831,8 @@ def create_class_user(username: str,
                 password=password,
                 access=['login-ssh', 'slurm'],
                 sitenames=[sitename])
+
+    return user, group
 
 
 def create_group(groupname: str,
