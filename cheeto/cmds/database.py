@@ -20,8 +20,6 @@ from mongoengine import NotUniqueError, DoesNotExist
 from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
-from cheeto.database.crud import query_group_partitions
-
 from ..config import IAMConfig
 from ..ldap import LDAPManager
 from ..database.user import DuplicateGlobalUser, DuplicateUser
@@ -733,6 +731,41 @@ def user_new_system(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--email', default='hpc-help@ucdavis.edu')
     parser.add_argument('--fullname', help='Default: "HPCCF $username"')
+    parser.add_argument('--password', action='store_true', default=False,
+                        help='Generate a password for the new user')
+    parser.add_argument('username')
+
+
+@site_args.apply(required=True, single=False)
+@commands.register('database', 'user', 'new', 'shared',
+                   help='Create a new shared user within the shared ID range on the provided sites')
+def user_new_shared(args: Namespace):
+    stderr = Console()
+
+    owner = query_user(username=args.owner)
+    if owner is None:
+        stderr.print(f'[red] Owner {args.owner} does not exist.')
+        return ExitCode.DOES_NOT_EXIST
+
+    fullname = owner.fullname
+    email = owner.email
+
+    password = None
+    if args.password:
+        password = generate_password()
+    user, _ = create_shared_user(args.username, email, fullname, owner, password=password, sitenames=args.site)
+    for site in args.site:
+        create_home_storage(site, user)
+    if password is not None:
+        stderr.print(f'Password: {password}')
+        stderr.print('[red] Make sure to save this password!')
+    stderr.success(f'Created shared user {args.username} with owner {owner.username} on {args.site}')
+    stderr.print(highlight_yaml(dumps_yaml(_show_user(user, verbose=True))))
+
+
+@user_new_shared.args()
+def _(parser: ArgParser):
+    parser.add_argument('--owner', required=True)
     parser.add_argument('--password', action='store_true', default=False,
                         help='Generate a password for the new user')
     parser.add_argument('username')

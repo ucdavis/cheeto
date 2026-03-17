@@ -9,7 +9,8 @@
 
 
 MIN_PIGROUP_GID = 100_000_000
-MIN_SYSTEM_UID  = 4_000_000_000
+
+MIN_SHARED_UID = 2_000_000_000
 
 UINT_MAX = 4_294_967_296
 
@@ -17,6 +18,8 @@ MIN_CLASS_ID = 3_000_000_000
 
 MIN_LABGROUP_ID = 3_900_000_000
 MAX_LABGROUP_ID = 3_910_000_000
+
+MIN_SYSTEM_UID  = 4_000_000_000
 
 DATA_QUOTA_REGEX = r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'
 
@@ -48,7 +51,8 @@ USER_TYPES = {
     'user',
     'admin',
     'system',
-    'class'
+    'class',
+    'shared'
 }
 
 GROUP_TYPES = {

@@ -123,6 +123,7 @@ from .crud import (
     create_user_from_hippo,
     create_system_user,
     create_class_user,
+    create_shared_user,
     create_group,
     create_system_group,
     create_class_group,
