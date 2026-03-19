@@ -30,7 +30,7 @@ poetry-bumpversion = "^0.3.3"
 [tool.poetry_bumpversion.file."cheeto/__init__.py"]
 
 [tool.poetry.dependencies]
-python = "^3.12"
+python = ">=3.12,<3.14"
 rich = "^13.9.2"
 ruamel-yaml = "^0.17.21"
 marshmallow-dataclass = {extras = ["union"], version = "^8.7.1"}
@@ -53,6 +53,7 @@ xkcdpass = "^1.19.9"
 ponderosa = "^0.5.1"
 marko = "^2.1.2"
 ipython = "^8.26.0"
+beanie = "^2.0.1"
 
 [build-system]
 requires = ["poetry-core"]
