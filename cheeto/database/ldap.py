@@ -141,8 +141,7 @@ def ldap_sync_globaluser(user: GlobalUser, mgr: LDAPManager, force: bool = False
 
 def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
     logger = logging.getLogger(__name__)
-    console = Console()
-    console.info(f'ldap_sync_siteuser: {user.username} {user.status}')
+    logger.info(f'ldap_sync_siteuser: {user.username} {user.status}')
     if not force and (user.ldap_synced and user.parent.ldap_synced):
         logger.info(f'SiteUser {user.username} does not need to be synced.')
         return
@@ -150,23 +149,26 @@ def ldap_sync_siteuser(user: SiteUser, mgr: LDAPManager, force: bool = False):
     if not mgr.user_exists(user.username):
         ldap_sync_globaluser(user.parent, mgr, force=force)
 
-    ldap_groups = mgr.query_user_memberships(user.username, user.sitename)
-    console.info(f'ldap_groups: {ldap_groups}')
+    current_ldap_groups = mgr.query_user_memberships(user.username, user.sitename)
+    special_groups = set(mgr.config.user_access_groups.values()) | set(mgr.config.user_status_groups.values())
+    current_special_groups = current_ldap_groups & special_groups
+    logger.info(f'current_special_groups: {current_special_groups}')
+    expected_special_groups = set()
     for status, groupname in mgr.config.user_status_groups.items():
-        if status == user.status and groupname not in ldap_groups:
-            logger.info(f'add status {status} for {user.username}')
-            mgr.add_user_to_group(user.username, groupname, user.sitename)
-        if status != user.status and groupname in ldap_groups:
-            logger.info(f'remove status {status} for {user.username}')
-            mgr.remove_users_from_group([user.username], groupname, user.sitename)
-
+        if status == user.status:
+            expected_special_groups.add(groupname)
     for access, groupname in mgr.config.user_access_groups.items():
-        if access in user.access and groupname not in ldap_groups:
-            logger.info(f'add access {access} for {user.username}')
-            mgr.add_user_to_group(user.username, groupname, user.sitename)
-        if access not in user.access and groupname in ldap_groups:
-            logger.info(f'remove access {access} for {user.username}')
-            mgr.remove_users_from_group([user.username], groupname, user.sitename)
+        if access in user.access:
+            expected_special_groups.add(groupname)
+    logger.info(f'expected_special_groups: {expected_special_groups}')
+    to_add = expected_special_groups - current_special_groups
+    to_remove = current_special_groups - expected_special_groups
+    for groupname in to_add:
+        logger.info(f'add {groupname} for {user.username}')
+        mgr.add_user_to_group(user.username, groupname, user.sitename)
+    for groupname in to_remove:
+        logger.info(f'remove {groupname} for {user.username}')
+        mgr.remove_users_from_group(user.username, groupname, user.sitename)
 
     if user.type == 'system':
         keys = list(set(query_admin_keys(sitename=user.sitename) + user.ssh_key)) #type: ignore
