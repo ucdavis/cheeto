@@ -17,11 +17,14 @@ from rich.logging import RichHandler
 
 def setup(log_file: TextIO,
           level=logging.INFO):
+    console_args = {'file': log_file}
+    if not _Console().is_terminal:
+        console_args['width'] = 180
     logging.basicConfig(
         level=level,
         format='%(funcName)s: %(message)s',
         datefmt="[%x %X]",
-        handlers=[RichHandler(console=Console(file=log_file))]
+        handlers=[RichHandler(console=Console(**console_args))]
     )
 
 

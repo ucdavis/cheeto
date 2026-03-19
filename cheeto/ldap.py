@@ -378,7 +378,7 @@ class LDAPManager:
         try:
             group_entry.memberUid -= usernames
         except Exception as e:
-            self.logger.error(f'Failed to remove {usernames} from {group_entry.dn}: {e}')
+            self.logger.error(f'Failed to remove {usernames} from {group_entry.entry_dn}: {e}')
         status = group_entry.entry_commit_changes()
         if status is False and group_entry.entry_status == STATUS_PENDING_CHANGES:
             raise LDAPCommitFailed(f'Could not remove {usernames} from {group_entry.entry_dn}: {group_entry}')
