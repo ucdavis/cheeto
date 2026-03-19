@@ -395,9 +395,9 @@ def query_user_sponsor_of(sitename: str, user: site_user_t):
 def query_admin_keys(sitename: Optional[str] = None):
     if sitename is not None:
         query = SiteUser.objects(sitename=sitename,
-                                 parent__in=GlobalUser.objects(type='admin'))
+                                 parent__in=GlobalUser.objects(type='admin', status='active'))
     else:
-        query = GlobalUser.objects(type='admin')
+        query = GlobalUser.objects(type='admin', status='active')
     
     keys = []
     for user in query:
