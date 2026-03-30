@@ -290,7 +290,8 @@ def create_group_from_sponsor(sponsor_user: SiteUser, base_uid: int | None = Non
             site_group = SiteGroup(groupname=groupname,
                                    sitename=sponsor_user.sitename,
                                    parent=global_group,
-                                   _members=[sponsor_user])
+                                   _members=[sponsor_user],
+                                   _sponsors=[sponsor_user])
             site_group.save()
             logger.info(f'Created SiteGroup {groupname} for sponsor {sponsor_user.username}: {site_group.to_dict()}')
         else:
