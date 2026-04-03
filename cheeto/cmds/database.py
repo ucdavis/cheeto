@@ -1267,21 +1267,11 @@ def cmd_group_new_lab(args: Namespace):
 @site_args.apply(required=True)
 @user_args.apply(required=True, single=True)
 @commands.register('database', 'group', 'new', 'sponsor',
-                   help='Create a new sponsor group from a user\'s IAM entry')
+                   help='Create a new sponsor group from a user')
 def cmd_group_new_sponsor(args: Namespace):
     console = Console()
     user : SiteUser = query_user(username=args.user, sitename=args.site)
-
-    try:
-        sync_user_iam(user.parent, api=IAMAPI(args.config.ucdiam))
-    except Exception as e:
-        console.error(f'Error syncing user {user.username}: {e}')
-        return ExitCode.DOES_NOT_EXIST
-    if not user.parent.iam_synced:
-        console.error(f'User {user.username} does not have an IAM entry.')
-        return ExitCode.DOES_NOT_EXIST
-
-    group : SiteGroup = create_group_from_sponsor(user, base_uid=user.parent.iam_id)
+    group : SiteGroup = create_group_from_sponsor(user)
     console.print(dumps_yaml(group._pretty()))
 
 
