@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 12.03.2026
 
+from typing import Final
 
 MIN_PIGROUP_GID = 100_000_000
 
@@ -32,71 +33,73 @@ QOS_TRES_REGEX = (
 
 DEFAULT_SHELL = '/usr/bin/bash'
 
-ENABLED_SHELLS = {
+ENABLED_SHELLS : Final = (
     "/bin/sh",
     "/bin/bash",
     "/bin/zsh",
     "/usr/bin/sh",
     "/usr/bin/zsh",
     "/usr/bin/bash"
-}
+)
 
-DISABLED_SHELLS = {
+DISABLED_SHELLS : Final = (
     "/usr/sbin/nologin-account-disabled",
     "/bin/false",
     "/usr/sbin/nologin"
-}
+)
 
-USER_TYPES = {
+SHELLS : Final = ENABLED_SHELLS + DISABLED_SHELLS
+
+USER_TYPES : Final = (
     'user',
     'admin',
     'system',
     'class',
     'shared'
-}
+)
 
-GROUP_TYPES = {
+GROUP_TYPES : Final = (
     'user',
     'access',
     'system',
     'group',
     'admin',
     'class'
-}
+)
 
-USER_STATUSES = {
+USER_STATUSES : Final = (
     'active',
     'inactive',
     'disabled'
-}
+)
 
-ACCESS_TYPES = {
+ACCESS_TYPES : Final = (
     'login-ssh',
     'ondemand',
     'compute-ssh',
     'root-ssh',
     'sudo',
     'slurm'
-}
+)
 
 
-HIPPO_EVENT_ACTIONS = {
+HIPPO_EVENT_ACTIONS : Final = (
     'CreateAccount',
     'AddAccountToGroup',
     'UpdateSshKey',
     'RemoveAccountFromGroup',
     'CreateGroup'
-}
+    )
 
 
-HIPPO_EVENT_STATUSES = {
+HIPPO_EVENT_STATUSES : Final = (
     'Pending',
     'Complete',
     'Failed',
     'Canceled'
-}
+)
 
-MOUNT_OPTS = {
+MOUNT_OPTS : Final = (
     # General Mount Options
     "async",          # All I/O to the file system should be done asynchronously
     "atime",          # Update inode access times for each access
@@ -190,5 +193,5 @@ MOUNT_OPTS = {
     "fstype",
     "ac",
     "noac"
-}
+)
 
