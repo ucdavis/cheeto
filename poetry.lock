@@ -14,14 +14,14 @@ files = [
 
 [[package]]
 name = "anyio"
-version = "4.12.1"
+version = "4.13.0"
 description = "High-level concurrency and networking framework on top of asyncio or Trio"
 optional = false
-python-versions = ">=3.9"
+python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "anyio-4.12.1-py3-none-any.whl", hash = "sha256:d405828884fc140aa80a3c667b8beed277f1dfedec42ba031bd6ac3db606ab6c"},
-    {file = "anyio-4.12.1.tar.gz", hash = "sha256:41cfcc3a4c85d3f05c932da7c26d0201ac36f72abd4435ba90d0464a3ffed703"},
+    {file = "anyio-4.13.0-py3-none-any.whl", hash = "sha256:08b310f9e24a9594186fd75b4f73f4a4152069e3853f1ed8bfbf58369f4ad708"},
+    {file = "anyio-4.13.0.tar.gz", hash = "sha256:334b70e641fd2221c1505b3890c69882fe4a2df910cba14d97019b90b24439dc"},
 ]
 
 [package.dependencies]
@@ -29,7 +29,7 @@ idna = ">=2.8"
 typing_extensions = {version = ">=4.5", markers = "python_version < \"3.13\""}
 
 [package.extras]
-trio = ["trio (>=0.31.0)", "trio (>=0.32.0)"]
+trio = ["trio (>=0.32.0)"]
 
 [[package]]
 name = "asttokens"
@@ -69,20 +69,20 @@ tests-mypy = ["mypy (>=1.11.1)", "pytest-mypy-plugins"]
 
 [[package]]
 name = "beanie"
-version = "2.0.1"
+version = "2.1.0"
 description = "Asynchronous Python ODM for MongoDB"
 optional = false
-python-versions = "<3.14,>=3.9"
+python-versions = "<3.14,>=3.10"
 groups = ["main"]
 files = [
-    {file = "beanie-2.0.1-py3-none-any.whl", hash = "sha256:3aad6cc0e40fb8d256a0a3fdeca92a7b3d3c1f9f47ff377c9ecd2221285e1009"},
-    {file = "beanie-2.0.1.tar.gz", hash = "sha256:aad0365cba578f5686446ed0960ead140a2231cbbfa8d492220f712c5e0c06b4"},
+    {file = "beanie-2.1.0-py3-none-any.whl", hash = "sha256:077381dad0e0129fd4dc38cdaa3d85cb517da7338e3d893a689314884df4379b"},
+    {file = "beanie-2.1.0.tar.gz", hash = "sha256:44f3c50710aa90daa9c9c40f9bf9c8954968fe16d7e5398c1f2fd462daf94fe1"},
 ]
 
 [package.dependencies]
 click = ">=7"
 lazy-model = ">=0.4.0,<1.0.0"
-pydantic = ">=1.10.18,<3.0"
+pydantic = ">=2.4,<3.0"
 pymongo = ">=4.11.0,<4.15.0 || >4.15.0,<5.0.0"
 typing-extensions = ">=4.7"
 
@@ -95,7 +95,7 @@ gssapi = ["pymongo[gssapi] (>=4.11.0,!=4.15.0,<5.0.0)"]
 ocsp = ["pymongo[ocsp] (>=4.11.0,!=4.15.0,<5.0.0)"]
 queue = ["beanie-batteries-queue (>=0.2)"]
 snappy = ["pymongo[snappy] (>=4.11.0,!=4.15.0,<5.0.0)"]
-test = ["asgi-lifespan (>=1.0.1)", "dnspython (>=2.1.0)", "fastapi (>=0.100)", "httpx (>=0.23.0)", "pre-commit (>=3.5.0)", "pydantic-extra-types (>=2)", "pydantic-settings (>=2)", "pydantic[email]", "pyright (>=0)", "pytest (>=8.3.3)", "pytest-asyncio (>=0.24.0)", "pytest-cov (>=5.0.0)"]
+test = ["asgi-lifespan (>=1.0.1)", "dnspython (>=2.1.0)", "fastapi (<0.130.0)", "httpx (>=0.23.0)", "pre-commit (>=3.5.0)", "pydantic-extra-types (>=2)", "pydantic-settings (>=2)", "pydantic[email]", "pyright (>=0)", "pytest (>=9.0.0)", "pytest-asyncio (>=1.3.0)", "pytest-cov (>=7.0.0)", "ruff (==0.14.14)", "time-machine (>=3.2.0)"]
 zstd = ["pymongo[zstd] (>=4.11.0,!=4.15.0,<5.0.0)"]
 
 [[package]]
@@ -221,14 +221,14 @@ pycparser = {version = "*", markers = "implementation_name != \"PyPy\""}
 
 [[package]]
 name = "click"
-version = "8.3.1"
+version = "8.3.2"
 description = "Composable command line interface toolkit"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "click-8.3.1-py3-none-any.whl", hash = "sha256:981153a64e25f12d547d3426c367a4857371575ee7ad18df2a6183ab0545b2a6"},
-    {file = "click-8.3.1.tar.gz", hash = "sha256:12ff4785d337a1bb490bb7e9c2b1ee5da3112e94a8622f26a6c77f5d2fc6842a"},
+    {file = "click-8.3.2-py3-none-any.whl", hash = "sha256:1924d2c27c5653561cd2cae4548d1406039cb79b858b747cfea24924bbc1616d"},
+    {file = "click-8.3.2.tar.gz", hash = "sha256:14162b8b3b3550a7d479eafa77dfd3c38d9dc8951f6f69c78913a8f9a7540fd5"},
 ]
 
 [package.dependencies]
@@ -317,14 +317,14 @@ tests = ["pytest", "pytest-cov"]
 
 [[package]]
 name = "filelock"
-version = "3.24.3"
+version = "3.25.2"
 description = "A platform independent file lock."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "filelock-3.24.3-py3-none-any.whl", hash = "sha256:426e9a4660391f7f8a810d71b0555bce9008b0a1cc342ab1f6947d37639e002d"},
-    {file = "filelock-3.24.3.tar.gz", hash = "sha256:011a5644dc937c22699943ebbfc46e969cdde3e171470a6e40b9533e5a72affa"},
+    {file = "filelock-3.25.2-py3-none-any.whl", hash = "sha256:ca8afb0da15f229774c9ad1b455ed96e85a81373065fb10446672f64444ddf70"},
+    {file = "filelock-3.25.2.tar.gz", hash = "sha256:b64ece2b38f4ca29dd3e810287aa8c48182bbecd1ae6e9ae126c9b35f1382694"},
 ]
 
 [[package]]
@@ -446,14 +446,14 @@ files = [
 
 [[package]]
 name = "ipython"
-version = "8.38.0"
+version = "8.39.0"
 description = "IPython: Productive Interactive Computing"
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "ipython-8.38.0-py3-none-any.whl", hash = "sha256:750162629d800ac65bb3b543a14e7a74b0e88063eac9b92124d4b2aa3f6d8e86"},
-    {file = "ipython-8.38.0.tar.gz", hash = "sha256:9cfea8c903ce0867cc2f23199ed8545eb741f3a69420bfcf3743ad1cec856d39"},
+    {file = "ipython-8.39.0-py3-none-any.whl", hash = "sha256:bb3c51c4fa8148ab1dea07a79584d1c854e234ea44aa1283bcb37bc75054651f"},
+    {file = "ipython-8.39.0.tar.gz", hash = "sha256:4110ae96012c379b8b6db898a07e186c40a2a1ef5d57a7fa83166047d9da7624"},
 ]
 
 [package.dependencies]
@@ -696,20 +696,15 @@ files = [
 
 [[package]]
 name = "marshmallow"
-version = "4.2.2"
+version = "4.3.0"
 description = "A lightweight library for converting complex datatypes to and from native Python datatypes."
 optional = false
 python-versions = ">=3.10"
 groups = ["main"]
 files = [
-    {file = "marshmallow-4.2.2-py3-none-any.whl", hash = "sha256:084a9466111b7ec7183ca3a65aed758739af919fedc5ebdab60fb39d6b4dc121"},
-    {file = "marshmallow-4.2.2.tar.gz", hash = "sha256:ba40340683a2d1c15103647994ff2f6bc2c8c80da01904cbe5d96ee4baa78d9f"},
+    {file = "marshmallow-4.3.0-py3-none-any.whl", hash = "sha256:46c4fe6984707e3cbd485dfebbf0a59874f58d695aad05c1668d15e8c6e13b46"},
+    {file = "marshmallow-4.3.0.tar.gz", hash = "sha256:fb43c53b3fe240b8f6af37223d6ef1636f927ad9bea8ab323afad95dff090880"},
 ]
-
-[package.extras]
-dev = ["marshmallow[tests]", "pre-commit (>=3.5,<5.0)", "tox"]
-docs = ["autodocsumm (==0.2.14)", "furo (==2025.12.19)", "sphinx (==8.2.3)", "sphinx-copybutton (==0.5.2)", "sphinx-issues (==5.0.1)", "sphinxext-opengraph (==0.13.0)"]
-tests = ["pytest", "simplejson"]
 
 [[package]]
 name = "marshmallow-dataclass"
@@ -893,14 +888,14 @@ testing = ["coverage", "pytest", "pytest-benchmark"]
 
 [[package]]
 name = "ponderosa"
-version = "0.5.1"
+version = "0.6.0"
 description = ""
 optional = false
 python-versions = "<4.0,>=3.12"
 groups = ["main"]
 files = [
-    {file = "ponderosa-0.5.1-py3-none-any.whl", hash = "sha256:4b9bfb0bcc6d8cfe548a59df7d2f6fa0de3e9a938707b883291cad1c334920f1"},
-    {file = "ponderosa-0.5.1.tar.gz", hash = "sha256:f7db0da29d6cf03f03bd8e788f02aae1c58b5540c6dbceeea7c401c076d8a8d0"},
+    {file = "ponderosa-0.6.0-py3-none-any.whl", hash = "sha256:ca6f60f134e1d0964d8ebd2a074f6344c4e8b07176511f303ec2b5ebe9705416"},
+    {file = "ponderosa-0.6.0.tar.gz", hash = "sha256:f2b1a61a9b419db570bc83bc6771f6add705bf6c7c835b3f74963e3478eb0efb"},
 ]
 
 [package.extras]
@@ -951,14 +946,14 @@ tests = ["pytest"]
 
 [[package]]
 name = "pyasn1"
-version = "0.6.2"
+version = "0.6.3"
 description = "Pure-Python implementation of ASN.1 types and DER/BER/CER codecs (X.208)"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "pyasn1-0.6.2-py3-none-any.whl", hash = "sha256:1eb26d860996a18e9b6ed05e7aae0e9fc21619fcee6af91cca9bad4fbea224bf"},
-    {file = "pyasn1-0.6.2.tar.gz", hash = "sha256:9b59a2b25ba7e4f8197db7686c09fb33e658b98339fadb826e9512629017833b"},
+    {file = "pyasn1-0.6.3-py3-none-any.whl", hash = "sha256:a80184d120f0864a52a073acc6fc642847d0be408e7c7252f31390c0f4eadcde"},
+    {file = "pyasn1-0.6.3.tar.gz", hash = "sha256:697a8ecd6d98891189184ca1fa05d1bb00e2f84b5977c481452050549c8a72cf"},
 ]
 
 [[package]]
@@ -1215,14 +1210,14 @@ cffi = ">=1.0.0"
 
 [[package]]
 name = "pygments"
-version = "2.19.2"
+version = "2.20.0"
 description = "Pygments is a syntax highlighting package written in Python."
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["main", "dev"]
 files = [
-    {file = "pygments-2.19.2-py3-none-any.whl", hash = "sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b"},
-    {file = "pygments-2.19.2.tar.gz", hash = "sha256:636cb2477cec7f8952536970bc533bc43743542f70392ae026374600add5b887"},
+    {file = "pygments-2.20.0-py3-none-any.whl", hash = "sha256:81a9e26dd42fd28a23a2d169d86d7ac03b46e2f8b59ed4698fb4785f946d0176"},
+    {file = "pygments-2.20.0.tar.gz", hash = "sha256:6757cd03768053ff99f3039c1a36d6c0aa0b263438fcab17520b30a303a82b5f"},
 ]
 
 [package.extras]
@@ -1691,4 +1686,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "0515c917b3818b77502ca5574d64e69a1cd09500792d96a2fd8b89c4ee71dfb7"
+content-hash = "1243d17a6d0c8aa773c98429974c2c12251e2674895344a24c0ae2367958d91f"
