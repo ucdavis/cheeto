@@ -83,6 +83,32 @@ ACCESS_TYPES : Final = (
 )
 
 
+EMAIL_REGEX = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+STORAGE_TYPES : Final = (
+    'zfs',
+    'quobyte',
+)
+
+STORAGE_CATEGORIES : Final = (
+    'home',
+    'group',
+    'share',
+)
+
+SLURM_QOS_VALID_FLAGS : Final = (
+    'DenyOnLimit',
+    'EnforceUsageThreshold',
+    'NoDecay',
+    'NoReserve',
+    'OverPartQOS',
+    'PartitionMaxNodes',
+    'PartitionMinNodes',
+    'PartitionTimeLimit',
+    'RequiresReservation',
+    'UsageFactorSafe',
+)
+
 HIPPO_EVENT_ACTIONS : Final = (
     'CreateAccount',
     'AddAccountToGroup',

@@ -238,16 +238,8 @@ Shell = Annotated[str, mf.String(validate=mv.OneOf(ENABLED_SHELLS | DISABLED_SHE
 
 DataQuota = Annotated[str, mf.String(validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'))]
 
-SlurmQOSValidFlags = ("DenyOnLimit",
-                      "EnforceUsageThreshold",
-                      "NoDecay",
-                      "NoReserve",
-                      "OverPartQOS",
-                      "PartitionMaxNodes",
-                      "PartitionMinNodes",
-                      "PartitionTimeLimit",
-                      "RequiresReservation",
-                      "UsageFactorSafe")
+from .constants import SLURM_QOS_VALID_FLAGS
+SlurmQOSValidFlags = SLURM_QOS_VALID_FLAGS
 
 SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 
