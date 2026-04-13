@@ -14,4 +14,4 @@ class BaseDocument(Document):
 
     class Settings:
         use_state_management = True
-        is_root = True
+        is_root = False

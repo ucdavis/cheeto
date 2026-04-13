@@ -191,26 +191,53 @@ class SyncQuerySet(QuerySet):
         return super().update_one(*args, **kwargs)
 
 
-def connect_to_database(config: MongoConfig, quiet: bool = False):
+def _print_config(config: MongoConfig):
+    console = Console(stderr=True)
+    console.print(f'mongo config:')
+    console.print(f'  uri: [green]{config.uri}:{config.port}')
+    console.print(f'  user: [green]{config.user}')
+    console.print(f'  db: [green]{config.database}')
+    console.print(f'  tls: {config.tls}')
+
+
+def connect_mongoengine(config: MongoConfig, quiet: bool = False):
     if not quiet:
-        console = Console(stderr=True)
-        console.print(f'mongo config:')
-        console.print(f'  uri: [green]{config.uri}:{config.port}')
-        console.print(f'  user: [green]{config.user}')
-        console.print(f'  db: [green]{config.database}')
-        console.print(f'  tls: {config.tls}')
+        _print_config(config)
+    kwargs = dict(
+        host=f'{config.uri}:{config.port}',
+        tls=config.tls,
+        tlsCAFile=config.tls_ca_file,
+        uuidRepresentation='standard',
+    )
     if config.user:
-        return connect(config.database,
-                       host=f'{config.uri}:{config.port}',
-                       username=config.user,
-                       password=config.password,
-                       tls=config.tls,
-                       tlsCAFile=config.tls_ca_file,
-                       uuidRepresentation='standard')
+        kwargs.update(username=config.user, password=config.password)
+    return connect(config.database, **kwargs)
+
+
+async def connect_beanie(config: MongoConfig, quiet: bool = False):
+    from beanie import init_beanie
+    from pymongo import AsyncMongoClient
+
+    from ..models import ALL_MODELS
+
+    if not quiet:
+        _print_config(config)
+    kwargs = dict(
+        tls=config.tls,
+        tlsCAFile=config.tls_ca_file,
+    )
+    if config.user:
+        kwargs.update(username=config.user, password=config.password)
+    client = AsyncMongoClient(f'{config.uri}:{config.port}', **kwargs)
+    await init_beanie(database=client[config.database], document_models=ALL_MODELS)
+    return client
+
+
+async def connect_to_database(config: MongoConfig, quiet: bool = False, odm: str = 'mongoengine'):
+    if odm == 'mongoengine':
+        return connect_mongoengine(config, quiet=quiet)
+    elif odm == 'beanie':
+        return await connect_beanie(config, quiet=quiet)
     else:
-        return connect(config.database,
-                       host=f'{config.uri}:{config.port}',
-                       tls=config.tls,
-                       tlsCAFile=config.tls_ca_file,
-                       uuidRepresentation='standard')
+        raise ValueError(f'Unknown ODM: {odm}')
 

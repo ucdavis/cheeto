@@ -115,8 +115,8 @@ def get_config(config_path: Optional[pathlib.Path] = None,
         return None
     else:
         return Config(
-            ldap = config.ldap[profile],
-            mongo = config.mongo.get(profile, config.mongo[list(config.mongo.keys())[0]]),
+            ldap = config.ldap.get(profile, config.ldap['default']),
+            mongo = config.mongo.get(profile, config.mongo['default']),
             hippo = config.hippo,
             ucdiam = config.ucdiam
         )

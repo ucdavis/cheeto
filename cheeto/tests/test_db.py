@@ -11,7 +11,7 @@ from .conftest import drop_database, run_shell_cmd
 
 
 def test_connect_to_database(db_config):
-    conn = connect_to_database(db_config, quiet=True)
+    conn = connect_mongoengine(db_config, quiet=True)
     print(conn.server_info)
     # Should only have admin, local, and config databases
     assert len(list(conn.list_databases())) == 3

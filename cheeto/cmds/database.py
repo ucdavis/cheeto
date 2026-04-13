@@ -54,11 +54,12 @@ def database_cmd(args: Namespace):
 
 @database_cmd.args(common=True)
 def database_args(parser: ArgParser):
-    pass
+    parser.add_argument('--odm', choices=['mongoengine', 'beanie'], default='mongoengine',
+                        help='ODM backend to use for database connection')
 
 @database_args.postprocessor(priority=50)
-def _(args: Namespace):
-    args.db = connect_to_database(args.config.mongo, quiet=args.quiet)
+async def _(args: Namespace):
+    args.db = await connect_to_database(args.config.mongo, quiet=args.quiet, odm=args.odm)
 
 
 #########################################

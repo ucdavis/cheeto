@@ -18,7 +18,7 @@ import sh
 
 from . import commands
 from .database import site_args
-from ..database import (connect_to_database,
+from ..database import (connect_mongoengine,
                         slurm_association_state as build_db_association_state,
                         slurm_qos_state as build_db_qos_state)
 from ..errors import ExitCode
@@ -62,7 +62,7 @@ def sync(args: Namespace):
         if args.site is None:
             console.print('Must provide --site when source is db!')
             return ExitCode.BAD_CMDLINE_ARGS
-        connect_to_database(args.config.mongo)
+        connect_mongoengine(args.config.mongo)
         console.print(f'Sync slurm for site {args.site}')
         console.rule('Load association data')
         console.print('Load from mongodb...')

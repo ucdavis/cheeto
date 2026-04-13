@@ -10,7 +10,7 @@ from pymongo import MongoClient
 import pytest
 
 from ..config import get_config
-from ..database import connect_to_database
+from ..database import connect_mongoengine
 from ..log import setup as _setup_logging
 from ..types import is_listlike
 
@@ -206,7 +206,7 @@ def hippo_config(config):
 
 
 def drop_database(config):
-    conn = connect_to_database(config, quiet=True)
+    conn = connect_mongoengine(config, quiet=True)
     conn.drop_database(config.database)
 
 

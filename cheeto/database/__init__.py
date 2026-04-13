@@ -11,6 +11,8 @@ from mongoengine.context_managers import run_in_transaction
 
 from .base import (
     connect_to_database,
+    connect_mongoengine,
+    connect_beanie,
     SyncQuerySet,
     BaseDocument,
     handler
