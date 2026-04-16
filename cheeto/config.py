@@ -54,6 +54,7 @@ class MongoConfig(BaseModel):
     tls: bool
     password: str
     database: str
+    old_database: Optional[str] = None
     tls_ca_file: Optional[str] = None
 
 

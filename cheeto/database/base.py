@@ -211,7 +211,7 @@ def connect_mongoengine(config: MongoConfig, quiet: bool = False):
     )
     if config.user:
         kwargs.update(username=config.user, password=config.password)
-    return connect(config.database, **kwargs)
+    return connect(config.old_database or config.database, **kwargs)
 
 
 async def connect_beanie(config: MongoConfig, quiet: bool = False):

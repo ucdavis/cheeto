@@ -19,6 +19,7 @@ from .storage import (
     StorageAllocation,
 )
 from .user_site_info import UserSiteInfo
+from .history import History
 
 # Rebuild models to resolve forward references (BackLink/Link with string refs)
 User.model_rebuild()
@@ -37,4 +38,5 @@ ALL_MODELS = [
     SlurmAssociation,
     AutomountMap,
     Storage,
+    History,
 ]

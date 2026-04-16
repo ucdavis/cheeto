@@ -70,7 +70,8 @@ GROUP_TYPES : Final = (
 USER_STATUSES : Final = (
     'active',
     'inactive',
-    'disabled'
+    'disabled',
+    'offboarding'
 )
 
 ACCESS_TYPES : Final = (
