@@ -1,11 +1,15 @@
 from argparse import Namespace
 
 from ponderosa import ArgParser
+from rich.panel import Panel
+from rich.table import Table
 
 from .. import commands
 from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
 from ...log import Console
+from ...models.user import User
+from ...models.user_site_info import UserSiteInfo
 from ...operations import (
     AddUserAccess,
     AddUserComment,
@@ -19,6 +23,7 @@ from ...operations import (
     SetUserStatus,
     SetUserType,
 )
+from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import (
     email_args,
     fullname_args,
@@ -31,6 +36,96 @@ from ._args import (
 def _announce_password(console: Console, password: str) -> None:
     console.print(f'Password: [yellow]{password}[/]')
     console.print('[red]Save this password now \u2014 it will not be displayed again.[/]')
+
+
+def _user_to_dict(user: User,
+                  sites: list[UserSiteInfo] | None = None) -> dict:
+    data = {
+        'name': user.name,
+        'email': user.email,
+        'uid': user.uid,
+        'gid': user.gid,
+        'fullname': user.fullname,
+        'shell': user.shell,
+        'type': user.type,
+        'status': user.status,
+        'home_directory': user.home_directory,
+        'access': list(user.access),
+        'created_at': user.created_at,
+        'updated_at': user.updated_at,
+    }
+    if user.ssh_keys:
+        data['ssh_keys'] = [k.key for k in user.ssh_keys]
+    if user.comments:
+        data['comments'] = list(user.comments)
+    if user.iam is not None:
+        data['iam'] = {
+            'iam_id': user.iam.iam_id,
+            'mothra_id': user.iam.mothra_id,
+            'colleges': list(user.iam.colleges),
+        }
+    if sites is not None:
+        data['sites'] = [
+            {
+                'site': si.site.name,
+                'status': si.status,
+                'access': list(si.access),
+                'expiry': si.expiry,
+            }
+            for si in sites
+        ]
+    return data
+
+
+def _render_user_panel(data: dict) -> Panel:
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column(style='bold cyan', no_wrap=True)
+    table.add_column()
+
+    scalar_keys = ('name', 'email', 'uid', 'gid', 'fullname', 'shell',
+                   'type', 'status', 'home_directory',
+                   'created_at', 'updated_at')
+    for key in scalar_keys:
+        if key in data and data[key] is not None:
+            table.add_row(key, str(data[key]))
+
+    if data.get('access'):
+        table.add_row('access', ', '.join(data['access']))
+
+    if data.get('ssh_keys'):
+        table.add_row('ssh_keys', '\n'.join(data['ssh_keys']))
+
+    if data.get('comments'):
+        table.add_row('comments', '\n'.join(data['comments']))
+
+    if data.get('iam'):
+        iam = data['iam']
+        iam_str = (f'iam_id={iam["iam_id"]}, '
+                   f'mothra_id={iam["mothra_id"]}, '
+                   f'colleges={iam["colleges"]}')
+        table.add_row('iam', iam_str)
+
+    if 'sites' in data:
+        sites = data['sites']
+        if not sites:
+            table.add_row('sites', '[dim](none)[/]')
+        else:
+            sites_table = Table(box=None, pad_edge=False, padding=(0, 1))
+            sites_table.add_column('site', style='green')
+            sites_table.add_column('status', style='yellow')
+            sites_table.add_column('access')
+            sites_table.add_column('expiry', style='dim')
+            for s in sites:
+                sites_table.add_row(
+                    s['site'],
+                    s['status'],
+                    ', '.join(s['access']),
+                    str(s['expiry']) if s['expiry'] else '',
+                )
+            table.add_row('sites', sites_table)
+
+    return Panel(table, title=f'[bold]User:[/] [green]{data["name"]}[/]',
+                 border_style='green', expand=False)
 
 
 @commands.register('ng', 'user',
@@ -255,3 +350,34 @@ async def user_comment(args: Namespace):
 @user_comment.args()
 def _(parser: ArgParser):
     parser.add_argument('--comment', required=True)
+
+
+@user_args.apply(required=True)
+@commands.register('ng', 'user', 'show',
+                   help='Show user information')
+async def user_show(args: Namespace):
+    console = Console()
+    user = await User.find_one(User.name == args.user)
+    if user is None:
+        console.print(f'[red]User {args.user} not found[/]')
+        return 1
+
+    sites = None
+    if args.sites:
+        sites = await UserSiteInfo.find(
+            UserSiteInfo.user.id == user.id, fetch_links=True,
+        ).to_list()
+
+    data = _user_to_dict(user, sites=sites)
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml(data)))
+    else:
+        console.print(_render_user_panel(data))
+
+
+@user_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--sites', action='store_true', default=False,
+                        help='Include per-site information')
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')

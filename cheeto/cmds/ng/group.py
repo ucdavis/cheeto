@@ -1,10 +1,13 @@
 from argparse import Namespace
 
 from ponderosa import ArgParser
+from rich.panel import Panel
+from rich.table import Table
 
 from .. import commands
 from ...constants import GROUP_TYPES
 from ...log import Console
+from ...models.group import Group
 from ...operations import (
     AddGroupMember,
     AddGroupSponsor,
@@ -18,7 +21,41 @@ from ...operations import (
     RemoveGroupSponsor,
     RemoveGroupSudoer,
 )
+from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import group_args, user_args
+
+
+def _group_to_dict(group: Group) -> dict:
+    return {
+        'name': group.name,
+        'gid': group.gid,
+        'type': group.type,
+        'members': sorted(m.name for m in group.members),
+        'sponsors': sorted(s.name for s in group.sponsors),
+        'sudoers': sorted(s.name for s in group.sudoers),
+        'created_at': group.created_at,
+        'updated_at': group.updated_at,
+    }
+
+
+def _render_group_panel(data: dict) -> Panel:
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column(style='bold cyan', no_wrap=True)
+    table.add_column()
+
+    for key in ('name', 'gid', 'type', 'created_at', 'updated_at'):
+        if key in data and data[key] is not None:
+            table.add_row(key, str(data[key]))
+
+    for key in ('members', 'sponsors', 'sudoers'):
+        names = data.get(key) or []
+        if names:
+            table.add_row(key, '\n'.join(names))
+        else:
+            table.add_row(key, '[dim](none)[/]')
+
+    return Panel(table, title=f'[bold]Group:[/] [green]{data["name"]}[/]',
+                 border_style='green', expand=False)
 
 
 @commands.register('ng', 'group',
@@ -175,3 +212,26 @@ async def group_remove_sudoer(args: Namespace):
         group_name=args.group, user_name=args.user,
     )
     console.print(f'Removed [green]{args.user}[/] as sudoer of [green]{args.group}[/]')
+
+
+@group_args.apply(required=True)
+@commands.register('ng', 'group', 'show',
+                   help='Show group information')
+async def group_show(args: Namespace):
+    console = Console()
+    group = await Group.find_one(Group.name == args.group, fetch_links=True)
+    if group is None:
+        console.print(f'[red]Group {args.group} not found[/]')
+        return 1
+
+    data = _group_to_dict(group)
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml(data)))
+    else:
+        console.print(_render_group_panel(data))
+
+
+@group_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')

@@ -45,8 +45,8 @@ async def history_cmd(args: Namespace):
             if isinstance(entry.author, User):
                 author_name = entry.author.name
             else:
-                author_doc = await entry.fetch_link(History.author)
-                author_name = author_doc.name if author_doc else '?'
+                await entry.fetch_link(History.author)
+                author_name = entry.author.name if entry.author else '?'
 
         ts = entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         changes = ', '.join(f'{k}={v}' for k, v in entry.changes.items())
