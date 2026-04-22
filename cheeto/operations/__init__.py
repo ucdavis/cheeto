@@ -23,12 +23,29 @@ from .group import (
 )
 from .group_membership import (
     AddGroupMember,
+    AddGroupSlurmer,
     AddGroupSponsor,
     AddGroupSudoer,
     RemoveGroupMember,
+    RemoveGroupSlurmer,
     RemoveGroupSponsor,
     RemoveGroupSudoer,
 )
-from .slurm import CreateSlurmAssociation, CreateSlurmPartition, CreateSlurmQOS
+from .slurm import (
+    AddQOSAllocation,
+    CreateSlurmAssociation,
+    CreateSlurmPartition,
+    CreateSlurmQOS,
+    EditSlurmAllocation,
+)
 from .storage import CreateHomeStorage
-from .migrate import MigrateGroups, MigrateSites, MigrateUser, MigrateUsers
+from .migrate import (
+    MigrateGroups,
+    MigrateSites,
+    MigrateSlurmAccounts,
+    MigrateSlurmAssociations,
+    MigrateSlurmPartitions,
+    MigrateSlurmQOSes,
+    MigrateUser,
+    MigrateUsers,
+)

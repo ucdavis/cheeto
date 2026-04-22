@@ -23,6 +23,7 @@ class Group(BaseDocument):
     members: list[Link[User]] = Field(default_factory=list)
     sponsors: list[Link[User]] = Field(default_factory=list)
     sudoers: list[Link[User]] = Field(default_factory=list)
+    slurmers: list[Link[User]] = Field(default_factory=list)
 
     slurm: Optional[BackLink['SlurmAccount']] = Field(
         default=None,

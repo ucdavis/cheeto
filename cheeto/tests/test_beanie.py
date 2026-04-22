@@ -36,9 +36,12 @@ from ..models.storage import (
 from ..models.user_site_info import UserSiteInfo
 from ..operations import (
     AddGroupMember,
+    AddGroupSlurmer,
     AddGroupSponsor,
     AddGroupSudoer,
+    AddQOSAllocation,
     AddSiteUser,
+    EditSlurmAllocation,
     AddUserAccess,
     AddUserComment,
     CreateGroup,
@@ -328,6 +331,9 @@ class TestSlurmModels:
         )
         assert a.tres.cpus == 8
         assert a.comment == 'test'
+        # SlurmAllocation is now a Document — it has BaseDocument timestamps
+        assert a.created_at is not None
+        assert a.updated_at is not None
 
     async def test_storage_allocation_validation(self):
         a = StorageAllocation(quota='100G', comment='ok')
@@ -677,6 +683,17 @@ class TestGroupMembershipOps:
         )
         assert any(s.name == 'memuser' for s in fetched.sudoers)
 
+    async def test_add_slurmer(self, beanie_client, setup):
+        user, group = setup
+        await AddGroupSlurmer.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser',
+        )
+        fetched = await Group.find_one(
+            Group.name == 'memgroup', fetch_links=True,
+        )
+        assert any(s.name == 'memuser' for s in fetched.slurmers)
+
 
 class TestSlurmOps:
 
@@ -707,6 +724,98 @@ class TestSlurmOps:
         assert qos.name == 'normal'
         assert qos.priority == 100
         assert qos.flags == ['DenyOnLimit']
+
+    async def test_create_qos_with_allocations(self, beanie_client, site):
+        allocs = [
+            SlurmAllocation(tres=SlurmTRES(cpus=128), comment='initial'),
+            SlurmAllocation(tres=SlurmTRES(cpus=256), comment='expansion'),
+        ]
+        qos = await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qalloc', site_name='slurmsite',
+            group_limits=allocs,
+        )
+        # Allocations should have been inserted and received ids
+        for a in allocs:
+            assert a.id is not None
+
+        fetched = await SlurmQOS.find_one(
+            SlurmQOS.name == 'qalloc', fetch_links=True,
+        )
+        assert len(fetched.group_limits) == 2
+        cpu_counts = sorted(l.tres.cpus for l in fetched.group_limits)
+        assert cpu_counts == [128, 256]
+
+    async def test_add_qos_allocation(self, beanie_client, site):
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qadd', site_name='slurmsite',
+        )
+        alloc = await AddQOSAllocation.run(
+            beanie_client, None,
+            qos_name='qadd', site_name='slurmsite',
+            field='user_limits',
+            tres=SlurmTRES(cpus=32, mem='64G'),
+            comment='user cap',
+        )
+        assert alloc.id is not None
+
+        fetched = await SlurmQOS.find_one(
+            SlurmQOS.name == 'qadd', fetch_links=True,
+        )
+        assert len(fetched.user_limits) == 1
+        assert fetched.user_limits[0].tres.cpus == 32
+        assert fetched.user_limits[0].tres.mem == '64G'
+        assert fetched.user_limits[0].comment == 'user cap'
+
+    async def test_edit_slurm_allocation(self, beanie_client, site):
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qedit', site_name='slurmsite',
+        )
+        alloc = await AddQOSAllocation.run(
+            beanie_client, None,
+            qos_name='qedit', site_name='slurmsite',
+            field='group_limits',
+            tres=SlurmTRES(cpus=64),
+            comment='original',
+        )
+        updated = await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id),
+            tres=SlurmTRES(cpus=128, mem='1T'),
+            comment='doubled',
+        )
+        assert updated.tres.cpus == 128
+        assert updated.tres.mem == '1T'
+        assert updated.comment == 'doubled'
+        # created_at is preserved, updated_at is bumped
+        assert updated.updated_at >= updated.created_at
+
+    async def test_total_tres_sums_allocations(self, beanie_client, site):
+        from cheeto.queries.slurm import total_tres
+
+        # Empty list -> unlimited defaults
+        empty = total_tres([])
+        assert empty.cpus == -1
+        assert empty.gpus == -1
+        assert empty.mem is None
+
+        # Two allocations with overlapping fields
+        a1 = SlurmAllocation(tres=SlurmTRES(cpus=128, gpus=8, mem='1T'))
+        a2 = SlurmAllocation(tres=SlurmTRES(cpus=64, gpus=4, mem='512G'))
+        summed = total_tres([a1, a2])
+        assert summed.cpus == 192
+        assert summed.gpus == 12
+        # 1T + 512G = 1.5T
+        assert summed.mem == '1.5T'
+
+        # Partial default -> unlimited fields don't contribute
+        a3 = SlurmAllocation(tres=SlurmTRES(cpus=32))
+        partial = total_tres([a1, a3])
+        assert partial.cpus == 160
+        assert partial.gpus == 8           # only from a1
+        assert partial.mem == '1T'         # only from a1
 
 
 class TestHistoryTracking:

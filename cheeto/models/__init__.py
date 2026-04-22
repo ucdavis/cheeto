@@ -33,6 +33,7 @@ ALL_MODELS = [
     Group,
     UserSiteInfo,
     SlurmAccount,
+    SlurmAllocation,
     SlurmPartition,
     SlurmQOS,
     SlurmAssociation,

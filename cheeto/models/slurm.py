@@ -22,9 +22,12 @@ class SlurmTRES(BaseModel):
     mem: Annotated[str | None, Field(default=None, pattern=DATA_QUOTA_REGEX)]
 
 
-class SlurmAllocation(BaseModel):
+class SlurmAllocation(BaseDocument):
     tres: SlurmTRES = Field(default_factory=SlurmTRES)
     comment: str = ''
+
+    class Settings:
+        name = 'slurm_allocations'
 
 
 class SlurmAccountLimits(BaseModel):
@@ -67,9 +70,9 @@ class SlurmPartition(BaseDocument):
 class SlurmQOS(BaseDocument):
     name: Annotated[str, Field(min_length=1)]
     site: Link[Site]
-    group_limits: list[SlurmAllocation] = Field(default_factory=list)
-    user_limits: list[SlurmAllocation] = Field(default_factory=list)
-    job_limits: list[SlurmAllocation] = Field(default_factory=list)
+    group_limits: list[Link[SlurmAllocation]] = Field(default_factory=list)
+    user_limits: list[Link[SlurmAllocation]] = Field(default_factory=list)
+    job_limits: list[Link[SlurmAllocation]] = Field(default_factory=list)
     priority: int = 0
     flags: list[str] = Field(default_factory=lambda: ['DenyOnLimit'])
 

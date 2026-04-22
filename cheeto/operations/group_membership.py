@@ -11,9 +11,9 @@ from .base import Operation
 
 
 class _GroupMembershipOp(Operation):
-    """Base for add/remove member/sponsor/sudoer operations."""
+    """Base for add/remove member/sponsor/sudoer/slurmer operations."""
 
-    field: str  # 'members', 'sponsors', 'sudoers' — set by subclass
+    field: str  # 'members', 'sponsors', 'sudoers', 'slurmers' — set by subclass
 
     def __init__(
         self,
@@ -104,3 +104,13 @@ class AddGroupSudoer(_AddToGroup):
 class RemoveGroupSudoer(_RemoveFromGroup):
     op_name = 'remove_group_sudoer'
     field = 'sudoers'
+
+
+class AddGroupSlurmer(_AddToGroup):
+    op_name = 'add_group_slurmer'
+    field = 'slurmers'
+
+
+class RemoveGroupSlurmer(_RemoveFromGroup):
+    op_name = 'remove_group_slurmer'
+    field = 'slurmers'

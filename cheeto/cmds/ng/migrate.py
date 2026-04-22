@@ -5,7 +5,16 @@ from ponderosa import ArgParser
 from .. import commands
 from ...database import connect_mongoengine
 from ...log import Console
-from ...operations import MigrateGroups, MigrateSites, MigrateUser, MigrateUsers
+from ...operations import (
+    MigrateGroups,
+    MigrateSites,
+    MigrateSlurmAccounts,
+    MigrateSlurmAssociations,
+    MigrateSlurmPartitions,
+    MigrateSlurmQOSes,
+    MigrateUser,
+    MigrateUsers,
+)
 from ._args import user_args
 
 
@@ -61,8 +70,72 @@ async def migrate_groups(args: Namespace):
     console.print(f'Migrated [green]{len(groups)}[/] groups')
 
 
+@commands.register('ng', 'migrate', 'slurm',
+                   help='Migrate Slurm partitions, QOSes, accounts, and associations')
+def migrate_slurm_cmd(args: Namespace):
+    pass
+
+
+@commands.register('ng', 'migrate', 'slurm', 'partitions',
+                   help='Migrate all Slurm partitions')
+async def migrate_slurm_partitions(args: Namespace):
+    console = Console()
+    parts = await MigrateSlurmPartitions.run(args.db, args.author)
+    console.print(f'Migrated [green]{len(parts)}[/] Slurm partitions')
+
+
+@commands.register('ng', 'migrate', 'slurm', 'qoses',
+                   help='Migrate all Slurm QOSes (and create allocations)')
+async def migrate_slurm_qoses(args: Namespace):
+    console = Console()
+    qoses = await MigrateSlurmQOSes.run(args.db, args.author)
+    console.print(f'Migrated [green]{len(qoses)}[/] Slurm QOSes')
+
+
+@commands.register('ng', 'migrate', 'slurm', 'accounts',
+                   help='Migrate Slurm accounts for SiteGroups with Slurm data')
+async def migrate_slurm_accounts(args: Namespace):
+    console = Console()
+    accounts = await MigrateSlurmAccounts.run(args.db, args.author)
+    console.print(f'Migrated [green]{len(accounts)}[/] Slurm accounts')
+
+
+@commands.register('ng', 'migrate', 'slurm', 'associations',
+                   help='Migrate all Slurm associations')
+async def migrate_slurm_associations(args: Namespace):
+    console = Console()
+    assocs = await MigrateSlurmAssociations.run(args.db, args.author)
+    console.print(f'Migrated [green]{len(assocs)}[/] Slurm associations')
+
+
+async def _run_slurm_migrations(args: Namespace, console: Console) -> None:
+    console.rule('Migrating Slurm partitions')
+    parts = await MigrateSlurmPartitions.run(args.db, args.author)
+    console.print(f'  [green]{len(parts)}[/] partitions migrated')
+
+    console.rule('Migrating Slurm QOSes')
+    qoses = await MigrateSlurmQOSes.run(args.db, args.author)
+    console.print(f'  [green]{len(qoses)}[/] QOSes migrated')
+
+    console.rule('Migrating Slurm accounts')
+    accounts = await MigrateSlurmAccounts.run(args.db, args.author)
+    console.print(f'  [green]{len(accounts)}[/] accounts migrated')
+
+    console.rule('Migrating Slurm associations')
+    assocs = await MigrateSlurmAssociations.run(args.db, args.author)
+    console.print(f'  [green]{len(assocs)}[/] associations migrated')
+
+
+@commands.register('ng', 'migrate', 'slurm', 'all',
+                   help='Migrate all Slurm records (partitions, qoses, accounts, associations)')
+async def migrate_slurm_all(args: Namespace):
+    console = Console()
+    await _run_slurm_migrations(args, console)
+    console.rule('Slurm migration complete')
+
+
 @commands.register('ng', 'migrate', 'all',
-                   help='Migrate sites, users, and groups in order')
+                   help='Migrate sites, users, groups, and all Slurm records in order')
 async def migrate_all(args: Namespace):
     console = Console()
 
@@ -77,5 +150,7 @@ async def migrate_all(args: Namespace):
     console.rule('Migrating groups')
     groups = await MigrateGroups.run(args.db, args.author)
     console.print(f'  [green]{len(groups)}[/] groups migrated')
+
+    await _run_slurm_migrations(args, console)
 
     console.rule('Migration complete')

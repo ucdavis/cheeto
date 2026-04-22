@@ -8,6 +8,7 @@ from .. import commands
 from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
 from ...log import Console
+from ...models.site import Site
 from ...models.user import User
 from ...models.user_site_info import UserSiteInfo
 from ...operations import (
@@ -31,6 +32,7 @@ from ._args import (
     site_args,
     user_args,
 )
+from ._slurm_show import user_slurm_at_site
 
 
 def _announce_password(console: Console, password: str) -> None:
@@ -39,7 +41,8 @@ def _announce_password(console: Console, password: str) -> None:
 
 
 def _user_to_dict(user: User,
-                  sites: list[UserSiteInfo] | None = None) -> dict:
+                  site_info: dict | None = None,
+                  slurm_info: list[dict] | None = None) -> dict:
     data = {
         'name': user.name,
         'email': user.email,
@@ -64,17 +67,37 @@ def _user_to_dict(user: User,
             'mothra_id': user.iam.mothra_id,
             'colleges': list(user.iam.colleges),
         }
-    if sites is not None:
-        data['sites'] = [
-            {
-                'site': si.site.name,
-                'status': si.status,
-                'access': list(si.access),
-                'expiry': si.expiry,
-            }
-            for si in sites
-        ]
+    if site_info is not None:
+        data['site_info'] = site_info
+    if slurm_info is not None:
+        data['slurm_info'] = slurm_info
     return data
+
+
+def _render_user_slurm(slurm_info: list[dict]) -> Table:
+    table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column('group', style='green')
+    table.add_column('role', style='yellow')
+    table.add_column('partition', style='cyan')
+    table.add_column('qos', style='magenta')
+    table.add_column('priority', style='dim')
+    table.add_column('flags', style='dim')
+    table.add_column('total tres', style='bold')
+    for entry in slurm_info:
+        assocs = entry['slurm'].get('associations') or []
+        if not assocs:
+            table.add_row(entry['group'], entry['role'],
+                          '[dim](none)[/]', '', '', '', '')
+            continue
+        for a in assocs:
+            table.add_row(
+                entry['group'], entry['role'],
+                a['partition'], a['qos'],
+                str(a['qos_priority']),
+                ', '.join(a['qos_flags']),
+                a['qos_total_tres'],
+            )
+    return table
 
 
 def _render_user_panel(data: dict) -> Panel:
@@ -105,24 +128,21 @@ def _render_user_panel(data: dict) -> Panel:
                    f'colleges={iam["colleges"]}')
         table.add_row('iam', iam_str)
 
-    if 'sites' in data:
-        sites = data['sites']
-        if not sites:
-            table.add_row('sites', '[dim](none)[/]')
+    if 'site_info' in data:
+        si = data['site_info']
+        si_str = (
+            f'site={si["site"]}, status={si["status"]}, '
+            f'access={", ".join(si["access"])}'
+            + (f', expiry={si["expiry"]}' if si.get('expiry') else '')
+        )
+        table.add_row('at site', si_str)
+
+    if 'slurm_info' in data:
+        slurm = data['slurm_info']
+        if not slurm:
+            table.add_row('slurm', '[dim](no slurm access via any group)[/]')
         else:
-            sites_table = Table(box=None, pad_edge=False, padding=(0, 1))
-            sites_table.add_column('site', style='green')
-            sites_table.add_column('status', style='yellow')
-            sites_table.add_column('access')
-            sites_table.add_column('expiry', style='dim')
-            for s in sites:
-                sites_table.add_row(
-                    s['site'],
-                    s['status'],
-                    ', '.join(s['access']),
-                    str(s['expiry']) if s['expiry'] else '',
-                )
-            table.add_row('sites', sites_table)
+            table.add_row('slurm', _render_user_slurm(slurm))
 
     return Panel(table, title=f'[bold]User:[/] [green]{data["name"]}[/]',
                  border_style='green', expand=False)
@@ -352,6 +372,7 @@ def _(parser: ArgParser):
     parser.add_argument('--comment', required=True)
 
 
+@site_args.apply()
 @user_args.apply(required=True)
 @commands.register('ng', 'user', 'show',
                    help='Show user information')
@@ -362,13 +383,27 @@ async def user_show(args: Namespace):
         console.print(f'[red]User {args.user} not found[/]')
         return 1
 
-    sites = None
-    if args.sites:
-        sites = await UserSiteInfo.find(
-            UserSiteInfo.user.id == user.id, fetch_links=True,
-        ).to_list()
+    site_info = None
+    slurm_info = None
+    if args.site:
+        site = await Site.find_one(Site.name == args.site)
+        if site is None:
+            console.print(f'[red]Site {args.site} not found[/]')
+            return 1
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site.id,
+        )
+        if usi is not None:
+            site_info = {
+                'site': args.site,
+                'status': usi.status,
+                'access': list(usi.access),
+                'expiry': usi.expiry,
+            }
+        slurm_info = await user_slurm_at_site(user, site)
 
-    data = _user_to_dict(user, sites=sites)
+    data = _user_to_dict(user, site_info=site_info, slurm_info=slurm_info)
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))
     else:
@@ -377,7 +412,5 @@ async def user_show(args: Namespace):
 
 @user_show.args()
 def _(parser: ArgParser):
-    parser.add_argument('--sites', action='store_true', default=False,
-                        help='Include per-site information')
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML')
