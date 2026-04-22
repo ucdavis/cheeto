@@ -54,6 +54,7 @@ ponderosa = "^0.6.0"
 marko = "^2.1.2"
 ipython = "^8.26.0"
 beanie = "^2.0.1"
+nest-asyncio = "^1.6.0"
 
 [build-system]
 requires = ["poetry-core"]
