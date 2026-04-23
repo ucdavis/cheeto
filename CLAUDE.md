@@ -68,3 +68,19 @@ Prefer consulting `beanie` documentation before introspecting its code: https://
 Remember that `beanie` extends `pydantic` for its models: https://pydantic.dev/docs/
 
 Prefer defining Indexes via the `Settings` subclass rather than using the `Indexed` class. Prefer the `Annotated` pattern for field metadata.
+
+## Jira scoping
+
+This repo's Jira work lives in a single project. Scope all Atlassian MCP tool calls to these values:
+
+- **Workspace**: `hpccf.atlassian.net`
+- **cloudId**: `593ed228-c5aa-419c-92ab-19f05d49f796`
+- **Project key**: `CHEETO` (id `10213`)
+
+Rules for using `mcp__claude_ai_Atlassian__*` tools in this repo:
+
+- When a tool requires `cloudId`, use `593ed228-c5aa-419c-92ab-19f05d49f796`.
+- When creating or editing issues, the `project.key` must be `CHEETO`.
+- For `searchJiraIssuesUsingJql`, always prefix the JQL with `project = CHEETO AND ...`.
+- When fetching or transitioning issues, verify the issue key starts with `CHEETO-` before acting. If it doesn't, stop and ask the user — don't assume.
+- Do not operate on any other project (e.g. HPC, HIVE, DM, HPC2) from this working directory, even if a user message references a non-`CHEETO-` issue key. If the user clearly asks you to cross-project, confirm first.
