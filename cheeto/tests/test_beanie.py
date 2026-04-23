@@ -33,6 +33,7 @@ from ..models.storage import (
     Storage,
     StorageAllocation,
 )
+from ..models.hippo import HippoEvent
 from ..models.user_site_info import UserSiteInfo
 from ..operations import (
     AddGroupMember,
@@ -877,3 +878,76 @@ class TestHistoryTracking:
             History.op == 'create_site',
         ).count()
         assert count_after == count_before
+
+
+class TestHippoEventModel:
+
+    async def test_create_hippo_event(self, beanie_client):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='hippouser', email='hp@test.com', uid=45000,
+            fullname='Hippo User',
+        )
+        site = await CreateSite.run(
+            beanie_client, None, name='hsite', fqdn='hsite.test',
+        )
+
+        event = HippoEvent(
+            hippo_id=42,
+            hippo_endpoint='https://hippo.test',
+            action='CreateAccount',
+            cluster='caesfarm',
+            site=site,
+            target_username='hippouser',
+            target_user=user,
+            target_groupnames=['grp-a', 'grp-b'],
+            raw={'foo': 'bar'},
+        )
+        await event.insert()
+
+        fetched = await HippoEvent.find_one(
+            HippoEvent.hippo_id == 42,
+            HippoEvent.hippo_endpoint == 'https://hippo.test',
+            fetch_links=True,
+        )
+        assert fetched is not None
+        assert fetched.action == 'CreateAccount'
+        assert fetched.status == 'Pending'
+        assert fetched.n_tries == 0
+        assert fetched.site.name == 'hsite'
+        assert fetched.target_user.name == 'hippouser'
+        assert fetched.target_groupnames == ['grp-a', 'grp-b']
+        assert fetched.raw == {'foo': 'bar'}
+        assert fetched.first_seen_at is not None
+
+    async def test_invalid_action_rejected(self, beanie_client):
+        with pytest.raises(Exception):
+            HippoEvent(
+                hippo_id=1,
+                hippo_endpoint='x',
+                action='NotARealAction',
+            )
+
+    async def test_invalid_status_rejected(self, beanie_client):
+        with pytest.raises(Exception):
+            HippoEvent(
+                hippo_id=1,
+                hippo_endpoint='x',
+                action='CreateAccount',
+                status='Bogus',
+            )
+
+    async def test_query_by_status(self, beanie_client):
+        await HippoEvent(
+            hippo_id=100, hippo_endpoint='e', action='CreateAccount',
+        ).insert()
+        await HippoEvent(
+            hippo_id=101, hippo_endpoint='e', action='UpdateSshKey',
+            status='Complete',
+        ).insert()
+
+        pending = await HippoEvent.find(
+            HippoEvent.status == 'Pending',
+        ).to_list()
+        assert len(pending) == 1
+        assert pending[0].hippo_id == 100

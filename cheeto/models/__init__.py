@@ -20,6 +20,7 @@ from .storage import (
 )
 from .user_site_info import UserSiteInfo
 from .history import History
+from .hippo import HippoEvent
 
 # Rebuild models to resolve forward references (BackLink/Link with string refs)
 User.model_rebuild()
@@ -40,4 +41,5 @@ ALL_MODELS = [
     AutomountMap,
     Storage,
     History,
+    HippoEvent,
 ]
