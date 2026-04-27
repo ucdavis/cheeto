@@ -1,10 +1,24 @@
+import secrets
 from argparse import Namespace
+from typing import Iterable
 
+from beanie import Document
 from ponderosa import ArgParser
 
 from .. import commands
 from ...database import connect_mongoengine
 from ...log import Console
+from ...models.group import Group
+from ...models.site import Site
+from ...models.slurm import (
+    SlurmAccount,
+    SlurmAllocation,
+    SlurmAssociation,
+    SlurmPartition,
+    SlurmQOS,
+)
+from ...models.user import SshKey, User
+from ...models.user_site_info import UserSiteInfo
 from ...operations import (
     MigrateGroups,
     MigrateSites,
@@ -26,7 +40,11 @@ def migrate_cmd(args: Namespace):
 
 @migrate_cmd.args(common=True)
 def migrate_args(parser: ArgParser):
-    pass
+    parser.add_argument(
+        '--drop', action='store_true', default=False,
+        help='Permanently delete existing data in the target collections '
+             'before importing. Requires typed confirmation.',
+    )
 
 
 @migrate_args.postprocessor(priority=70)
@@ -34,10 +52,70 @@ def connect_old_db(args: Namespace):
     connect_mongoengine(args.config.mongo, quiet=args.quiet)
 
 
+def _confirm_drop(console: Console, scope_label: str,
+                  collections: Iterable[str]) -> bool:
+    """Prompt the user to type a generated 6-digit code before destructive drops.
+
+    Returns True only when the user types the code exactly. False otherwise
+    (mismatch, EOF, or KeyboardInterrupt).
+    """
+    code = f'{secrets.randbelow(1_000_000):06d}'
+    console.print()
+    console.rule('[bold red]DANGER: --drop will PERMANENTLY DELETE data[/]',
+                 style='red')
+    console.print(
+        f'[bold red]Scope:[/] [yellow]{scope_label}[/]\n'
+        f'[bold red]Collections to be wiped:[/]'
+    )
+    for name in collections:
+        console.print(f'  [red]•[/] [yellow]{name}[/]')
+    console.print(
+        '\n[bold red]This action is IRREVERSIBLE.[/] '
+        'All documents in the listed collections will be removed before '
+        'the migration runs. There is no undo.\n'
+    )
+    console.print(
+        f'To confirm, re-type this code exactly: [bold yellow]{code}[/]'
+    )
+    try:
+        entered = input('Confirmation code: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print('\n[red]Aborted: no confirmation received.[/]')
+        return False
+    if entered != code:
+        console.print('[red]Aborted: confirmation code did not match.[/]')
+        return False
+    console.print('[green]Confirmed. Proceeding with drop.[/]\n')
+    return True
+
+
+async def _drop_models(console: Console, models: Iterable[type[Document]]) -> None:
+    for model in models:
+        result = await model.find_all().delete()
+        deleted = getattr(result, 'deleted_count', None) if result else None
+        suffix = f' ({deleted} documents)' if deleted is not None else ''
+        console.print(f'  [red]dropped[/] {model.Settings.name}{suffix}')
+
+
+async def _maybe_drop(args: Namespace, console: Console,
+                      scope_label: str,
+                      models: list[type[Document]]) -> bool:
+    """If --drop is set, confirm + drop the listed models. Returns False to abort."""
+    if not args.drop:
+        return True
+    collection_names = [m.Settings.name for m in models]
+    if not _confirm_drop(console, scope_label, collection_names):
+        return False
+    await _drop_models(console, models)
+    return True
+
+
 @commands.register('ng', 'migrate', 'sites',
                    help='Migrate all sites')
 async def migrate_sites(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'sites', [Site]):
+        return 1
     sites = await MigrateSites.run(args.db, args.author)
     console.print(f'Migrated [green]{len(sites)}[/] sites')
 
@@ -47,6 +125,27 @@ async def migrate_sites(args: Namespace):
                    help='Migrate a single user and their site memberships')
 async def migrate_user(args: Namespace):
     console = Console()
+    if args.drop:
+        existing = await User.find_one(User.name == args.user)
+        scope = f'user "{args.user}"'
+        collections = ['users (this user only)',
+                       'user_site_info (for this user)',
+                       'ssh_keys (for this user)']
+        if not _confirm_drop(console, scope, collections):
+            return 1
+        if existing is None:
+            console.print(
+                f'[yellow]No existing user named {args.user!r} to drop.[/]'
+            )
+        else:
+            await SshKey.find(SshKey.user.id == existing.id).delete()
+            await UserSiteInfo.find(
+                UserSiteInfo.user.id == existing.id,
+            ).delete()
+            await existing.delete()
+            console.print(f'  [red]dropped[/] user {args.user!r} '
+                          f'(plus their site_info and ssh_keys)')
+
     user = await MigrateUser.run(
         args.db, args.author,
         username=args.user,
@@ -54,10 +153,15 @@ async def migrate_user(args: Namespace):
     console.print(f'Migrated user [green]{user.name}[/] (uid={user.uid})')
 
 
+USER_DROP_MODELS: list[type[Document]] = [User, UserSiteInfo, SshKey]
+
+
 @commands.register('ng', 'migrate', 'users',
                    help='Migrate all users and their site memberships')
 async def migrate_users(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'all users', USER_DROP_MODELS):
+        return 1
     users = await MigrateUsers.run(args.db, args.author)
     console.print(f'Migrated [green]{len(users)}[/] users')
 
@@ -66,6 +170,8 @@ async def migrate_users(args: Namespace):
                    help='Migrate all groups with members, sponsors, and sudoers')
 async def migrate_groups(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'all groups', [Group]):
+        return 1
     groups = await MigrateGroups.run(args.db, args.author)
     console.print(f'Migrated [green]{len(groups)}[/] groups')
 
@@ -80,6 +186,9 @@ def migrate_slurm_cmd(args: Namespace):
                    help='Migrate all Slurm partitions')
 async def migrate_slurm_partitions(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'Slurm partitions',
+                             [SlurmPartition]):
+        return 1
     parts = await MigrateSlurmPartitions.run(args.db, args.author)
     console.print(f'Migrated [green]{len(parts)}[/] Slurm partitions')
 
@@ -88,6 +197,9 @@ async def migrate_slurm_partitions(args: Namespace):
                    help='Migrate all Slurm QOSes (and create allocations)')
 async def migrate_slurm_qoses(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'Slurm QOSes (and their allocations)',
+                             [SlurmQOS, SlurmAllocation]):
+        return 1
     qoses = await MigrateSlurmQOSes.run(args.db, args.author)
     console.print(f'Migrated [green]{len(qoses)}[/] Slurm QOSes')
 
@@ -96,6 +208,8 @@ async def migrate_slurm_qoses(args: Namespace):
                    help='Migrate Slurm accounts for SiteGroups with Slurm data')
 async def migrate_slurm_accounts(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'Slurm accounts', [SlurmAccount]):
+        return 1
     accounts = await MigrateSlurmAccounts.run(args.db, args.author)
     console.print(f'Migrated [green]{len(accounts)}[/] Slurm accounts')
 
@@ -104,8 +218,16 @@ async def migrate_slurm_accounts(args: Namespace):
                    help='Migrate all Slurm associations')
 async def migrate_slurm_associations(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'Slurm associations',
+                             [SlurmAssociation]):
+        return 1
     assocs = await MigrateSlurmAssociations.run(args.db, args.author)
     console.print(f'Migrated [green]{len(assocs)}[/] Slurm associations')
+
+
+SLURM_DROP_MODELS: list[type[Document]] = [
+    SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
+]
 
 
 async def _run_slurm_migrations(args: Namespace, console: Console) -> None:
@@ -130,14 +252,27 @@ async def _run_slurm_migrations(args: Namespace, console: Console) -> None:
                    help='Migrate all Slurm records (partitions, qoses, accounts, associations)')
 async def migrate_slurm_all(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console, 'all Slurm records',
+                             SLURM_DROP_MODELS):
+        return 1
     await _run_slurm_migrations(args, console)
     console.rule('Slurm migration complete')
+
+
+ALL_DROP_MODELS: list[type[Document]] = [
+    SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
+    Group, SshKey, UserSiteInfo, User, Site,
+]
 
 
 @commands.register('ng', 'migrate', 'all',
                    help='Migrate sites, users, groups, and all Slurm records in order')
 async def migrate_all(args: Namespace):
     console = Console()
+    if not await _maybe_drop(args, console,
+                             'EVERYTHING the migration writes',
+                             ALL_DROP_MODELS):
+        return 1
 
     console.rule('Migrating sites')
     sites = await MigrateSites.run(args.db, args.author)
