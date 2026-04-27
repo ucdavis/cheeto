@@ -41,6 +41,11 @@ from ..operations import (
     AddGroupSponsor,
     AddGroupSudoer,
     AddQOSAllocation,
+    EditSlurmQOS,
+    ProvisionSlurmAllocation,
+    RemoveSlurmAssociation,
+    RemoveSlurmPartition,
+    RemoveSlurmQOS,
     AddSiteUser,
     EditSlurmAllocation,
     AddUserAccess,
@@ -817,6 +822,338 @@ class TestSlurmOps:
         assert partial.cpus == 160
         assert partial.gpus == 8           # only from a1
         assert partial.mem == '1T'         # only from a1
+
+    async def test_edit_slurm_qos_updates_priority_and_flags(self, beanie_client, site):
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qedit-top', site_name='slurmsite',
+            priority=50, flags=['DenyOnLimit'],
+        )
+        updated = await EditSlurmQOS.run(
+            beanie_client, None,
+            name='qedit-top', site_name='slurmsite',
+            priority=200, flags=['NoDecay', 'DenyOnLimit'],
+        )
+        assert updated.priority == 200
+        assert set(updated.flags) == {'DenyOnLimit', 'NoDecay'}
+
+    async def test_edit_slurm_qos_partial_update(self, beanie_client, site):
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qedit-part', site_name='slurmsite',
+            priority=10, flags=['DenyOnLimit'],
+        )
+        # Only priority, leave flags alone
+        updated = await EditSlurmQOS.run(
+            beanie_client, None,
+            name='qedit-part', site_name='slurmsite',
+            priority=99,
+        )
+        assert updated.priority == 99
+        assert updated.flags == ['DenyOnLimit']
+
+    async def test_remove_slurm_partition_refuses_without_force(
+        self, beanie_client, site,
+    ):
+        import pytest as _pytest
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='rmpart', site_name='slurmsite',
+        )
+        # Set up an association so remove is gated
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmpart-grp', gid=64000,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='rmpart-qos', site_name='slurmsite',
+        )
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmpart-grp',
+            partition_name='rmpart', qos_name='rmpart-qos',
+        )
+        with _pytest.raises(ValueError, match='association'):
+            await RemoveSlurmPartition.run(
+                beanie_client, None,
+                name='rmpart', site_name='slurmsite',
+            )
+
+    async def test_remove_slurm_partition_force_cascades(self, beanie_client, site):
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='rmpartf', site_name='slurmsite',
+        )
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmpartf-grp', gid=64001,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='rmpartf-qos', site_name='slurmsite',
+        )
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmpartf-grp',
+            partition_name='rmpartf', qos_name='rmpartf-qos',
+        )
+        await RemoveSlurmPartition.run(
+            beanie_client, None,
+            name='rmpartf', site_name='slurmsite', force=True,
+        )
+        # Partition and its associations are gone
+        remaining = await SlurmPartition.find_one(
+            SlurmPartition.name == 'rmpartf',
+        )
+        assert remaining is None
+
+    async def test_remove_slurm_qos_cleans_allocations(self, beanie_client, site):
+        qos = await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='rmqos', site_name='slurmsite',
+            group_limits=[
+                SlurmAllocation(tres=SlurmTRES(cpus=128), comment='a'),
+                SlurmAllocation(tres=SlurmTRES(cpus=64), comment='b'),
+            ],
+        )
+        alloc_ids = [a.id for a in qos.group_limits]
+
+        await RemoveSlurmQOS.run(
+            beanie_client, None, name='rmqos', site_name='slurmsite',
+        )
+        from cheeto.models.slurm import SlurmQOS as _SlurmQOS
+        assert (await _SlurmQOS.find_one(_SlurmQOS.name == 'rmqos')) is None
+        # Orphaned allocations should also be gone
+        for aid in alloc_ids:
+            assert (await SlurmAllocation.get(aid)) is None
+
+    async def test_remove_slurm_association_specific(self, beanie_client, site):
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmassoc-grp', gid=64100,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='rmassoc-part', site_name='slurmsite',
+        )
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='rmassoc-qos', site_name='slurmsite',
+        )
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmassoc-grp',
+            partition_name='rmassoc-part', qos_name='rmassoc-qos',
+        )
+        count = await RemoveSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmassoc-grp',
+            partition_name='rmassoc-part', qos_name='rmassoc-qos',
+        )
+        assert count == 1
+
+    async def test_remove_slurm_association_all_for_group(
+        self, beanie_client, site,
+    ):
+        # Seed a group with two partitions and two associations on different
+        # (partition, qos) combinations.
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmbulk-grp', gid=64150,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        for part in ('rmbulk-part-a', 'rmbulk-part-b'):
+            await CreateSlurmPartition.run(
+                beanie_client, None, name=part, site_name='slurmsite',
+            )
+        for qos in ('rmbulk-qos-a', 'rmbulk-qos-b'):
+            await CreateSlurmQOS.run(
+                beanie_client, None, name=qos, site_name='slurmsite',
+            )
+        for part in ('rmbulk-part-a', 'rmbulk-part-b'):
+            for qos in ('rmbulk-qos-a', 'rmbulk-qos-b'):
+                await CreateSlurmAssociation.run(
+                    beanie_client, None,
+                    site_name='slurmsite',
+                    account_group_name='rmbulk-grp',
+                    partition_name=part, qos_name=qos,
+                )
+
+        # site + group only → removes all four
+        count = await RemoveSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmbulk-grp',
+        )
+        assert count == 4
+
+    async def test_remove_slurm_association_filter_by_partition(
+        self, beanie_client, site,
+    ):
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmfilt-grp', gid=64160,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        for part in ('rmfilt-high', 'rmfilt-low'):
+            await CreateSlurmPartition.run(
+                beanie_client, None, name=part, site_name='slurmsite',
+            )
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='rmfilt-qos', site_name='slurmsite',
+        )
+        for part in ('rmfilt-high', 'rmfilt-low'):
+            await CreateSlurmAssociation.run(
+                beanie_client, None,
+                site_name='slurmsite',
+                account_group_name='rmfilt-grp',
+                partition_name=part, qos_name='rmfilt-qos',
+            )
+
+        # Narrow to one partition — only the `rmfilt-high` one goes
+        count = await RemoveSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='rmfilt-grp',
+            partition_name='rmfilt-high',
+        )
+        assert count == 1
+
+        # The `rmfilt-low` one is still there
+        from cheeto.models.slurm import SlurmAssociation as _Assoc
+        remaining = await _Assoc.find(
+            _Assoc.site.id == site.id,
+            _Assoc.account.id == acc.id,
+        ).to_list()
+        assert len(remaining) == 1
+
+    async def test_remove_slurm_association_no_match_raises(
+        self, beanie_client, site,
+    ):
+        import pytest as _pytest
+        group = await CreateGroup.run(
+            beanie_client, None, name='rmnomatch-grp', gid=64170,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        with _pytest.raises(ValueError, match='No matching'):
+            await RemoveSlurmAssociation.run(
+                beanie_client, None,
+                site_name='slurmsite',
+                account_group_name='rmnomatch-grp',
+            )
+
+    async def test_provision_creates_qos_and_association(self, beanie_client, site):
+        group = await CreateGroup.run(
+            beanie_client, None, name='prov-grp', gid=64200,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='prov-part', site_name='slurmsite',
+        )
+
+        assoc = await ProvisionSlurmAllocation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='prov-grp',
+            partition_name='prov-part',
+            group_limits_tres=SlurmTRES(cpus=128, mem='1T'),
+            comment='initial',
+            priority=100,
+        )
+        assert assoc.id is not None
+        # Auto-generated QOS name
+        from cheeto.models.slurm import SlurmQOS as _SlurmQOS
+        qos = await _SlurmQOS.find_one(
+            _SlurmQOS.name == 'prov-grp-prov-part-qos', fetch_links=True,
+        )
+        assert qos is not None
+        assert qos.priority == 100
+        assert len(qos.group_limits) == 1
+
+    async def test_provision_idempotent_when_qos_exists(self, beanie_client, site):
+        group = await CreateGroup.run(
+            beanie_client, None, name='prov2-grp', gid=64300,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='prov2-part', site_name='slurmsite',
+        )
+        # Run twice; second call must not create a duplicate association
+        assoc1 = await ProvisionSlurmAllocation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='prov2-grp',
+            partition_name='prov2-part',
+            qos_name='prov2-qos',
+        )
+        assoc2 = await ProvisionSlurmAllocation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='prov2-grp',
+            partition_name='prov2-part',
+            qos_name='prov2-qos',
+        )
+        assert assoc1.id == assoc2.id
+
+    async def test_list_qos_and_associations_at_site(self, beanie_client, site):
+        from cheeto.queries.slurm import (
+            list_qos_at_site, list_associations_at_site, qos_at_site,
+        )
+        # Two QOSes on this site
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='q-alpha', site_name='slurmsite',
+            priority=10,
+        )
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='q-beta', site_name='slurmsite',
+            priority=20,
+        )
+        qoses = await list_qos_at_site(site)
+        names = {q.name for q in qoses}
+        assert {'q-alpha', 'q-beta'}.issubset(names)
+
+        one = await qos_at_site(site, 'q-alpha')
+        assert one is not None and one.priority == 10
+        missing = await qos_at_site(site, 'does-not-exist')
+        assert missing is None
+
+        # Set up a group+account+assoc so list_associations returns something
+        group = await CreateGroup.run(
+            beanie_client, None, name='lsa-grp', gid=64400,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='lsa-part', site_name='slurmsite',
+        )
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='lsa-grp',
+            partition_name='lsa-part', qos_name='q-alpha',
+        )
+        assocs = await list_associations_at_site(site)
+        assert any(
+            a.partition.name == 'lsa-part' and a.qos.name == 'q-alpha'
+            for a in assocs
+        )
+        # Filtered by group
+        filtered = await list_associations_at_site(site, group=group)
+        assert len(filtered) == 1
 
 
 class TestHistoryTracking:

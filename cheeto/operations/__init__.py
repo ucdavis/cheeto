@@ -37,6 +37,11 @@ from .slurm import (
     CreateSlurmPartition,
     CreateSlurmQOS,
     EditSlurmAllocation,
+    EditSlurmQOS,
+    ProvisionSlurmAllocation,
+    RemoveSlurmAssociation,
+    RemoveSlurmPartition,
+    RemoveSlurmQOS,
 )
 from .storage import CreateHomeStorage
 from .migrate import (

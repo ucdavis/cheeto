@@ -1,20 +1,36 @@
 from argparse import Namespace
 
 from ponderosa import ArgParser
+from rich.panel import Panel
+from rich.table import Table
 
 from .. import commands
 from ...args import regex_argtype
-from ...constants import QOS_TRES_REGEX
+from ...constants import QOS_TRES_REGEX, SLURM_QOS_VALID_FLAGS
 from ...log import Console
-from ...models.slurm import SlurmAllocation, SlurmTRES
+from ...models.group import Group
+from ...models.site import Site
+from ...models.slurm import SlurmAllocation, SlurmPartition, SlurmQOS, SlurmTRES
 from ...operations import (
     AddQOSAllocation,
     CreateSlurmAssociation,
     CreateSlurmPartition,
     CreateSlurmQOS,
     EditSlurmAllocation,
+    EditSlurmQOS,
+    ProvisionSlurmAllocation,
+    RemoveSlurmAssociation,
+    RemoveSlurmPartition,
+    RemoveSlurmQOS,
+)
+from ...queries.slurm import (
+    list_associations_at_site,
+    list_qos_at_site,
+    qos_at_site,
+    total_tres,
 )
 from ...types import parse_qos_tres
+from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import group_args, site_args
 
 
@@ -30,6 +46,26 @@ def _tres_from_string(s: str | None) -> SlurmTRES | None:
 @commands.register('ng', 'slurm',
                    help='Slurm resource operations')
 def slurm_cmd(args: Namespace):
+    pass
+
+
+# Explicit no-op parents so `ng slurm --help` shows help text next to each
+# subcommand group instead of just the bare names.
+@commands.register('ng', 'slurm', 'partition',
+                   help='Slurm partition operations')
+def slurm_partition_cmd(args: Namespace):
+    pass
+
+
+@commands.register('ng', 'slurm', 'qos',
+                   help='Slurm QOS operations')
+def slurm_qos_cmd(args: Namespace):
+    pass
+
+
+@commands.register('ng', 'slurm', 'association', aliases=['assoc'],
+                   help='Slurm association operations')
+def slurm_association_cmd(args: Namespace):
     pass
 
 
@@ -116,7 +152,7 @@ def _(parser: ArgParser):
     parser.add_argument('--qos', required=True)
 
 
-@commands.register('ng', 'slurm', 'allocation',
+@commands.register('ng', 'slurm', 'allocation', aliases=['alloc'],
                    help='Slurm allocation operations')
 def slurm_allocation_cmd(args: Namespace):
     pass
@@ -174,3 +210,371 @@ def _(parser: ArgParser):
                         help='New TRES string (replaces existing)')
     parser.add_argument('--comment', default=None,
                         help='New comment (replaces existing)')
+
+
+# ---------------------------------------------------------------------------
+# partition remove
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'partition', 'remove',
+                   help='Remove a Slurm partition')
+async def slurm_partition_remove(args: Namespace):
+    console = Console()
+    await RemoveSlurmPartition.run(
+        args.db, args.author,
+        name=args.name, site_name=args.site, force=args.force,
+    )
+    console.print(f'Removed partition [green]{args.name}[/] on site {args.site}')
+
+
+@slurm_partition_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', '-n', required=True)
+    parser.add_argument('--force', action='store_true', default=False,
+                        help='Cascade: also remove associations that reference '
+                             'this partition')
+
+
+# ---------------------------------------------------------------------------
+# qos remove / edit / show
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'qos', 'remove',
+                   help='Remove a Slurm QOS and its owned allocations')
+async def slurm_qos_remove(args: Namespace):
+    console = Console()
+    await RemoveSlurmQOS.run(
+        args.db, args.author,
+        name=args.name, site_name=args.site, force=args.force,
+    )
+    console.print(f'Removed QOS [green]{args.name}[/] on site {args.site}')
+
+
+@slurm_qos_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', '-n', required=True)
+    parser.add_argument('--force', action='store_true', default=False,
+                        help='Cascade: also remove associations that reference '
+                             'this QOS')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'qos', 'edit',
+                   help='Edit QOS priority and/or flags (allocation edits '
+                        'use `ng slurm allocation edit`)')
+async def slurm_qos_edit(args: Namespace):
+    console = Console()
+    qos = await EditSlurmQOS.run(
+        args.db, args.author,
+        name=args.name, site_name=args.site,
+        priority=args.priority, flags=args.flags,
+    )
+    console.print(f'Updated QOS [green]{qos.name}[/]')
+
+
+@slurm_qos_edit.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', '-n', required=True)
+    parser.add_argument('--priority', type=int, default=None,
+                        help='New priority value')
+    parser.add_argument('--flags', nargs='+', default=None,
+                        choices=list(SLURM_QOS_VALID_FLAGS),
+                        help='Replacement flag list')
+
+
+def _qos_to_dict(qos: SlurmQOS) -> dict:
+    def _alloc_dicts(allocs):
+        return [
+            {
+                'id': str(a.id),
+                'tres': {'cpus': a.tres.cpus, 'gpus': a.tres.gpus,
+                         'mem': a.tres.mem},
+                'comment': a.comment,
+            }
+            for a in allocs
+        ]
+    return {
+        'name': qos.name,
+        'site': qos.site.name if hasattr(qos.site, 'name') else None,
+        'priority': qos.priority,
+        'flags': list(qos.flags),
+        'group_limits': _alloc_dicts(qos.group_limits),
+        'user_limits': _alloc_dicts(qos.user_limits),
+        'job_limits': _alloc_dicts(qos.job_limits),
+        'group_total_tres': total_tres(qos.group_limits).model_dump(),
+    }
+
+
+def _render_qos_panel(data: dict) -> Panel:
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column(style='bold cyan', no_wrap=True)
+    table.add_column()
+
+    for key in ('name', 'site', 'priority'):
+        table.add_row(key, str(data.get(key)))
+    table.add_row('flags', ', '.join(data['flags']) or '[dim](none)[/]')
+
+    for limit_key in ('group_limits', 'user_limits', 'job_limits'):
+        allocs = data[limit_key]
+        if not allocs:
+            table.add_row(limit_key, '[dim](none)[/]')
+            continue
+        sub = Table(box=None, pad_edge=False, padding=(0, 1))
+        sub.add_column('id', style='dim')
+        sub.add_column('cpus')
+        sub.add_column('gpus')
+        sub.add_column('mem')
+        sub.add_column('comment')
+        for a in allocs:
+            sub.add_row(
+                a['id'], str(a['tres']['cpus']), str(a['tres']['gpus']),
+                str(a['tres']['mem'] or ''), a['comment'],
+            )
+        table.add_row(limit_key, sub)
+
+    gt = data['group_total_tres']
+    table.add_row(
+        'group total',
+        f'cpus={gt["cpus"]}, gpus={gt["gpus"]}, mem={gt["mem"]}',
+    )
+
+    return Panel(table, title=f'[bold]QOS:[/] [green]{data["name"]}[/]',
+                 border_style='cyan', expand=False)
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'qos', 'show',
+                   help='Show one or all QOSes at a site')
+async def slurm_qos_show(args: Namespace):
+    console = Console()
+    site = await Site.find_one(Site.name == args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    if args.name:
+        qos = await qos_at_site(site, args.name)
+        if qos is None:
+            console.print(f'[red]QOS {args.name} not found on {args.site}[/]')
+            return 1
+        data = _qos_to_dict(qos)
+        if args.yaml:
+            console.print(highlight_yaml(dumps_yaml(data)))
+        else:
+            console.print(_render_qos_panel(data))
+        return 0
+
+    qoses = await list_qos_at_site(site)
+    if not qoses:
+        console.print(f'[dim](no QOSes on {args.site})[/]')
+        return 0
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml([_qos_to_dict(q) for q in qoses])))
+        return 0
+
+    table = Table(title=f'QOSes on {args.site}')
+    table.add_column('name', style='green')
+    table.add_column('priority', style='yellow')
+    table.add_column('flags', style='dim')
+    table.add_column('group total tres', style='bold')
+    for qos in qoses:
+        tt = total_tres(qos.group_limits)
+        parts = []
+        if tt.cpus != -1:
+            parts.append(f'{tt.cpus}c')
+        if tt.gpus != -1:
+            parts.append(f'{tt.gpus}g')
+        if tt.mem is not None:
+            parts.append(str(tt.mem))
+        table.add_row(
+            qos.name, str(qos.priority),
+            ', '.join(qos.flags),
+            '/'.join(parts) if parts else '∞',
+        )
+    console.print(table)
+
+
+@slurm_qos_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', '-n', default=None,
+                        help='Specific QOS to show; omit to list all at the site')
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
+
+
+# ---------------------------------------------------------------------------
+# association remove / show
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'association', 'remove',
+                   help='Remove Slurm associations for a group at a site. '
+                        '--partition and --qos are optional filters that '
+                        'narrow the set; omit them to remove every '
+                        'association for the group at the site.')
+async def slurm_association_remove(args: Namespace):
+    console = Console()
+    count = await RemoveSlurmAssociation.run(
+        args.db, args.author,
+        site_name=args.site,
+        account_group_name=args.group,
+        partition_name=args.partition,
+        qos_name=args.qos,
+    )
+    scope = [f'group=[green]{args.group}[/]']
+    if args.partition:
+        scope.append(f'partition={args.partition}')
+    if args.qos:
+        scope.append(f'qos={args.qos}')
+    console.print(
+        f'Removed [yellow]{count}[/] association(s): ' + ' '.join(scope),
+    )
+
+
+@slurm_association_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('--group', '-g', required=True)
+    parser.add_argument('--partition', default=None,
+                        help='Optional: narrow to this partition')
+    parser.add_argument('--qos', default=None,
+                        help='Optional: narrow to this QOS')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'association', 'show',
+                   help='List Slurm associations (optionally filtered)')
+async def slurm_association_show(args: Namespace):
+    console = Console()
+    site = await Site.find_one(Site.name == args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    group = partition = qos = None
+    if args.group:
+        group = await Group.find_one(Group.name == args.group)
+        if group is None:
+            console.print(f'[red]Group {args.group} not found[/]')
+            return 1
+    if args.partition:
+        partition = await SlurmPartition.find_one(
+            SlurmPartition.name == args.partition,
+            SlurmPartition.site.id == site.id,
+        )
+        if partition is None:
+            console.print(f'[red]Partition {args.partition} not found on {args.site}[/]')
+            return 1
+    if args.qos:
+        qos = await SlurmQOS.find_one(
+            SlurmQOS.name == args.qos,
+            SlurmQOS.site.id == site.id,
+        )
+        if qos is None:
+            console.print(f'[red]QOS {args.qos} not found on {args.site}[/]')
+            return 1
+
+    assocs = await list_associations_at_site(
+        site, group=group, partition=partition, qos=qos,
+    )
+    if not assocs:
+        console.print(f'[dim](no matching associations)[/]')
+        return 0
+
+    def _assoc_dict(a):
+        acc_group = a.account.group
+        return {
+            'group': acc_group.name if hasattr(acc_group, 'name') else str(acc_group.ref.id),
+            'partition': a.partition.name,
+            'qos': a.qos.name,
+            'qos_priority': a.qos.priority,
+            'group_total_tres': total_tres(a.qos.group_limits).model_dump(),
+        }
+
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml([_assoc_dict(a) for a in assocs])))
+        return 0
+
+    table = Table(title=f'Associations on {args.site}')
+    table.add_column('group', style='green')
+    table.add_column('partition', style='cyan')
+    table.add_column('qos', style='magenta')
+    table.add_column('priority', style='yellow')
+    table.add_column('group total tres', style='bold')
+    for a in assocs:
+        d = _assoc_dict(a)
+        tt = d['group_total_tres']
+        parts = []
+        if tt['cpus'] != -1:
+            parts.append(f'{tt["cpus"]}c')
+        if tt['gpus'] != -1:
+            parts.append(f'{tt["gpus"]}g')
+        if tt['mem'] is not None:
+            parts.append(str(tt['mem']))
+        table.add_row(
+            d['group'], d['partition'], d['qos'], str(d['qos_priority']),
+            '/'.join(parts) if parts else '∞',
+        )
+    console.print(table)
+
+
+@slurm_association_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--group', '-g', default=None)
+    parser.add_argument('--partition', default=None)
+    parser.add_argument('--qos', default=None)
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
+
+
+# ---------------------------------------------------------------------------
+# provision (composite create-qos + create-association)
+# ---------------------------------------------------------------------------
+
+
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'provision',
+                   help='Provision a group for Slurm on a partition: creates a '
+                        'QOS (if absent) and an association in one step')
+async def slurm_provision(args: Namespace):
+    console = Console()
+    tres = _tres_from_string(args.group_limits)
+    assoc = await ProvisionSlurmAllocation.run(
+        args.db, args.author,
+        site_name=args.site,
+        account_group_name=args.group,
+        partition_name=args.partition,
+        qos_name=args.qos,
+        group_limits_tres=tres,
+        comment=args.comment,
+        priority=args.priority,
+        flags=args.flags,
+    )
+    console.print(
+        f'Provisioned allocation: group=[green]{args.group}[/] '
+        f'partition=[green]{args.partition}[/] '
+        f'qos=[green]{args.qos or args.group + "-" + args.partition + "-qos"}[/]'
+    )
+
+
+@slurm_provision.args()
+def _(parser: ArgParser):
+    parser.add_argument('--partition', required=True)
+    parser.add_argument('--qos', default=None,
+                        help='QOS name (default: {group}-{partition}-qos)')
+    parser.add_argument('--group-limits', default=None,
+                        type=regex_argtype(QOS_TRES_REGEX),
+                        help='Group-limits TRES for the new QOS (e.g. '
+                             '"cpus=128 mem=1T")')
+    parser.add_argument('--comment', default='initial allocation',
+                        help='Comment on the initial allocation')
+    parser.add_argument('--priority', type=int, default=0,
+                        help='QOS priority (ignored if QOS already exists)')
+    parser.add_argument('--flags', nargs='+', default=None,
+                        choices=list(SLURM_QOS_VALID_FLAGS),
+                        help='QOS flags (ignored if QOS already exists)')

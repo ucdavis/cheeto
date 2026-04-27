@@ -13,7 +13,14 @@ from beanie.operators import In
 
 from ..models.group import Group
 from ..models.site import Site
-from ..models.slurm import SlurmAccount, SlurmAllocation, SlurmAssociation, SlurmTRES
+from ..models.slurm import (
+    SlurmAccount,
+    SlurmAllocation,
+    SlurmAssociation,
+    SlurmPartition,
+    SlurmQOS,
+    SlurmTRES,
+)
 from ..models.user import User
 from ..utils import size_to_megs
 
@@ -144,3 +151,81 @@ async def user_slurm_at_site(user: User, site: Site) -> list[UserGroupSlurm]:
         for role in roles:
             results.append(UserGroupSlurm(group=group, role=role, slurm=gs))
     return results
+
+
+# ---------------------------------------------------------------------------
+# QOS lookups
+# ---------------------------------------------------------------------------
+
+
+async def qos_at_site(site: Site, name: str) -> SlurmQOS | None:
+    """Fetch a single SlurmQOS at a site, with allocations resolved."""
+    return await SlurmQOS.find_one(
+        SlurmQOS.name == name,
+        SlurmQOS.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    )
+
+
+async def list_qos_at_site(site: Site) -> list[SlurmQOS]:
+    """List every SlurmQOS at a site, with allocations resolved."""
+    return await SlurmQOS.find(
+        SlurmQOS.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    ).sort('+name').to_list()
+
+
+# ---------------------------------------------------------------------------
+# Association lookups
+# ---------------------------------------------------------------------------
+
+
+async def association_at(
+    site: Site,
+    group: Group,
+    partition: SlurmPartition,
+    qos: SlurmQOS,
+) -> SlurmAssociation | None:
+    """Fetch one SlurmAssociation by its (site, account.group, partition, qos) tuple."""
+    account = await SlurmAccount.find_one(
+        SlurmAccount.group.id == group.id,
+        SlurmAccount.site.id == site.id,
+    )
+    if account is None:
+        return None
+    return await SlurmAssociation.find_one(
+        SlurmAssociation.site.id == site.id,
+        SlurmAssociation.account.id == account.id,
+        SlurmAssociation.partition.id == partition.id,
+        SlurmAssociation.qos.id == qos.id,
+        fetch_links=True,
+        nesting_depth=2,
+    )
+
+
+async def list_associations_at_site(
+    site: Site,
+    *,
+    group: Group | None = None,
+    partition: SlurmPartition | None = None,
+    qos: SlurmQOS | None = None,
+) -> list[SlurmAssociation]:
+    """List SlurmAssociations at a site, optionally filtered by group/partition/qos."""
+    filters = [SlurmAssociation.site.id == site.id]
+    if group is not None:
+        account = await SlurmAccount.find_one(
+            SlurmAccount.group.id == group.id,
+            SlurmAccount.site.id == site.id,
+        )
+        if account is None:
+            return []
+        filters.append(SlurmAssociation.account.id == account.id)
+    if partition is not None:
+        filters.append(SlurmAssociation.partition.id == partition.id)
+    if qos is not None:
+        filters.append(SlurmAssociation.qos.id == qos.id)
+    return await SlurmAssociation.find(
+        *filters, fetch_links=True, nesting_depth=2,
+    ).to_list()
