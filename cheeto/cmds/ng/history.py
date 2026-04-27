@@ -26,7 +26,14 @@ async def history_cmd(args: Namespace):
             return 1
         filters.append(History.author.id == author.id)
 
-    query = History.find(*filters).sort('-timestamp').limit(args.limit)
+    # fetch_links=True resolves History.author in the initial aggregation —
+    # without it we'd pay N extra round-trips in the render loop to fetch each
+    # entry's author one at a time.
+    query = (
+        History.find(*filters, fetch_links=True, nesting_depth=1)
+        .sort('-timestamp')
+        .limit(args.limit)
+    )
     entries = await query.to_list()
 
     if not entries:
@@ -40,14 +47,7 @@ async def history_cmd(args: Namespace):
     table.add_column('Changes')
 
     for entry in entries:
-        author_name = ''
-        if entry.author is not None:
-            if isinstance(entry.author, User):
-                author_name = entry.author.name
-            else:
-                await entry.fetch_link(History.author)
-                author_name = entry.author.name if entry.author else '?'
-
+        author_name = entry.author.name if entry.author is not None else ''
         ts = entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         changes = ', '.join(f'{k}={v}' for k, v in entry.changes.items())
         table.add_row(ts, entry.op, author_name, changes)
