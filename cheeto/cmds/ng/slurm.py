@@ -34,9 +34,10 @@ from ...queries.slurm import (
     qos_at_site,
     total_tres,
 )
+from ...operations.base import UNSET
 from ...types import parse_qos_tres
 from ...yaml import dumps as dumps_yaml, highlight_yaml
-from ._args import group_args, site_args
+from ._args import EXPIRABLE_CLEAR, expirable_args, group_args, site_args
 
 
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
@@ -46,6 +47,20 @@ def _tres_from_string(s: str | None) -> SlurmTRES | None:
     if s is None:
         return None
     return SlurmTRES(**parse_qos_tres(s))
+
+
+def _expirable_kwarg(value):
+    """Translate the parsed expirable_value into an Operation kwarg.
+
+    Argparse default of None means 'flag not given' -> UNSET (leave alone).
+    EXPIRABLE_CLEAR -> None (set the field to null).
+    A datetime -> the datetime itself.
+    """
+    if value is None:
+        return UNSET
+    if value == EXPIRABLE_CLEAR:
+        return None
+    return value
 
 
 @commands.register('ng', 'slurm',
@@ -194,6 +209,7 @@ def _(parser: ArgParser):
                         help='Descriptive comment')
 
 
+@expirable_args.apply(scope='allocation')
 @commands.register('ng', 'slurm', 'allocation', 'edit',
                    help='Edit an existing allocation by id')
 async def slurm_allocation_edit(args: Namespace):
@@ -202,6 +218,8 @@ async def slurm_allocation_edit(args: Namespace):
     alloc = await EditSlurmAllocation.run(
         args.db, args.author,
         allocation_id=args.id, tres=tres, comment=args.comment,
+        expires_at=_expirable_kwarg(args.expires_at),
+        provisioned_at=_expirable_kwarg(args.provisioned_at),
     )
     console.print(f'Updated allocation [green]{alloc.id}[/]')
 

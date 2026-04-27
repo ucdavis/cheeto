@@ -3,13 +3,29 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.history import History
 from ..models.user import User
+
+
+class _UnsetType:
+    """Singleton sentinel used to mark 'caller did not pass a value' on
+    operation kwargs. Distinct from None, which means 'set to null'."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return 'UNSET'
+
+    def __bool__(self) -> bool:
+        return False
+
+
+UNSET: Final = _UnsetType()
 
 
 class Operation(ABC):

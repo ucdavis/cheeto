@@ -881,6 +881,58 @@ class TestSlurmOps:
         # created_at is preserved, updated_at is bumped
         assert updated.updated_at >= updated.created_at
 
+    async def test_edit_slurm_allocation_expirable(self, beanie_client, site):
+        from datetime import datetime, timedelta, timezone
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qexp', site_name='slurmsite',
+        )
+        alloc = await AddQOSAllocation.run(
+            beanie_client, None,
+            qos_name='qexp', site_name='slurmsite',
+            field='group_limits',
+            tres=SlurmTRES(cpus=8),
+        )
+        # Match the test client's tz_aware=False so reads round-trip cleanly.
+        provisioned = datetime.now(timezone.utc).replace(tzinfo=None)
+        expires = provisioned + timedelta(days=30)
+
+        # Set both timestamps.
+        await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id),
+            provisioned_at=provisioned,
+            expires_at=expires,
+        )
+        fetched = await SlurmAllocation.get(alloc.id)
+        assert fetched.provisioned_at is not None
+        assert fetched.expires_at is not None
+        assert abs((fetched.provisioned_at - provisioned).total_seconds()) < 1
+        assert abs((fetched.expires_at - expires).total_seconds()) < 1
+        # Other fields untouched.
+        assert fetched.tres.cpus == 8
+
+        # Editing only one field should leave the other intact (UNSET sentinel).
+        await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id),
+            comment='still has dates',
+        )
+        fetched = await SlurmAllocation.get(alloc.id)
+        assert fetched.comment == 'still has dates'
+        assert fetched.expires_at is not None  # unchanged
+        assert fetched.provisioned_at is not None
+
+        # Passing None clears the field.
+        await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id),
+            expires_at=None,
+        )
+        fetched = await SlurmAllocation.get(alloc.id)
+        assert fetched.expires_at is None
+        assert fetched.provisioned_at is not None  # still untouched
+
     async def test_total_tres_sums_allocations(self, beanie_client, site):
         from cheeto.queries.slurm import total_tres
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from beanie import PydanticObjectId
@@ -18,7 +19,7 @@ from ..models.slurm import (
     SlurmTRES,
 )
 from ..models.user import User
-from .base import Operation
+from .base import UNSET, Operation
 
 
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
@@ -260,11 +261,15 @@ class EditSlurmAllocation(Operation):
         allocation_id: str,
         tres: SlurmTRES | None = None,
         comment: str | None = None,
+        expires_at: datetime | None | Any = UNSET,
+        provisioned_at: datetime | None | Any = UNSET,
     ) -> None:
         super().__init__(client, author)
         self.allocation_id = allocation_id
         self.tres = tres
         self.comment = comment
+        self.expires_at = expires_at
+        self.provisioned_at = provisioned_at
 
     async def execute(self, session: AsyncClientSession) -> SlurmAllocation:
         alloc = await SlurmAllocation.get(PydanticObjectId(self.allocation_id))
@@ -275,6 +280,10 @@ class EditSlurmAllocation(Operation):
             alloc.tres = self.tres
         if self.comment is not None:
             alloc.comment = self.comment
+        if self.expires_at is not UNSET:
+            alloc.expires_at = self.expires_at
+        if self.provisioned_at is not UNSET:
+            alloc.provisioned_at = self.provisioned_at
 
         await alloc.save(session=session)
         self._alloc = alloc
@@ -286,6 +295,14 @@ class EditSlurmAllocation(Operation):
             data['tres'] = self.tres.model_dump()
         if self.comment is not None:
             data['comment'] = self.comment
+        if self.expires_at is not UNSET:
+            data['expires_at'] = (
+                self.expires_at.isoformat() if self.expires_at else None
+            )
+        if self.provisioned_at is not UNSET:
+            data['provisioned_at'] = (
+                self.provisioned_at.isoformat() if self.provisioned_at else None
+            )
         return data
 
 
