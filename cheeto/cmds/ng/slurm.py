@@ -686,6 +686,8 @@ def _alloc_to_dict(qa: QOSAllocation | None,
         'comment': a.comment,
         'created_at': a.created_at,
         'updated_at': a.updated_at,
+        'provisioned_at': a.provisioned_at,
+        'expires_at': a.expires_at,
     }
     if qa is not None:
         data['qos'] = qa.qos.name
@@ -726,6 +728,9 @@ async def slurm_allocation_show(args: Namespace):
                 'tres',
                 f'cpus={tres["cpus"]}, gpus={tres["gpus"]}, mem={tres["mem"]}',
             )
+            for key in ('provisioned_at', 'expires_at'):
+                value = data[key]
+                table.add_row(key, str(value) if value is not None else '[dim](unset)[/]')
             console.print(Panel(table,
                                 title=f'[bold]Allocation:[/] [green]{alloc.id}[/]',
                                 border_style='cyan', expand=False))
@@ -768,6 +773,9 @@ async def slurm_allocation_show(args: Namespace):
         console.print(highlight_yaml(dumps_yaml([_alloc_to_dict(qa) for qa in qas])))
         return 0
 
+    def _fmt_dt(dt) -> str:
+        return dt.strftime('%Y-%m-%d') if dt is not None else ''
+
     table = Table(title=f'Allocations on {args.site}')
     table.add_column('id', style='dim')
     table.add_column('qos', style='magenta')
@@ -775,12 +783,15 @@ async def slurm_allocation_show(args: Namespace):
     table.add_column('cpus')
     table.add_column('gpus')
     table.add_column('mem')
+    table.add_column('provisioned', style='green')
+    table.add_column('expires', style='yellow')
     table.add_column('comment', style='dim')
     for qa in qas:
         a = qa.allocation
         table.add_row(
             str(a.id), qa.qos.name, qa.field,
             str(a.tres.cpus), str(a.tres.gpus), str(a.tres.mem or ''),
+            _fmt_dt(a.provisioned_at), _fmt_dt(a.expires_at),
             a.comment,
         )
     console.print(table)
