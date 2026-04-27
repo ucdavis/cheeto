@@ -1,5 +1,6 @@
 from argparse import Namespace
 
+from beanie import PydanticObjectId
 from ponderosa import ArgParser
 from rich.panel import Panel
 from rich.table import Table
@@ -24,8 +25,12 @@ from ...operations import (
     RemoveSlurmQOS,
 )
 from ...queries.slurm import (
+    QOSAllocation,
+    list_allocations_at_site,
     list_associations_at_site,
+    list_partitions_at_site,
     list_qos_at_site,
+    partition_at_site,
     qos_at_site,
     total_tres,
 )
@@ -578,3 +583,222 @@ def _(parser: ArgParser):
     parser.add_argument('--flags', nargs='+', default=None,
                         choices=list(SLURM_QOS_VALID_FLAGS),
                         help='QOS flags (ignored if QOS already exists)')
+
+
+# ---------------------------------------------------------------------------
+# partition show
+# ---------------------------------------------------------------------------
+
+
+def _partition_to_dict(p: SlurmPartition) -> dict:
+    return {
+        'name': p.name,
+        'site': p.site.name if hasattr(p.site, 'name') else None,
+        'created_at': p.created_at,
+        'updated_at': p.updated_at,
+    }
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'partition', 'show',
+                   help='Show one partition or list partitions at a site, '
+                        'optionally filtered by group')
+async def slurm_partition_show(args: Namespace):
+    console = Console()
+    site = await Site.find_one(Site.name == args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    if args.name:
+        part = await partition_at_site(site, args.name)
+        if part is None:
+            console.print(f'[red]Partition {args.name} not found on {args.site}[/]')
+            return 1
+        data = _partition_to_dict(part)
+        if args.yaml:
+            console.print(highlight_yaml(dumps_yaml(data)))
+        else:
+            table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+            table.add_column(style='bold cyan', no_wrap=True)
+            table.add_column()
+            for key in ('name', 'site', 'created_at', 'updated_at'):
+                table.add_row(key, str(data[key]))
+            console.print(Panel(table,
+                                title=f'[bold]Partition:[/] [green]{part.name}[/]',
+                                border_style='cyan', expand=False))
+        return 0
+
+    group = None
+    if args.group:
+        group = await Group.find_one(Group.name == args.group)
+        if group is None:
+            console.print(f'[red]Group {args.group} not found[/]')
+            return 1
+
+    parts = await list_partitions_at_site(site, group=group)
+    if not parts:
+        console.print('[dim](no matching partitions)[/]')
+        return 0
+
+    data = [_partition_to_dict(p) for p in parts]
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml(data)))
+        return 0
+
+    title = f'Partitions on {args.site}'
+    if args.group:
+        title += f' for group {args.group}'
+    table = Table(title=title)
+    table.add_column('name', style='green')
+    table.add_column('created_at', style='dim')
+    for d in data:
+        table.add_row(d['name'], str(d['created_at']))
+    console.print(table)
+
+
+@slurm_partition_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--name', '-n', default=None,
+                        help='Specific partition to show; omit to list')
+    parser.add_argument('--group', '-g', default=None,
+                        help='Restrict to partitions this group has '
+                             'associations on')
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
+
+
+# ---------------------------------------------------------------------------
+# allocation show
+# ---------------------------------------------------------------------------
+
+
+def _alloc_to_dict(qa: QOSAllocation | None,
+                   *,
+                   alloc: SlurmAllocation | None = None) -> dict:
+    """Render an allocation. If `qa` is given, includes QOS context;
+    if only `alloc` is given (e.g. lookup-by-id without parent), QOS
+    context is omitted."""
+    a = alloc if qa is None else qa.allocation
+    data = {
+        'id': str(a.id),
+        'tres': {'cpus': a.tres.cpus, 'gpus': a.tres.gpus, 'mem': a.tres.mem},
+        'comment': a.comment,
+        'created_at': a.created_at,
+        'updated_at': a.updated_at,
+    }
+    if qa is not None:
+        data['qos'] = qa.qos.name
+        data['field'] = qa.field
+    return data
+
+
+@site_args.apply()
+@commands.register('ng', 'slurm', 'allocation', 'show',
+                   aliases=['list'],
+                   help='Show a single allocation by id, or list allocations '
+                        'at a site filtered by group/partition/qos/field')
+async def slurm_allocation_show(args: Namespace):
+    console = Console()
+
+    # Direct lookup by id — no site needed.
+    if args.id:
+        try:
+            oid = PydanticObjectId(args.id)
+        except Exception:
+            console.print(f'[red]{args.id!r} is not a valid ObjectId[/]')
+            return 1
+        alloc = await SlurmAllocation.get(oid)
+        if alloc is None:
+            console.print(f'[red]Allocation {args.id} not found[/]')
+            return 1
+        data = _alloc_to_dict(None, alloc=alloc)
+        if args.yaml:
+            console.print(highlight_yaml(dumps_yaml(data)))
+        else:
+            table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+            table.add_column(style='bold cyan', no_wrap=True)
+            table.add_column()
+            for key in ('id', 'comment', 'created_at', 'updated_at'):
+                table.add_row(key, str(data[key]))
+            tres = data['tres']
+            table.add_row(
+                'tres',
+                f'cpus={tres["cpus"]}, gpus={tres["gpus"]}, mem={tres["mem"]}',
+            )
+            console.print(Panel(table,
+                                title=f'[bold]Allocation:[/] [green]{alloc.id}[/]',
+                                border_style='cyan', expand=False))
+        return 0
+
+    # Filter-mode requires --site.
+    if not args.site:
+        console.print('[red]--site is required when not looking up by --id[/]')
+        return 1
+    site = await Site.find_one(Site.name == args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    group = partition = qos = None
+    if args.group:
+        group = await Group.find_one(Group.name == args.group)
+        if group is None:
+            console.print(f'[red]Group {args.group} not found[/]')
+            return 1
+    if args.partition:
+        partition = await partition_at_site(site, args.partition)
+        if partition is None:
+            console.print(f'[red]Partition {args.partition} not found on {args.site}[/]')
+            return 1
+    if args.qos:
+        qos = await qos_at_site(site, args.qos)
+        if qos is None:
+            console.print(f'[red]QOS {args.qos} not found on {args.site}[/]')
+            return 1
+
+    qas = await list_allocations_at_site(
+        site, group=group, partition=partition, qos=qos, field=args.field,
+    )
+    if not qas:
+        console.print('[dim](no matching allocations)[/]')
+        return 0
+
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml([_alloc_to_dict(qa) for qa in qas])))
+        return 0
+
+    table = Table(title=f'Allocations on {args.site}')
+    table.add_column('id', style='dim')
+    table.add_column('qos', style='magenta')
+    table.add_column('field', style='cyan')
+    table.add_column('cpus')
+    table.add_column('gpus')
+    table.add_column('mem')
+    table.add_column('comment', style='dim')
+    for qa in qas:
+        a = qa.allocation
+        table.add_row(
+            str(a.id), qa.qos.name, qa.field,
+            str(a.tres.cpus), str(a.tres.gpus), str(a.tres.mem or ''),
+            a.comment,
+        )
+    console.print(table)
+
+
+@slurm_allocation_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--id', default=None,
+                        help='Show one allocation by ObjectId (skips other filters)')
+    parser.add_argument('--group', '-g', default=None,
+                        help='Restrict to QOSes this group has associations on')
+    parser.add_argument('--partition', default=None,
+                        help='Restrict to QOSes referenced by associations on '
+                             'this partition')
+    parser.add_argument('--qos', default=None,
+                        help='Restrict to a single QOS')
+    parser.add_argument('--field', default=None,
+                        choices=list(_QOS_ALLOC_FIELDS),
+                        help='Restrict to a single limit list')
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')

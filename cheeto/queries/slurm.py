@@ -229,3 +229,117 @@ async def list_associations_at_site(
     return await SlurmAssociation.find(
         *filters, fetch_links=True, nesting_depth=2,
     ).to_list()
+
+
+# ---------------------------------------------------------------------------
+# Partition lookups
+# ---------------------------------------------------------------------------
+
+
+async def partition_at_site(site: Site, name: str) -> SlurmPartition | None:
+    return await SlurmPartition.find_one(
+        SlurmPartition.name == name,
+        SlurmPartition.site.id == site.id,
+    )
+
+
+async def list_partitions_at_site(
+    site: Site,
+    *,
+    group: Group | None = None,
+) -> list[SlurmPartition]:
+    """List partitions at a site. With `group`, restrict to partitions the
+    group has at least one association on."""
+    if group is None:
+        return await SlurmPartition.find(
+            SlurmPartition.site.id == site.id,
+        ).sort('+name').to_list()
+
+    assocs = await list_associations_at_site(site, group=group)
+    seen: dict[PydanticObjectId, SlurmPartition] = {}
+    for a in assocs:
+        # a.partition is a resolved SlurmPartition Document at nesting_depth=2.
+        seen[a.partition.id] = a.partition
+    return sorted(seen.values(), key=lambda p: p.name)
+
+
+# ---------------------------------------------------------------------------
+# Allocation lookups
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class QOSAllocation:
+    """An allocation contextualized by which QOS owns it and in which limit list."""
+    qos: SlurmQOS
+    field: str          # 'group_limits' | 'user_limits' | 'job_limits'
+    allocation: SlurmAllocation
+
+
+def explode_qos_allocations(
+    qos: SlurmQOS,
+    *,
+    field: str | None = None,
+) -> list[QOSAllocation]:
+    """Flatten a QOS's three limit lists into (qos, field, alloc) tuples.
+
+    Synchronous — assumes `qos` was fetched with allocations resolved
+    (e.g. `fetch_links=True, nesting_depth=1` on the SlurmQOS query, or
+    `nesting_depth=2` when reaching it through a SlurmAssociation).
+    """
+    out: list[QOSAllocation] = []
+    field_lists = (
+        ('group_limits', qos.group_limits),
+        ('user_limits', qos.user_limits),
+        ('job_limits', qos.job_limits),
+    )
+    for fname, allocs in field_lists:
+        if field is not None and field != fname:
+            continue
+        for a in allocs:
+            out.append(QOSAllocation(qos=qos, field=fname, allocation=a))
+    return out
+
+
+async def list_allocations_at_site(
+    site: Site,
+    *,
+    group: Group | None = None,
+    partition: SlurmPartition | None = None,
+    qos: SlurmQOS | None = None,
+    field: str | None = None,
+) -> list[QOSAllocation]:
+    """Find allocations across QOSes at a site, optionally narrowed.
+
+    - With `qos`: only that QOS's allocations.
+    - With `group` and/or `partition`: only QOSes referenced by matching
+      associations.
+    - `field` further restricts to a single limit list.
+    """
+    if qos is not None:
+        full = await SlurmQOS.find_one(
+            SlurmQOS.id == qos.id,
+            fetch_links=True,
+            nesting_depth=1,
+        )
+        if full is None:
+            return []
+        return explode_qos_allocations(full, field=field)
+
+    qos_ids: set[PydanticObjectId] | None = None
+    if group is not None or partition is not None:
+        assocs = await list_associations_at_site(
+            site, group=group, partition=partition,
+        )
+        if not assocs:
+            return []
+        qos_ids = {a.qos.id for a in assocs}
+
+    qoses = await list_qos_at_site(site)
+    if qos_ids is not None:
+        qoses = [q for q in qoses if q.id in qos_ids]
+
+    out: list[QOSAllocation] = []
+    for q in qoses:
+        out.extend(explode_qos_allocations(q, field=field))
+    return out

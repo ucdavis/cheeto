@@ -1155,6 +1155,127 @@ class TestSlurmOps:
         filtered = await list_associations_at_site(site, group=group)
         assert len(filtered) == 1
 
+    async def test_partition_query_helpers(self, beanie_client, site):
+        from cheeto.queries.slurm import (
+            partition_at_site, list_partitions_at_site,
+        )
+        for name in ('pq-a', 'pq-b', 'pq-c'):
+            await CreateSlurmPartition.run(
+                beanie_client, None, name=name, site_name='slurmsite',
+            )
+
+        one = await partition_at_site(site, 'pq-a')
+        assert one is not None and one.name == 'pq-a'
+
+        missing = await partition_at_site(site, 'pq-nope')
+        assert missing is None
+
+        all_parts = await list_partitions_at_site(site)
+        names = {p.name for p in all_parts}
+        assert {'pq-a', 'pq-b', 'pq-c'}.issubset(names)
+
+    async def test_list_partitions_filtered_by_group(self, beanie_client, site):
+        from cheeto.queries.slurm import list_partitions_at_site
+        # Two partitions exist; group has an association on only one of them
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='pgf-yes', site_name='slurmsite',
+        )
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='pgf-no', site_name='slurmsite',
+        )
+        await CreateSlurmQOS.run(
+            beanie_client, None, name='pgf-qos', site_name='slurmsite',
+        )
+        group = await CreateGroup.run(
+            beanie_client, None, name='pgf-grp', gid=64500,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='pgf-grp',
+            partition_name='pgf-yes', qos_name='pgf-qos',
+        )
+
+        scoped = await list_partitions_at_site(site, group=group)
+        assert {p.name for p in scoped} == {'pgf-yes'}
+
+    async def test_allocation_query_helpers(self, beanie_client, site):
+        from cheeto.queries.slurm import (
+            list_allocations_at_site, explode_qos_allocations,
+        )
+        # QOS with two group_limits and one user_limits allocation
+        qos = await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='aq-qos', site_name='slurmsite',
+            group_limits=[
+                SlurmAllocation(tres=SlurmTRES(cpus=128), comment='primary'),
+                SlurmAllocation(tres=SlurmTRES(cpus=64), comment='extension'),
+            ],
+            user_limits=[
+                SlurmAllocation(tres=SlurmTRES(cpus=16), comment='cap'),
+            ],
+        )
+        # Re-fetch with allocations resolved before exploding
+        from cheeto.queries.slurm import qos_at_site
+        full = await qos_at_site(site, 'aq-qos')
+        assert full is not None
+        flat = explode_qos_allocations(full)
+        assert len(flat) == 3
+        assert {qa.field for qa in flat} == {'group_limits', 'user_limits'}
+
+        narrowed = explode_qos_allocations(full, field='user_limits')
+        assert len(narrowed) == 1 and narrowed[0].field == 'user_limits'
+
+        # site-wide listing should include them
+        all_at_site = await list_allocations_at_site(site)
+        ids = {qa.allocation.id for qa in all_at_site if qa.qos.name == 'aq-qos'}
+        assert len(ids) == 3
+
+        # Narrow by qos
+        only_aq = await list_allocations_at_site(site, qos=full)
+        assert len(only_aq) == 3
+
+    async def test_list_allocations_filtered_by_group(self, beanie_client, site):
+        from cheeto.queries.slurm import list_allocations_at_site
+        # Two QOSes — only one is reachable via the group's associations
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='afg-yes', site_name='slurmsite',
+            group_limits=[
+                SlurmAllocation(tres=SlurmTRES(cpus=8), comment='a'),
+            ],
+        )
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='afg-no', site_name='slurmsite',
+            group_limits=[
+                SlurmAllocation(tres=SlurmTRES(cpus=8), comment='b'),
+            ],
+        )
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='afg-part', site_name='slurmsite',
+        )
+        group = await CreateGroup.run(
+            beanie_client, None, name='afg-grp', gid=64600,
+        )
+        from cheeto.models.slurm import SlurmAccount, SlurmAccountLimits
+        acc = SlurmAccount(group=group, site=site, limits=SlurmAccountLimits())
+        await acc.insert()
+        await CreateSlurmAssociation.run(
+            beanie_client, None,
+            site_name='slurmsite',
+            account_group_name='afg-grp',
+            partition_name='afg-part', qos_name='afg-yes',
+        )
+
+        scoped = await list_allocations_at_site(site, group=group)
+        # Only the yes-QOS contributes
+        assert {qa.qos.name for qa in scoped} == {'afg-yes'}
+        assert len(scoped) == 1
+
 
 class TestHistoryTracking:
 
