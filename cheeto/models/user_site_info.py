@@ -1,23 +1,20 @@
-import datetime
-
 import pymongo
 from beanie import Link
 from pymongo import IndexModel
 from pydantic import Field, field_validator
 
 from ..constants import ACCESS_TYPES, USER_STATUSES
-from .base import BaseDocument
+from .base import BaseDocument, Expirable
 from .site import Site
 from .user import User
 
 
-class UserSiteInfo(BaseDocument):
+class UserSiteInfo(BaseDocument, Expirable):
     user: Link[User]
     site: Link[Site]
 
     status: str = 'active'
     access: list[str] = Field(default_factory=lambda: ['login-ssh'])
-    expiry: datetime.datetime | None = None
 
     @field_validator('status')
     @classmethod

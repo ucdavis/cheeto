@@ -134,13 +134,22 @@ class TestUserModel:
             name='keyuser', email='key@test.com',
             uid=10001, gid=10001, fullname='Key User',
             home_directory='/home/keyuser',
-            ssh_keys=[SshKey(key='ssh-ed25519 AAAA test@host')],
         )
         await u.insert()
-        fetched = await User.find_one(User.name == 'keyuser')
-        assert len(fetched.ssh_keys) == 1
-        assert fetched.ssh_keys[0].key.startswith('ssh-ed25519')
-        assert fetched.ssh_keys[0].registered_at is not None
+        await SshKey(key='ssh-ed25519 AAAA test@host', user=u).insert()
+        await SshKey(key='ssh-rsa BBBB other@host', user=u).insert()
+
+        keys = await SshKey.find(SshKey.user.id == u.id).to_list()
+        assert len(keys) == 2
+        assert {k.key for k in keys} == {
+            'ssh-ed25519 AAAA test@host',
+            'ssh-rsa BBBB other@host',
+        }
+        # SshKey is a Document — gets created_at from BaseDocument and the
+        # optional expires_at/provisioned_at from the Expirable mixin.
+        assert keys[0].created_at is not None
+        assert keys[0].expires_at is None
+        assert keys[0].provisioned_at is None
 
     async def test_user_validation_bad_shell(self):
         with pytest.raises(Exception):
@@ -162,6 +171,80 @@ class TestUserModel:
                 name='x', email='x@test.com', uid=1, gid=1,
                 fullname='X', home_directory='/x', access=['bogus'],
             )
+
+
+class TestExpirable:
+    """Round-trip the Expirable mixin fields on documents that adopt it."""
+
+    async def test_user_expirable_defaults(self, beanie_client):
+        u = User(
+            name='exp_u', email='e@test.com',
+            uid=30000, gid=30000, fullname='Exp User',
+            home_directory='/home/exp_u',
+        )
+        await u.insert()
+        fetched = await User.find_one(User.name == 'exp_u')
+        assert fetched is not None
+        assert fetched.expires_at is None
+        assert fetched.provisioned_at is None
+
+    async def test_user_expirable_round_trip(self, beanie_client):
+        from datetime import datetime, timedelta, timezone
+        # Use naive UTC: the test mongo client is tz_aware=False, so reads come
+        # back naive — match that on the input side to keep comparisons simple.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        provisioned = now - timedelta(days=10)
+        expires = now + timedelta(days=30)
+        u = User(
+            name='exp_u2', email='e2@test.com',
+            uid=30001, gid=30001, fullname='Exp User 2',
+            home_directory='/home/exp_u2',
+            provisioned_at=provisioned,
+            expires_at=expires,
+        )
+        await u.insert()
+        fetched = await User.find_one(User.name == 'exp_u2')
+        assert fetched.provisioned_at is not None
+        assert fetched.expires_at is not None
+        # Mongo strips sub-millisecond precision; compare with tolerance.
+        assert abs((fetched.provisioned_at - provisioned).total_seconds()) < 1
+        assert abs((fetched.expires_at - expires).total_seconds()) < 1
+
+    async def test_user_site_info_expirable(self, beanie_client):
+        from datetime import datetime, timedelta, timezone
+        u = User(
+            name='exp_usi', email='usi@test.com',
+            uid=30002, gid=30002, fullname='USI Exp',
+            home_directory='/home/exp_usi',
+        )
+        await u.insert()
+        site = Site(name='exp_site', fqdn='exp.example.com')
+        await site.insert()
+
+        expires = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=14)
+        usi = UserSiteInfo(user=u, site=site, expires_at=expires)
+        await usi.insert()
+
+        fetched = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == u.id,
+            UserSiteInfo.site.id == site.id,
+        )
+        assert fetched.expires_at is not None
+        assert abs((fetched.expires_at - expires).total_seconds()) < 1
+        assert fetched.provisioned_at is None
+
+    async def test_slurm_allocation_expirable(self, beanie_client):
+        from datetime import datetime, timezone
+        provisioned = datetime.now(timezone.utc).replace(tzinfo=None)
+        alloc = SlurmAllocation(
+            tres=SlurmTRES(cpus=8),
+            comment='exp test',
+            provisioned_at=provisioned,
+        )
+        await alloc.insert()
+        fetched = await SlurmAllocation.get(alloc.id)
+        assert fetched.provisioned_at is not None
+        assert abs((fetched.provisioned_at - provisioned).total_seconds()) < 1
 
 
 class TestSiteModel:

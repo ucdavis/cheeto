@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from beanie import Document, Insert, Replace, Save, SaveChanges, Update, before_event
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 
 class BaseDocument(Document):
@@ -15,3 +15,10 @@ class BaseDocument(Document):
     class Settings:
         use_state_management = True
         is_root = False
+
+
+class Expirable(BaseModel):
+    """Mixin providing optional expires_at and provisioned_at timestamps."""
+
+    expires_at: datetime | None = None
+    provisioned_at: datetime | None = None

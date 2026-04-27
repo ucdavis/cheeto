@@ -4,7 +4,7 @@ import datetime
 from typing import TYPE_CHECKING, Annotated
 
 import pymongo
-from beanie import BackLink
+from beanie import BackLink, Link
 from pydantic import BaseModel, Field, field_validator
 
 from ..constants import (
@@ -16,17 +16,11 @@ from ..constants import (
     USER_STATUSES,
     USER_TYPES,
 )
-from .base import BaseDocument
+from .base import BaseDocument, Expirable
 
 if TYPE_CHECKING:
     from .group import Group
     from .user_site_info import UserSiteInfo
-
-
-class SshKey(BaseModel):
-    key: str
-    registered_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
-    expires_at: datetime.datetime | None = None
 
 
 class UCDIAMInfo(BaseModel):
@@ -36,7 +30,7 @@ class UCDIAMInfo(BaseModel):
     iam_synced_at: datetime.datetime | None = None
 
 
-class User(BaseDocument):
+class User(BaseDocument, Expirable):
     name: Annotated[str, Field(min_length=1, max_length=32)]
     email: Annotated[str, Field(pattern=EMAIL_REGEX)]
     uid: Annotated[int, Field(ge=0, le=UINT_MAX)]
@@ -47,7 +41,6 @@ class User(BaseDocument):
     type: str = 'user'
     status: str = 'active'
     password: str | None = None
-    ssh_keys: list[SshKey] = Field(default_factory=list)
     access: list[str] = Field(default_factory=lambda: ['login-ssh'])
     comments: list[str] = Field(default_factory=list)
 
@@ -62,6 +55,11 @@ class User(BaseDocument):
     sites: list[BackLink['UserSiteInfo']] = Field(
         default_factory=list,
         json_schema_extra={'original_field': 'site'},
+    )
+
+    ssh_keys: list[BackLink['SshKey']] = Field(
+        default_factory=list,
+        json_schema_extra={'original_field': 'user'},
     )
 
     @field_validator('shell')
@@ -99,4 +97,15 @@ class User(BaseDocument):
             [('name', pymongo.ASCENDING)],
             [('uid', pymongo.ASCENDING)],
             [('gid', pymongo.ASCENDING)],
+        ]
+
+
+class SshKey(BaseDocument, Expirable):
+    key: str
+    user: Link[User]
+
+    class Settings:
+        name = 'ssh_keys'
+        indexes = [
+            [('user', pymongo.ASCENDING)],
         ]

@@ -9,7 +9,7 @@ from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
 from ...log import Console
 from ...models.site import Site
-from ...models.user import User
+from ...models.user import SshKey, User
 from ...models.user_site_info import UserSiteInfo
 from ...operations import (
     AddUserAccess,
@@ -41,6 +41,7 @@ def _announce_password(console: Console, password: str) -> None:
 
 
 def _user_to_dict(user: User,
+                  ssh_keys: list[SshKey] | None = None,
                   site_info: dict | None = None,
                   slurm_info: list[dict] | None = None) -> dict:
     data = {
@@ -57,8 +58,12 @@ def _user_to_dict(user: User,
         'created_at': user.created_at,
         'updated_at': user.updated_at,
     }
-    if user.ssh_keys:
-        data['ssh_keys'] = [k.key for k in user.ssh_keys]
+    if user.expires_at is not None:
+        data['expires_at'] = user.expires_at
+    if user.provisioned_at is not None:
+        data['provisioned_at'] = user.provisioned_at
+    if ssh_keys:
+        data['ssh_keys'] = [k.key for k in ssh_keys]
     if user.comments:
         data['comments'] = list(user.comments)
     if user.iam is not None:
@@ -107,7 +112,8 @@ def _render_user_panel(data: dict) -> Panel:
 
     scalar_keys = ('name', 'email', 'uid', 'gid', 'fullname', 'shell',
                    'type', 'status', 'home_directory',
-                   'created_at', 'updated_at')
+                   'created_at', 'updated_at',
+                   'provisioned_at', 'expires_at')
     for key in scalar_keys:
         if key in data and data[key] is not None:
             table.add_row(key, str(data[key]))
@@ -133,7 +139,8 @@ def _render_user_panel(data: dict) -> Panel:
         si_str = (
             f'site={si["site"]}, status={si["status"]}, '
             f'access={", ".join(si["access"])}'
-            + (f', expiry={si["expiry"]}' if si.get('expiry') else '')
+            + (f', expires_at={si["expires_at"]}' if si.get('expires_at') else '')
+            + (f', provisioned_at={si["provisioned_at"]}' if si.get('provisioned_at') else '')
         )
         table.add_row('at site', si_str)
 
@@ -383,6 +390,8 @@ async def user_show(args: Namespace):
         console.print(f'[red]User {args.user} not found[/]')
         return 1
 
+    ssh_keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+
     site_info = None
     slurm_info = None
     if args.site:
@@ -399,11 +408,14 @@ async def user_show(args: Namespace):
                 'site': args.site,
                 'status': usi.status,
                 'access': list(usi.access),
-                'expiry': usi.expiry,
+                'expires_at': usi.expires_at,
+                'provisioned_at': usi.provisioned_at,
             }
         slurm_info = await user_slurm_at_site(user, site)
 
-    data = _user_to_dict(user, site_info=site_info, slurm_info=slurm_info)
+    data = _user_to_dict(
+        user, ssh_keys=ssh_keys, site_info=site_info, slurm_info=slurm_info,
+    )
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))
     else:

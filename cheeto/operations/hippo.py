@@ -216,8 +216,8 @@ class UpdateSshKeyHandler(AccountHippoHandler):
             raise ValueError(f'User {parsed.username} does not exist')
         key = parsed.hippo_account.key
         if key:
-            user.ssh_keys = [SshKeyModel(key=key)]
-            await user.save()
+            await SshKeyModel.find(SshKeyModel.user.id == user.id).delete()
+            await SshKeyModel(key=key, user=user).insert()
         await AddUserAccess.run(
             context.client, context.author,
             name=parsed.username, access='login-ssh',

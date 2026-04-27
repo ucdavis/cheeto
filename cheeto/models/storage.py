@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from ..constants import DATA_QUOTA_REGEX, STORAGE_CATEGORIES, STORAGE_TYPES
 from ..utils import size_to_megs
-from .base import BaseDocument
+from .base import BaseDocument, Expirable
 from .site import Site
 from .user import User
 
@@ -50,7 +50,7 @@ class AutomountMap(BaseDocument):
         ]
 
 
-class Storage(BaseDocument):
+class Storage(BaseDocument, Expirable):
     name: Annotated[str, Field(min_length=1)]
     site: Link[Site]
     type: str

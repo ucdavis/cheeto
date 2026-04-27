@@ -106,10 +106,6 @@ class MigrateUser(Operation):
         if old_user is None:
             raise ValueError(f'User {self.username} not found in old database')
 
-        ssh_keys = []
-        if old_user.ssh_key:
-            ssh_keys = [SshKey(key=k) for k in old_user.ssh_key]
-
         user = User(
             name=old_user.username,
             email=old_user.email,
@@ -120,13 +116,16 @@ class MigrateUser(Operation):
             type=old_user.type,
             status=old_user.status,
             password=old_user.password,
-            ssh_keys=ssh_keys,
             access=list(old_user.access) if old_user.access else ['login-ssh'],
             comments=list(old_user.comments) if old_user.comments else [],
             home_directory=old_user.home_directory,
         )
         await user.insert(session=session)
         logger.info('Migrated user %s (uid=%d)', old_user.username, old_user.uid)
+
+        if old_user.ssh_key:
+            for k in old_user.ssh_key:
+                await SshKey(key=k, user=user).insert(session=session)
 
         # Migrate SiteUser records for this user
         for old_site_user in SiteUser.objects(username=self.username):
@@ -145,7 +144,7 @@ class MigrateUser(Operation):
                 access=list(old_site_user._access) if old_site_user._access else ['login-ssh'],
             )
             if old_site_user.expiry:
-                usi.expiry = old_site_user.expiry
+                usi.expires_at = old_site_user.expiry
             await usi.insert(session=session)
             self.site_infos_created += 1
 

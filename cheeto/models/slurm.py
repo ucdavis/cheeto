@@ -8,7 +8,7 @@ from pymongo import IndexModel
 from pydantic import BaseModel, Field, field_validator
 
 from ..constants import DATA_QUOTA_REGEX, SLURM_QOS_VALID_FLAGS
-from .base import BaseDocument
+from .base import BaseDocument, Expirable
 from .site import Site
 from .user import User
 
@@ -22,7 +22,7 @@ class SlurmTRES(BaseModel):
     mem: Annotated[str | None, Field(default=None, pattern=DATA_QUOTA_REGEX)]
 
 
-class SlurmAllocation(BaseDocument):
+class SlurmAllocation(BaseDocument, Expirable):
     tres: SlurmTRES = Field(default_factory=SlurmTRES)
     comment: str = ''
 

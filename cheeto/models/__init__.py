@@ -1,4 +1,4 @@
-from .base import BaseDocument
+from .base import BaseDocument, Expirable
 from .site import Site
 from .user import SshKey, UCDIAMInfo, User
 from .group import Group
@@ -24,6 +24,7 @@ from .hippo import HippoEvent
 
 # Rebuild models to resolve forward references (BackLink/Link with string refs)
 User.model_rebuild()
+SshKey.model_rebuild()
 Group.model_rebuild()
 SlurmAccount.model_rebuild()
 Storage.model_rebuild()
@@ -31,6 +32,7 @@ Storage.model_rebuild()
 ALL_MODELS = [
     Site,
     User,
+    SshKey,
     Group,
     UserSiteInfo,
     SlurmAccount,
