@@ -67,10 +67,23 @@ def _user_to_dict(user: User,
     if user.comments:
         data['comments'] = list(user.comments)
     if user.iam is not None:
+        iam = user.iam
         data['iam'] = {
-            'iam_id': user.iam.iam_id,
-            'mothra_id': user.iam.mothra_id,
-            'colleges': list(user.iam.colleges),
+            'iam_id': iam.iam_id,
+            'mothra_id': iam.mothra_id,
+            'user_types': list(iam.user_types),
+            'iam_synced_at': iam.iam_synced_at,
+            'last_seen_at': iam.last_seen_at,
+            'first_missing_at': iam.first_missing_at,
+            'associations': [
+                {
+                    'org_name': a.org_name,
+                    'dept_name': a.dept_name,
+                    'title': a.title,
+                    'title_type': a.title_type,
+                }
+                for a in iam.associations
+            ],
         }
     if site_info is not None:
         data['site_info'] = site_info
@@ -105,6 +118,44 @@ def _render_user_slurm(slurm_info: list[dict]) -> Table:
     return table
 
 
+def _render_user_iam(iam: dict) -> Table:
+    """Render the iam sub-block: identifiers + sync state + associations table."""
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column(style='dim', no_wrap=True)
+    table.add_column()
+
+    table.add_row('iam_id', str(iam['iam_id']))
+    table.add_row('mothra_id', str(iam['mothra_id']))
+    if iam.get('user_types'):
+        table.add_row('user_types', ', '.join(iam['user_types']))
+
+    for key in ('iam_synced_at', 'last_seen_at'):
+        if iam.get(key):
+            table.add_row(key, str(iam[key]))
+    # first_missing_at is the actionable signal; surface it in red.
+    if iam.get('first_missing_at'):
+        table.add_row(
+            'first_missing_at',
+            f'[red]{iam["first_missing_at"]}[/]',
+        )
+
+    associations = iam.get('associations') or []
+    if associations:
+        sub = Table(show_header=True, box=None, pad_edge=False, padding=(0, 1))
+        sub.add_column('org', style='green')
+        sub.add_column('dept', style='cyan')
+        sub.add_column('title', style='magenta')
+        sub.add_column('class', style='dim')
+        for a in associations:
+            sub.add_row(
+                a.get('org_name', ''), a.get('dept_name', ''),
+                a.get('title', ''), a.get('title_type', ''),
+            )
+        table.add_row('associations', sub)
+
+    return table
+
+
 def _render_user_panel(data: dict) -> Panel:
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
     table.add_column(style='bold cyan', no_wrap=True)
@@ -128,11 +179,7 @@ def _render_user_panel(data: dict) -> Panel:
         table.add_row('comments', '\n'.join(data['comments']))
 
     if data.get('iam'):
-        iam = data['iam']
-        iam_str = (f'iam_id={iam["iam_id"]}, '
-                   f'mothra_id={iam["mothra_id"]}, '
-                   f'colleges={iam["colleges"]}')
-        table.add_row('iam', iam_str)
+        table.add_row('iam', _render_user_iam(data['iam']))
 
     if 'site_info' in data:
         si = data['site_info']
