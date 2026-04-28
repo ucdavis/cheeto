@@ -68,23 +68,26 @@ def _user_to_dict(user: User,
         data['comments'] = list(user.comments)
     if user.iam is not None:
         iam = user.iam
-        data['iam'] = {
-            'iam_id': iam.iam_id,
-            'mothra_id': iam.mothra_id,
-            'user_types': list(iam.user_types),
+        iam_data: dict = {
+            'iam_status': iam.iam_status,
             'iam_synced_at': iam.iam_synced_at,
             'last_seen_at': iam.last_seen_at,
             'first_missing_at': iam.first_missing_at,
-            'associations': [
+        }
+        if iam.person is not None:
+            iam_data['iam_id'] = iam.person.iam_id
+            iam_data['mothra_id'] = iam.person.mothra_id
+            iam_data['user_types'] = list(iam.person.user_types)
+            iam_data['associations'] = [
                 {
                     'org_name': a.org_name,
                     'dept_name': a.dept_name,
                     'title': a.title,
                     'title_type': a.title_type,
                 }
-                for a in iam.associations
-            ],
-        }
+                for a in iam.person.associations
+            ]
+        data['iam'] = iam_data
     if site_info is not None:
         data['site_info'] = site_info
     if slurm_info is not None:
@@ -119,13 +122,19 @@ def _render_user_slurm(slurm_info: list[dict]) -> Table:
 
 
 def _render_user_iam(iam: dict) -> Table:
-    """Render the iam sub-block: identifiers + sync state + associations table."""
+    """Render the iam sub-block: status + sync state + person snapshot."""
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
     table.add_column(style='dim', no_wrap=True)
     table.add_column()
 
-    table.add_row('iam_id', str(iam['iam_id']))
-    table.add_row('mothra_id', str(iam['mothra_id']))
+    status = iam.get('iam_status', 'present')
+    status_style = 'red' if status == 'missing' else 'green'
+    table.add_row('iam_status', f'[{status_style}]{status}[/]')
+
+    if 'iam_id' in iam:
+        table.add_row('iam_id', str(iam['iam_id']))
+    if 'mothra_id' in iam:
+        table.add_row('mothra_id', str(iam['mothra_id']))
     if iam.get('user_types'):
         table.add_row('user_types', ', '.join(iam['user_types']))
 

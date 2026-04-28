@@ -237,3 +237,11 @@ IAM_SYNCABLE_USER_TYPES : Final = (
     'user',
     'admin',
 )
+
+# Authoritative current state of an IAM record on a User. 'present' = IAM
+# returned a person record on the last definitive sync. 'missing' = IAM
+# returned 200-empty/404 — start the offboarding grace clock.
+IAM_STATUSES : Final = (
+    'present',
+    'missing',
+)

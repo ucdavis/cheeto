@@ -11,6 +11,7 @@ from ..constants import (
     ACCESS_TYPES,
     DEFAULT_SHELL,
     EMAIL_REGEX,
+    IAM_STATUSES,
     IAM_USER_TYPES,
     SHELLS,
     UINT_MAX,
@@ -34,18 +35,15 @@ class UCDIAMAssociation(BaseModel):
     title_type: str # emplClassDesc from the association itself
 
 
-class UCDIAMInfo(BaseModel):
+class UCDIAMPerson(BaseModel):
+    """Snapshot of an IAM person record. Only populated after a successful
+    `get_person_using_iam_id` lookup; left intact during missing streaks so
+    operators can see what the user looked like before they vanished."""
+
     iam_id: Annotated[int, Field(ge=0, le=UINT_MAX)]
     mothra_id: Annotated[int, Field(ge=0, le=UINT_MAX)]
     user_types: list[str] = Field(default_factory=list)
     associations: list[UCDIAMAssociation] = Field(default_factory=list)
-    iam_synced_at: datetime.datetime | None = None
-    # Last sync that returned a populated payload (vs. iam_synced_at, which
-    # advances on any definitive answer including a 200-empty/404 miss).
-    last_seen_at: datetime.datetime | None = None
-    # First sync (in the current missing streak) that found the user gone.
-    # Cleared on the next hit. Drives the offboarding grace window.
-    first_missing_at: datetime.datetime | None = None
 
     @field_validator('user_types')
     @classmethod
@@ -53,6 +51,35 @@ class UCDIAMInfo(BaseModel):
         for user_type in v:
             if user_type not in IAM_USER_TYPES:
                 raise ValueError(f'Invalid IAM user type: {user_type}')
+        return v
+
+
+class UCDIAMInfo(BaseModel):
+    """IAM sync bookkeeping for a User.
+
+    The `person` snapshot is the most recent successful `get_person` payload;
+    it stays around during missing streaks. `iam_status` is the authoritative
+    current state of the IAM record. The timestamps drive the offboarding
+    state machine in `cheeto.operations.iam.SyncUserIAM`.
+    """
+
+    iam_status: str = 'present'
+    person: UCDIAMPerson | None = None
+    # Last sync attempt that produced a definitive answer (200-with-data,
+    # 200-empty, or 404). Transient errors (5xx, transport, timeout) do NOT
+    # advance this.
+    iam_synced_at: datetime.datetime | None = None
+    # Last sync that returned a populated payload.
+    last_seen_at: datetime.datetime | None = None
+    # First sync (in the current missing streak) that found the user gone.
+    # Cleared on the next hit. Drives the offboarding grace window.
+    first_missing_at: datetime.datetime | None = None
+
+    @field_validator('iam_status')
+    @classmethod
+    def validate_iam_status(cls, v):
+        if v not in IAM_STATUSES:
+            raise ValueError(f'Invalid IAM status: {v}')
         return v
 
 

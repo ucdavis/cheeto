@@ -34,9 +34,10 @@ from ..iam_async import (
     IAM_MISSING,
     AsyncIAMAPI,
     IAMTransientError,
+    IAMUserPayload,
     build_ucdiam_info,
 )
-from ..models.user import User
+from ..models.user import UCDIAMInfo, User
 from .base import Operation
 
 logger = logging.getLogger(__name__)
@@ -104,22 +105,16 @@ class SyncUserIAM(Operation):
                 f'(allowed: {list(IAM_SYNCABLE_USER_TYPES)})'
             )
 
-        # Resolve IAM ID
-        if user.iam is None:
-            resolved = await self.iam_api.resolve_iam_id_by_username(user.name)
-            if resolved is IAM_MISSING:
-                # Never had an IAM sighting; nothing to record. Don't set
-                # first_missing_at since there's no streak to start.
-                self._outcome = 'no_iam_id'
-                self._status = user.status
-                return self._build_result()
-            iam_id = int(resolved['iamId'])
-        else:
-            iam_id = user.iam.iam_id
+        # Resolve IAM ID and fetch the bundle.
+        # `bundle` is one of: IAMUserPayload (hit), IAM_MISSING (miss), or
+        # None (we couldn't even get an iam_id and the user has no prior
+        # iam record — distinct from miss because there's no streak to start).
+        bundle = await self._resolve_and_fetch(user)
 
-        self._iam_id = iam_id
-
-        bundle = await self.iam_api.fetch_user_bundle(iam_id)
+        if bundle is None:
+            self._outcome = 'no_iam_id'
+            self._status = user.status
+            return self._build_result()
 
         if bundle is IAM_MISSING:
             await self._handle_miss(user, session)
@@ -134,6 +129,41 @@ class SyncUserIAM(Operation):
             self._last_seen_at = user.iam.last_seen_at
 
         return self._build_result()
+
+    async def _resolve_and_fetch(
+        self, user: User,
+    ) -> IAMUserPayload | type(IAM_MISSING) | None:
+        """Determine the user's iam_id and fetch the IAM bundle.
+
+        Returns:
+          - IAMUserPayload on a hit
+          - IAM_MISSING when we know the user is gone (either get_person
+            came back empty, or we don't have a cached iam_id and the
+            resolver also couldn't find them but we already had a streak
+            going).
+          - None when there is no way to obtain an iam_id and we have no
+            prior iam state — caller maps this to outcome 'no_iam_id'.
+        """
+        # Use cached iam_id if we have one.
+        if user.iam is not None and user.iam.person is not None:
+            iam_id = user.iam.person.iam_id
+            self._iam_id = iam_id
+            return await self.iam_api.fetch_user_bundle(iam_id)
+
+        # No cached iam_id (either never synced, or last sync's lookup
+        # didn't produce a person snapshot). Re-resolve.
+        resolved = await self.iam_api.resolve_iam_id_by_username(user.name)
+        if resolved is IAM_MISSING:
+            # Resolver can't map this username to an iam_id.
+            if user.iam is None:
+                # We never had any IAM data; nothing to record.
+                return None
+            # We have a streak going but never captured an iam_id. Treat
+            # as a miss so the streak advances.
+            return IAM_MISSING
+        iam_id = int(resolved['iamId'])
+        self._iam_id = iam_id
+        return await self.iam_api.fetch_user_bundle(iam_id)
 
     async def _handle_hit(self, user, bundle, session) -> None:
         # IAM is the source of truth: build a fresh UCDIAMInfo and replace
@@ -157,24 +187,22 @@ class SyncUserIAM(Operation):
         self._outcome = 'hit_restored' if restored else 'hit'
 
     async def _handle_miss(self, user, session) -> None:
+        # Always record the missing-state bookkeeping. Even when this is
+        # the first sync ever for this user (resolver hit, then get_person
+        # 404'd), we still need a UCDIAMInfo so the grace clock starts.
         if user.iam is None:
-            # No prior IAM record AND a miss: there's literally no streak
-            # to start. We already handled the resolve-failure above; this
-            # branch is for the (rare) case where resolve succeeded but
-            # the follow-up get_person came back empty. Treat as
-            # never-seen and bail without writing.
-            self._outcome = 'miss_never_seen'
-            return
+            user.iam = UCDIAMInfo()
+        iam = user.iam
+        iam.iam_status = 'missing'
+        iam.iam_synced_at = self.now
 
-        user.iam.iam_synced_at = self.now
-
-        if user.iam.first_missing_at is None:
-            user.iam.first_missing_at = self.now
+        if iam.first_missing_at is None:
+            iam.first_missing_at = self.now
             self._outcome = 'miss_first'
             await user.save(session=session)
             return
 
-        elapsed = self.now - user.iam.first_missing_at
+        elapsed = self.now - iam.first_missing_at
         if elapsed >= timedelta(days=self.grace_days):
             # Past grace: set expires_at and flip status, but only if we
             # haven't already set a future expiry (don't clobber operator
@@ -228,7 +256,6 @@ _TALLY_KEYS = (
     'miss_within_grace',
     'miss_offboarding',
     'miss_already_expiring',
-    'miss_never_seen',
     'no_iam_id',
     'transient_error',
     'error',

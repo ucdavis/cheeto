@@ -30,7 +30,7 @@ from ..iam_async import (
 )
 from ..models import ALL_MODELS
 from ..models.history import History
-from ..models.user import User
+from ..models.user import UCDIAMInfo, UCDIAMPerson, User
 from ..operations import (
     ReapOffboardedUsers,
     SyncAllUsersIAM,
@@ -181,10 +181,12 @@ class TestBuildUCDIAMInfo:
             divisions={},
         )
         info = build_ucdiam_info(payload, now=now)
-        assert info.iam_id == 1
-        assert info.mothra_id == 2
-        assert info.user_types == ['student']
-        assert info.associations == []
+        assert info.iam_status == 'present'
+        assert info.person is not None
+        assert info.person.iam_id == 1
+        assert info.person.mothra_id == 2
+        assert info.person.user_types == ['student']
+        assert info.person.associations == []
         assert info.iam_synced_at == now
         assert info.last_seen_at == now
         assert info.first_missing_at is None
@@ -197,7 +199,7 @@ class TestBuildUCDIAMInfo:
                 IAMUserPayload(person=person, associations=[], divisions={}),
                 now=now,
             )
-            assert 'employee' in info.user_types
+            assert 'employee' in info.person.user_types
 
     def test_multi_association_mapping(self):
         now = datetime(2026, 1, 1)
@@ -207,8 +209,8 @@ class TestBuildUCDIAMInfo:
             divisions={'ORG-A': DIVISION_A, 'ORG-B': DIVISION_B},
         )
         info = build_ucdiam_info(payload, now=now)
-        assert len(info.associations) == 2
-        a, b = info.associations
+        assert len(info.person.associations) == 2
+        a, b = info.person.associations
         assert a.org_id == 'ORG-A'
         assert a.org_name == 'EXAMPLE COLLEGE A'
         assert a.org_code == 99
@@ -318,7 +320,9 @@ class TestSyncUserIAM:
 
         fetched = await User.find_one(User.name == 'jdoe')
         assert fetched.iam is not None
-        assert fetched.iam.iam_id == 1000000001
+        assert fetched.iam.iam_status == 'present'
+        assert fetched.iam.person is not None
+        assert fetched.iam.person.iam_id == 1000000001
         assert fetched.iam.last_seen_at == now
         assert fetched.iam.first_missing_at is None
         assert fetched.expires_at is None
@@ -331,7 +335,8 @@ class TestSyncUserIAM:
             status='offboarding',
             expires_at=future_expiry,
             iam=UCDIAMInfo(
-                iam_id=1000000001, mothra_id=1000001,
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
                 first_missing_at=now - timedelta(days=20),
             ),
         )
@@ -361,7 +366,7 @@ class TestSyncUserIAM:
         user = await make_user(
             status='inactive',
             expires_at=future_expiry,
-            iam=UCDIAMInfo(iam_id=1000000001, mothra_id=1000001),
+            iam=UCDIAMInfo(person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001)),
         )
         handler = make_iam_handler(
             person=[PERSON_JANE], associations=[], division={},
@@ -381,7 +386,7 @@ class TestSyncUserIAM:
     async def test_miss_first(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
-        await make_user(iam=UCDIAMInfo(iam_id=1000000001, mothra_id=1000001))
+        await make_user(iam=UCDIAMInfo(person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001)))
 
         handler = make_iam_handler(person_status=404)
         async with make_iam_api(handler) as api:
@@ -403,7 +408,8 @@ class TestSyncUserIAM:
         now = datetime(2026, 5, 1)
         first_missed = now - timedelta(days=5)
         await make_user(iam=UCDIAMInfo(
-            iam_id=1000000001, mothra_id=1000001,
+            iam_status='missing',
+            person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
             first_missing_at=first_missed,
         ))
 
@@ -428,7 +434,8 @@ class TestSyncUserIAM:
         now = datetime(2026, 5, 1)
         first_missed = now - timedelta(days=20)
         await make_user(iam=UCDIAMInfo(
-            iam_id=1000000001, mothra_id=1000001,
+            iam_status='missing',
+            person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
             first_missing_at=first_missed,
         ))
 
@@ -454,7 +461,8 @@ class TestSyncUserIAM:
             status='offboarding',
             expires_at=existing_expiry,
             iam=UCDIAMInfo(
-                iam_id=1000000001, mothra_id=1000001,
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
                 first_missing_at=now - timedelta(days=20),
             ),
         )
@@ -488,10 +496,42 @@ class TestSyncUserIAM:
         # No iam was created (no first_missing_at to record).
         assert fetched.iam is None
 
+    async def test_resolver_hits_but_get_person_misses_records_streak(
+        self, beanie_client, make_user,
+    ):
+        """Regression: when resolver finds an iam_id but get_person 404s,
+        we must still record the missing streak. Previously this case
+        silently dropped the bookkeeping ('miss_never_seen' dead path)."""
+        now = datetime(2026, 5, 1)
+        await make_user()  # no prior iam
+
+        def handler(req):
+            if '/iam/people/prikerbacct/search' in req.url.path:
+                return _iam_response([PERSON_JANE])  # resolver hit
+            if req.url.path.startswith('/iam/people/'):
+                return httpx.Response(404, content=b'')  # get_person miss
+            return _iam_response([])
+
+        async with make_iam_api(handler) as api:
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username='jdoe', iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        assert result.outcome == 'miss_first'
+
+        fetched = await User.find_one(User.name == 'jdoe')
+        assert fetched.iam is not None
+        assert fetched.iam.iam_status == 'missing'
+        assert fetched.iam.first_missing_at == now
+        assert fetched.iam.iam_synced_at == now
+        # No person snapshot was captured (we never got a successful payload).
+        assert fetched.iam.person is None
+
     async def test_transport_error_no_writes(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
-        prior = UCDIAMInfo(iam_id=1000000001, mothra_id=1000001)
+        prior = UCDIAMInfo(person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001))
         await make_user(iam=prior)
 
         handler = make_iam_handler(raise_transport=True)
@@ -513,7 +553,7 @@ class TestSyncUserIAM:
     async def test_5xx_no_writes(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
-        await make_user(iam=UCDIAMInfo(iam_id=1000000001, mothra_id=1000001))
+        await make_user(iam=UCDIAMInfo(person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001)))
         handler = make_iam_handler(person_status=503)
         async with make_iam_api(handler) as api:
             with pytest.raises(IAMTransientError):
@@ -610,10 +650,10 @@ class TestSyncAllUsersIAM:
         users = [
             User(name='hit_user', email='h@x.test', uid=20001, gid=20001,
                  fullname='Hit User', home_directory='/home/hit_user', type='user',
-                 iam=UCDIAMInfo(iam_id=1000000001, mothra_id=1000001)),
+                 iam=UCDIAMInfo(person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001))),
             User(name='miss_user', email='m@x.test', uid=20002, gid=20002,
                  fullname='Miss User', home_directory='/home/miss_user', type='user',
-                 iam=UCDIAMInfo(iam_id=2000000002, mothra_id=2000002)),
+                 iam=UCDIAMInfo(person=UCDIAMPerson(iam_id=2000000002, mothra_id=2000002))),
             User(name='daemon', email='d@x.test', uid=20003, gid=20003,
                  fullname='Daemon', home_directory='/home/daemon', type='system'),
         ]

@@ -156,9 +156,17 @@ async def iam_show_cmd(args: Namespace):
         table.add_row('iam', '[dim](no IAM data)[/]')
     else:
         iam = user.iam
-        table.add_row('iam_id', str(iam.iam_id))
-        table.add_row('mothra_id', str(iam.mothra_id))
-        table.add_row('user_types', ', '.join(iam.user_types) or '[dim](none)[/]')
+        status_style = 'red' if iam.iam_status == 'missing' else 'green'
+        table.add_row('iam_status', f'[{status_style}]{iam.iam_status}[/]')
+        if iam.person is not None:
+            table.add_row('iam_id', str(iam.person.iam_id))
+            table.add_row('mothra_id', str(iam.person.mothra_id))
+            table.add_row(
+                'user_types',
+                ', '.join(iam.person.user_types) or '[dim](none)[/]',
+            )
+        else:
+            table.add_row('iam_id', '[dim](no snapshot captured yet)[/]')
         table.add_row('iam_synced_at', str(iam.iam_synced_at) if iam.iam_synced_at else '—')
         table.add_row('last_seen_at', str(iam.last_seen_at) if iam.last_seen_at else '—')
         table.add_row('first_missing_at', str(iam.first_missing_at) if iam.first_missing_at else '—')
@@ -187,12 +195,12 @@ async def iam_show_cmd(args: Namespace):
                     '[red]past — next sync will set expires_at[/]',
                 )
 
-        if iam.associations:
+        if iam.person is not None and iam.person.associations:
             sub = Table(box=None, pad_edge=False, padding=(0, 1))
             sub.add_column('dept')
             sub.add_column('title')
             sub.add_column('class')
-            for a in iam.associations:
+            for a in iam.person.associations:
                 sub.add_row(a.dept_name, a.title, a.title_type)
             table.add_row('associations', sub)
 

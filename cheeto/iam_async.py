@@ -34,7 +34,7 @@ from .iamapi.api.people_ctlr import (
     search_pri_kerb_acct,
 )
 from .iamapi.client import Client
-from .models.user import UCDIAMAssociation, UCDIAMInfo
+from .models.user import UCDIAMAssociation, UCDIAMInfo, UCDIAMPerson
 
 logger = logging.getLogger(__name__)
 
@@ -251,6 +251,17 @@ def _build_associations(
     return out
 
 
+def build_ucdiam_person(payload: IAMUserPayload) -> UCDIAMPerson:
+    """Build the person-snapshot half of UCDIAMInfo. Pure mapping; no I/O."""
+    person = payload.person
+    return UCDIAMPerson(
+        iam_id=_coerce_int(person['iamId']),
+        mothra_id=_coerce_int(person['mothraId']),
+        user_types=_user_types_from_person(person),
+        associations=_build_associations(payload.associations, payload.divisions),
+    )
+
+
 def build_ucdiam_info(
     payload: IAMUserPayload,
     *,
@@ -258,16 +269,14 @@ def build_ucdiam_info(
 ) -> UCDIAMInfo:
     """Map a successful IAM lookup bundle into a fresh `UCDIAMInfo`.
 
-    Pure function — no I/O. Sets `iam_synced_at` and `last_seen_at` to `now`
-    and clears `first_missing_at`, encoding "user is currently present in
-    IAM" at the schema level.
+    Pure function — no I/O. Sets `iam_status='present'`, captures the person
+    snapshot, and stamps `iam_synced_at`/`last_seen_at`. `first_missing_at`
+    is cleared so the missing-streak resets when a previously-missing user
+    is found again.
     """
-    person = payload.person
     return UCDIAMInfo(
-        iam_id=_coerce_int(person['iamId']),
-        mothra_id=_coerce_int(person['mothraId']),
-        user_types=_user_types_from_person(person),
-        associations=_build_associations(payload.associations, payload.divisions),
+        iam_status='present',
+        person=build_ucdiam_person(payload),
         iam_synced_at=now,
         last_seen_at=now,
         first_missing_at=None,
