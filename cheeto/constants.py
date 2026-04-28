@@ -222,3 +222,11 @@ MOUNT_OPTS : Final = (
     "noac"
 )
 
+
+IAM_USER_TYPES : Final = (
+    'employee', # isEmployee or isHSEmployee
+    'faculty',
+    'staff',
+    'student',
+    'external'
+)

@@ -11,6 +11,7 @@ from ..constants import (
     ACCESS_TYPES,
     DEFAULT_SHELL,
     EMAIL_REGEX,
+    IAM_USER_TYPES,
     SHELLS,
     UINT_MAX,
     USER_STATUSES,
@@ -23,11 +24,30 @@ if TYPE_CHECKING:
     from .user_site_info import UserSiteInfo
 
 
+class UCDIAMAssociation(BaseModel):
+    org_id: str # bouOrgOId: business org unit 
+    org_name: str # official name of the business org unit; broadly, the "college"
+    org_code: int # deptCode of the BOU
+    dept_name: str # apptDeptOfficialName from the association itself 
+    dept_code: int # apptDeptCode from the association itself
+    title: str # titleOfficialName from the association itself
+    title_type: str # emplClassDesc from the association itself
+
+
 class UCDIAMInfo(BaseModel):
     iam_id: Annotated[int, Field(ge=0, le=UINT_MAX)]
     mothra_id: Annotated[int, Field(ge=0, le=UINT_MAX)]
-    colleges: list[str] = Field(default_factory=list)
+    user_types: list[str] = Field(default_factory=list)
+    associations: list[UCDIAMAssociation] = Field(default_factory=list)
     iam_synced_at: datetime.datetime | None = None
+
+    @field_validator('user_types')
+    @classmethod
+    def validate_user_types(cls, v):
+        for user_type in v:
+            if user_type not in IAM_USER_TYPES:
+                raise ValueError(f'Invalid IAM user type: {user_type}')
+        return v
 
 
 class User(BaseDocument, Expirable):
