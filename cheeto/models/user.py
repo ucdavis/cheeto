@@ -40,6 +40,12 @@ class UCDIAMInfo(BaseModel):
     user_types: list[str] = Field(default_factory=list)
     associations: list[UCDIAMAssociation] = Field(default_factory=list)
     iam_synced_at: datetime.datetime | None = None
+    # Last sync that returned a populated payload (vs. iam_synced_at, which
+    # advances on any definitive answer including a 200-empty/404 miss).
+    last_seen_at: datetime.datetime | None = None
+    # First sync (in the current missing streak) that found the user gone.
+    # Cleared on the next hit. Drives the offboarding grace window.
+    first_missing_at: datetime.datetime | None = None
 
     @field_validator('user_types')
     @classmethod

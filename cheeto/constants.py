@@ -230,3 +230,10 @@ IAM_USER_TYPES : Final = (
     'student',
     'external'
 )
+
+# User.type values that may have IAM entries. system/class/shared accounts
+# are administrative/role users and never resolve to an IAM person.
+IAM_SYNCABLE_USER_TYPES : Final = (
+    'user',
+    'admin',
+)

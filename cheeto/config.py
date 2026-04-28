@@ -73,6 +73,9 @@ class HippoConfig(BaseModel):
 class IAMConfig(BaseModel):
     api_key: str
     base_url: str
+    grace_days: int = 14
+    expiry_offset_days: int = 30
+    request_timeout_seconds: float = 30.0
 
 
 @require_kwargs

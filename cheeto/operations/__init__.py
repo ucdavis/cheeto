@@ -43,6 +43,12 @@ from .slurm import (
     RemoveSlurmPartition,
     RemoveSlurmQOS,
 )
+from .iam import (
+    ReapOffboardedUsers,
+    SyncAllUsersIAM,
+    SyncUserIAM,
+    SyncUserIAMResult,
+)
 from .storage import CreateHomeStorage
 from .migrate import (
     MigrateGroups,
