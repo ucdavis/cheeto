@@ -38,6 +38,7 @@ from ...operations.base import UNSET
 from ...types import parse_qos_tres
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import EXPIRABLE_CLEAR, expirable_args, group_args, site_args
+from ._slurm_show import _tres_compact
 
 
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
@@ -413,17 +414,10 @@ async def slurm_qos_show(args: Namespace):
     table.add_column('group total tres', style='bold')
     for qos in qoses:
         tt = total_tres(qos.group_limits)
-        parts = []
-        if tt.cpus != -1:
-            parts.append(f'{tt.cpus}c')
-        if tt.gpus != -1:
-            parts.append(f'{tt.gpus}g')
-        if tt.mem is not None:
-            parts.append(str(tt.mem))
         table.add_row(
             qos.name, str(qos.priority),
             ', '.join(qos.flags),
-            '/'.join(parts) if parts else '∞',
+            _tres_compact(tt),
         )
     console.print(table)
 
