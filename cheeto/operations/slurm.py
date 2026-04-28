@@ -203,6 +203,8 @@ class AddQOSAllocation(Operation):
         field: str,
         tres: SlurmTRES,
         comment: str = '',
+        expires_at: datetime | None | Any = UNSET,
+        provisioned_at: datetime | None | Any = UNSET,
     ) -> None:
         super().__init__(client, author)
         if field not in _QOS_ALLOC_FIELDS:
@@ -215,6 +217,8 @@ class AddQOSAllocation(Operation):
         self.field = field
         self.tres = tres
         self.comment = comment
+        self.expires_at = expires_at
+        self.provisioned_at = provisioned_at
 
     async def execute(self, session: AsyncClientSession) -> SlurmAllocation:
         site = await Site.find_one(Site.name == self.site_name)
@@ -230,8 +234,16 @@ class AddQOSAllocation(Operation):
             raise ValueError(
                 f'SlurmQOS {self.qos_name} on site {self.site_name} does not exist'
             )
+        kwargs = {
+            'tres': self.tres,
+            'comment': self.comment,
+        }
+        if self.expires_at is not UNSET:
+            kwargs['expires_at'] = self.expires_at
+        if self.provisioned_at is not UNSET:
+            kwargs['provisioned_at'] = self.provisioned_at
 
-        alloc = SlurmAllocation(tres=self.tres, comment=self.comment)
+        alloc = SlurmAllocation(**kwargs)
         await alloc.insert(session=session)
 
         getattr(qos, self.field).append(alloc)
@@ -241,13 +253,18 @@ class AddQOSAllocation(Operation):
         return alloc
 
     def describe(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             'qos': self.qos_name,
             'site': self.site_name,
             'field': self.field,
             'tres': self.tres.model_dump(),
             'comment': self.comment,
         }
+        if self.expires_at not in [UNSET, None]:
+            data['expires_at'] = self.expires_at.isoformat()
+        if self.provisioned_at not in [UNSET, None]:
+            data['provisioned_at'] = self.provisioned_at.isoformat()
+        return data
 
 
 class EditSlurmAllocation(Operation):

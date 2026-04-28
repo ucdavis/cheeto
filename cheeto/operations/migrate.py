@@ -316,9 +316,11 @@ def _old_tres_is_empty(old_tres) -> bool:
 
 
 def _new_tres_from_old(old_tres) -> SlurmTRES:
+    # The model's validator coerces -1 -> None, but be explicit so the
+    # call site documents the v1 sentinel mapping.
     return SlurmTRES(
-        cpus=old_tres.cpus,
-        gpus=old_tres.gpus,
+        cpus=None if old_tres.cpus == -1 else old_tres.cpus,
+        gpus=None if old_tres.gpus == -1 else old_tres.gpus,
         mem=old_tres.mem,
     )
 

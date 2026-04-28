@@ -414,6 +414,38 @@ class TestSlurmModels:
         with pytest.raises(Exception):
             SlurmTRES(mem='bad')
 
+    async def test_slurm_tres_unlimited_defaults_to_none(self):
+        # cpus/gpus default to None (= unlimited)
+        t = SlurmTRES()
+        assert t.cpus is None
+        assert t.gpus is None
+        assert t.mem is None
+        # slurm_* properties translate None back to -1 for outbound rendering
+        assert t.slurm_cpus == -1
+        assert t.slurm_gpus == -1
+        # to_slurm() emits the sacctmgr-friendly TRES string
+        assert t.to_slurm() == 'cpu=-1,mem=-1,gres/gpu=-1'
+
+    async def test_slurm_tres_normalizes_minus_one_to_none(self):
+        # -1 (and the string '-1') on input is normalized to None for storage.
+        t1 = SlurmTRES(cpus=-1, gpus=-1)
+        assert t1.cpus is None
+        assert t1.gpus is None
+        t2 = SlurmTRES(cpus='-1', gpus='-1')
+        assert t2.cpus is None
+        assert t2.gpus is None
+        # Concrete values are preserved.
+        t3 = SlurmTRES(cpus=128, gpus=0)
+        assert t3.cpus == 128
+        assert t3.slurm_cpus == 128
+        assert t3.gpus == 0
+        assert t3.slurm_gpus == 0  # zero is a real limit, not unlimited
+
+    async def test_slurm_tres_to_slurm_with_values(self):
+        t = SlurmTRES(cpus=128, gpus=8, mem='1T')
+        # 1T = 1024*1024 MB = 1048576
+        assert t.to_slurm() == 'cpu=128,mem=1048576,gres/gpu=8'
+
     async def test_slurm_allocation(self):
         a = SlurmAllocation(
             tres=SlurmTRES(cpus=8), comment='test',
@@ -936,10 +968,10 @@ class TestSlurmOps:
     async def test_total_tres_sums_allocations(self, beanie_client, site):
         from cheeto.queries.slurm import total_tres
 
-        # Empty list -> unlimited defaults
+        # Empty list -> unlimited defaults (None for cpus/gpus, None for mem)
         empty = total_tres([])
-        assert empty.cpus == -1
-        assert empty.gpus == -1
+        assert empty.cpus is None
+        assert empty.gpus is None
         assert empty.mem is None
 
         # Two allocations with overlapping fields

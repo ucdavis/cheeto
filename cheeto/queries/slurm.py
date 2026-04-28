@@ -28,20 +28,20 @@ from ..utils import size_to_megs
 def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
     """Sum cpus/gpus/mem across a list of SlurmAllocations into a single SlurmTRES.
 
-    Default-unlimited values (cpus=-1, gpus=-1, mem=None) are treated as
+    Default-unlimited values (cpus=None, gpus=None, mem=None) are treated as
     'not contributing' and excluded from the sum. If no allocation sets a
-    value for a given field, it stays at its default.
+    value for a given field, it stays at None (unlimited).
     """
-    cpus = -1
-    gpus = -1
+    cpus: int | None = None
+    gpus: int | None = None
     mem_megs: int | None = None
 
     for alloc in allocations:
         t = alloc.tres
-        if t.cpus != -1:
-            cpus = (0 if cpus == -1 else cpus) + t.cpus
-        if t.gpus != -1:
-            gpus = (0 if gpus == -1 else gpus) + t.gpus
+        if t.cpus is not None:
+            cpus = (0 if cpus is None else cpus) + t.cpus
+        if t.gpus is not None:
+            gpus = (0 if gpus is None else gpus) + t.gpus
         if t.mem is not None:
             mem_megs = (0 if mem_megs is None else mem_megs) + size_to_megs(t.mem)
 

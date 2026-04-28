@@ -21,9 +21,9 @@ from ...queries.slurm import (
 def _tres_compact(tres: SlurmTRES) -> str:
     """Compact display: '128c/8g/1T', omits fields at their unlimited default."""
     parts: list[str] = []
-    if tres.cpus != -1:
+    if tres.cpus is not None:
         parts.append(f'{tres.cpus}c')
-    if tres.gpus != -1:
+    if tres.gpus is not None:
         parts.append(f'{tres.gpus}g')
     if tres.mem is not None:
         parts.append(str(tres.mem))

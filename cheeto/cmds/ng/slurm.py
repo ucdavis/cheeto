@@ -179,6 +179,7 @@ def slurm_allocation_cmd(args: Namespace):
 
 
 @site_args.apply(required=True)
+@expirable_args.apply(scope='allocation')
 @commands.register('ng', 'slurm', 'allocation', 'add',
                    help='Add an allocation to an existing QOS')
 async def slurm_allocation_add(args: Namespace):
@@ -188,6 +189,8 @@ async def slurm_allocation_add(args: Namespace):
         args.db, args.author,
         qos_name=args.qos, site_name=args.site,
         field=args.field, tres=tres, comment=args.comment,
+        expires_at=_expirable_kwarg(args.expires_at),
+        provisioned_at=_expirable_kwarg(args.provisioned_at),
     )
     console.print(
         f'Added allocation [green]{alloc.id}[/] to '
@@ -341,6 +344,9 @@ def _render_qos_panel(data: dict) -> Panel:
         table.add_row(key, str(data.get(key)))
     table.add_row('flags', ', '.join(data['flags']) or '[dim](none)[/]')
 
+    def _fmt(v) -> str:
+        return '∞' if v is None else str(v)
+
     for limit_key in ('group_limits', 'user_limits', 'job_limits'):
         allocs = data[limit_key]
         if not allocs:
@@ -354,7 +360,7 @@ def _render_qos_panel(data: dict) -> Panel:
         sub.add_column('comment')
         for a in allocs:
             sub.add_row(
-                a['id'], str(a['tres']['cpus']), str(a['tres']['gpus']),
+                a['id'], _fmt(a['tres']['cpus']), _fmt(a['tres']['gpus']),
                 str(a['tres']['mem'] or ''), a['comment'],
             )
         table.add_row(limit_key, sub)
@@ -362,7 +368,8 @@ def _render_qos_panel(data: dict) -> Panel:
     gt = data['group_total_tres']
     table.add_row(
         'group total',
-        f'cpus={gt["cpus"]}, gpus={gt["gpus"]}, mem={gt["mem"]}',
+        f'cpus={_fmt(gt["cpus"])}, gpus={_fmt(gt["gpus"])}, '
+        f'mem={_fmt(gt["mem"])}',
     )
 
     return Panel(table, title=f'[bold]QOS:[/] [green]{data["name"]}[/]',
@@ -742,9 +749,12 @@ async def slurm_allocation_show(args: Namespace):
             for key in ('id', 'comment', 'created_at', 'updated_at'):
                 table.add_row(key, str(data[key]))
             tres = data['tres']
+            def _fmt(v) -> str:
+                return '∞' if v is None else str(v)
             table.add_row(
                 'tres',
-                f'cpus={tres["cpus"]}, gpus={tres["gpus"]}, mem={tres["mem"]}',
+                f'cpus={_fmt(tres["cpus"])}, gpus={_fmt(tres["gpus"])}, '
+                f'mem={_fmt(tres["mem"])}',
             )
             for key in ('provisioned_at', 'expires_at'):
                 value = data[key]
@@ -804,11 +814,14 @@ async def slurm_allocation_show(args: Namespace):
     table.add_column('provisioned', style='green')
     table.add_column('expires', style='yellow')
     table.add_column('comment', style='dim')
+    def _fmt_tres(v) -> str:
+        return '∞' if v is None else str(v)
+
     for qa in qas:
         a = qa.allocation
         table.add_row(
             str(a.id), qa.qos.name, qa.field,
-            str(a.tres.cpus), str(a.tres.gpus), str(a.tres.mem or ''),
+            _fmt_tres(a.tres.cpus), _fmt_tres(a.tres.gpus), str(a.tres.mem or ''),
             _fmt_dt(a.provisioned_at), _fmt_dt(a.expires_at),
             a.comment,
         )

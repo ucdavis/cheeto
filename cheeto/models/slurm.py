@@ -8,6 +8,7 @@ from pymongo import IndexModel
 from pydantic import BaseModel, Field, field_validator
 
 from ..constants import DATA_QUOTA_REGEX, SLURM_QOS_VALID_FLAGS
+from ..utils import size_to_megs
 from .base import BaseDocument, Expirable
 from .site import Site
 from .user import User
@@ -17,9 +18,37 @@ if TYPE_CHECKING:
 
 
 class SlurmTRES(BaseModel):
-    cpus: int = -1
-    gpus: int = -1
+    """Trackable resources for a Slurm allocation.
+
+    `cpus` and `gpus` use None to mean 'unlimited' (translated to -1 when
+    emitted to slurm/sacctmgr). The validator also accepts -1 on input and
+    normalizes it to None for storage clarity.
+    """
+
+    cpus: int | None = None
+    gpus: int | None = None
     mem: Annotated[str | None, Field(default=None, pattern=DATA_QUOTA_REGEX)]
+
+    @field_validator('cpus', 'gpus', mode='before')
+    @classmethod
+    def _normalize_unlimited(cls, v):
+        if v == -1 or v == '-1':
+            return None
+        return v
+
+    @property
+    def slurm_cpus(self) -> int:
+        return -1 if self.cpus is None else self.cpus
+
+    @property
+    def slurm_gpus(self) -> int:
+        return -1 if self.gpus is None else self.gpus
+
+    def to_slurm(self) -> str:
+        """Render as a sacctmgr-compatible TRES string. Unlimited fields
+        emit -1, mem is converted to megabytes."""
+        mem = -1 if self.mem is None else size_to_megs(self.mem)
+        return f'cpu={self.slurm_cpus},mem={mem},gres/gpu={self.slurm_gpus}'
 
 
 class SlurmAllocation(BaseDocument, Expirable):
