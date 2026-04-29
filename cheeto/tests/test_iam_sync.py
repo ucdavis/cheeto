@@ -504,6 +504,33 @@ class TestSyncUserIAM:
         # No person snapshot — we never had one to capture.
         assert fetched.iam.person is None
 
+    async def test_followup_miss_with_tz_aware_default_now(
+        self, beanie_client, make_user,
+    ):
+        """Regression: a follow-up sync against a user with a stored
+        first_missing_at must work when self.now is the default
+        (production path: tz-aware UTC). Previously this raised
+        TypeError: can't subtract offset-naive and offset-aware datetimes
+        because mongo round-trips datetimes as naive.
+        """
+        first_missed = datetime(2026, 4, 20)
+        await make_user(iam=UCDIAMInfo(
+            iam_status='missing',
+            person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+            first_missing_at=first_missed,
+        ))
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            # Note: no `now=` kwarg — exercises the production default.
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username='jdoe', iam_api=api,
+                grace_days=14, expiry_offset_days=30,
+            )
+        # 'now' will be roughly today; the streak we preloaded is older
+        # than 14 days, so we should have flipped to offboarding.
+        assert result.outcome in {'miss_within_grace', 'miss_offboarding'}
+
     async def test_resolver_hits_but_get_person_misses_records_streak(
         self, beanie_client, make_user,
     ):

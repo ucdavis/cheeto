@@ -59,6 +59,21 @@ def _isoformat(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
+def _naive_utc(dt: datetime | None) -> datetime:
+    """Normalize a datetime to naive UTC.
+
+    The async mongo client is configured `tz_aware=False`, so values read
+    back from the DB are naive. To compare/subtract them safely against
+    the operation's `now`, we strip any tzinfo on input. `None` defaults
+    to the current naive UTC instant.
+    """
+    if dt is None:
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 class SyncUserIAM(Operation):
     """Sync one user against the IAM API and update their state machine.
 
@@ -85,7 +100,7 @@ class SyncUserIAM(Operation):
         self.iam_api = iam_api
         self.grace_days = grace_days
         self.expiry_offset_days = expiry_offset_days
-        self.now = now if now is not None else datetime.now(timezone.utc)
+        self.now = _naive_utc(now)
         # Filled in by execute() so describe() can report on what happened.
         self._outcome: str = ''
         self._iam_id: int | None = None
@@ -287,7 +302,7 @@ class SyncAllUsersIAM(Operation):
             self.types = [t for t in types if t in IAM_SYNCABLE_USER_TYPES]
         self.max_users = max_users
         self.concurrency = max(1, concurrency)
-        self.now = now if now is not None else datetime.now(timezone.utc)
+        self.now = _naive_utc(now)
         self._tally: dict[str, int] = {k: 0 for k in _TALLY_KEYS}
         self._total = 0
 
@@ -374,7 +389,7 @@ class ReapOffboardedUsers(Operation):
         now: datetime | None = None,
     ) -> None:
         super().__init__(client, author)
-        self.now = now if now is not None else datetime.now(timezone.utc)
+        self.now = _naive_utc(now)
         self._reaped: list[str] = []
 
     async def execute(self, session: AsyncClientSession) -> list[str]:
