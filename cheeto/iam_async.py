@@ -242,9 +242,10 @@ def _build_associations(
         out.append(UCDIAMAssociation(
             org_id=org_id,
             org_name=division.get('deptOfficialName') or '',
-            org_code=_coerce_int(division.get('deptCode') or 0),
+            # Keep dept codes as strings — IAM zero-pads them ('072067').
+            org_code=str(division.get('deptCode') or ''),
             dept_name=assoc.get('apptDeptOfficialName') or '',
-            dept_code=_coerce_int(assoc.get('apptDeptCode') or 0),
+            dept_code=str(assoc.get('apptDeptCode') or ''),
             title=assoc.get('titleOfficialName') or '',
             title_type=assoc.get('emplClassDesc') or '',
         ))

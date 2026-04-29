@@ -213,13 +213,13 @@ class TestBuildUCDIAMInfo:
         a, b = info.person.associations
         assert a.org_id == 'ORG-A'
         assert a.org_name == 'EXAMPLE COLLEGE A'
-        assert a.org_code == 99
+        assert a.org_code == '99'
         assert a.dept_name == 'EXAMPLE DEPARTMENT A'
-        assert a.dept_code == 999001
+        assert a.dept_code == '999001'
         assert a.title == 'STAFF-TITLE'
         assert a.title_type == 'Staff'
         assert b.org_id == 'ORG-B'
-        assert b.dept_code == 999002
+        assert b.dept_code == '999002'
 
 
 # ---------------------------------------------------------------------------

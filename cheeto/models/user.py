@@ -26,11 +26,13 @@ if TYPE_CHECKING:
 
 
 class UCDIAMAssociation(BaseModel):
-    org_id: str # bouOrgOId: business org unit 
+    org_id: str # bouOrgOId: business org unit
     org_name: str # official name of the business org unit; broadly, the "college"
-    org_code: int # deptCode of the BOU
-    dept_name: str # apptDeptOfficialName from the association itself 
-    dept_code: int # apptDeptCode from the association itself
+    # IAM dept codes are zero-padded ('072067', '050'); keep as strings so we
+    # don't lose leading zeros via int coercion.
+    org_code: str # deptCode of the BOU
+    dept_name: str # apptDeptOfficialName from the association itself
+    dept_code: str # apptDeptCode from the association itself
     title: str # titleOfficialName from the association itself
     title_type: str # emplClassDesc from the association itself
 
