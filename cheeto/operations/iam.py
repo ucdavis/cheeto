@@ -105,16 +105,13 @@ class SyncUserIAM(Operation):
                 f'(allowed: {list(IAM_SYNCABLE_USER_TYPES)})'
             )
 
-        # Resolve IAM ID and fetch the bundle.
-        # `bundle` is one of: IAMUserPayload (hit), IAM_MISSING (miss), or
-        # None (we couldn't even get an iam_id and the user has no prior
-        # iam record — distinct from miss because there's no streak to start).
+        # Resolve IAM ID and fetch the bundle. `bundle` is either
+        # IAMUserPayload (hit) or IAM_MISSING. Users with no prior IAM data
+        # whose username does not resolve are also treated as misses — many
+        # legacy users have never been synced and need to enter the
+        # missing -> offboarding pipeline the same way as a recently-departed
+        # user would.
         bundle = await self._resolve_and_fetch(user)
-
-        if bundle is None:
-            self._outcome = 'no_iam_id'
-            self._status = user.status
-            return self._build_result()
 
         if bundle is IAM_MISSING:
             await self._handle_miss(user, session)
@@ -132,17 +129,14 @@ class SyncUserIAM(Operation):
 
     async def _resolve_and_fetch(
         self, user: User,
-    ) -> IAMUserPayload | type(IAM_MISSING) | None:
+    ) -> IAMUserPayload | type(IAM_MISSING):
         """Determine the user's iam_id and fetch the IAM bundle.
 
-        Returns:
-          - IAMUserPayload on a hit
-          - IAM_MISSING when we know the user is gone (either get_person
-            came back empty, or we don't have a cached iam_id and the
-            resolver also couldn't find them but we already had a streak
-            going).
-          - None when there is no way to obtain an iam_id and we have no
-            prior iam state — caller maps this to outcome 'no_iam_id'.
+        Returns IAMUserPayload on a hit, or IAM_MISSING when the user is
+        either confirmed gone (200-empty / 404 from get_person) OR has no
+        IAM record at all (resolver finds no iam_id). Both paths feed the
+        same missing-streak bookkeeping; legacy users without any prior
+        IAM data are not distinguished from recently-departed users.
         """
         # Use cached iam_id if we have one.
         if user.iam is not None and user.iam.person is not None:
@@ -154,12 +148,6 @@ class SyncUserIAM(Operation):
         # didn't produce a person snapshot). Re-resolve.
         resolved = await self.iam_api.resolve_iam_id_by_username(user.name)
         if resolved is IAM_MISSING:
-            # Resolver can't map this username to an iam_id.
-            if user.iam is None:
-                # We never had any IAM data; nothing to record.
-                return None
-            # We have a streak going but never captured an iam_id. Treat
-            # as a miss so the streak advances.
             return IAM_MISSING
         iam_id = int(resolved['iamId'])
         self._iam_id = iam_id
@@ -256,7 +244,6 @@ _TALLY_KEYS = (
     'miss_within_grace',
     'miss_offboarding',
     'miss_already_expiring',
-    'no_iam_id',
     'transient_error',
     'error',
 )

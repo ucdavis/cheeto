@@ -479,8 +479,12 @@ class TestSyncUserIAM:
         fetched = await User.find_one(User.name == 'jdoe')
         assert fetched.expires_at == existing_expiry  # NOT overwritten
 
-    async def test_no_iam_id_resolver_misses(self, beanie_client, make_user):
-        # User has no iam, resolver returns missing -> outcome 'no_iam_id'
+    async def test_no_prior_iam_resolver_misses_starts_streak(
+        self, beanie_client, make_user,
+    ):
+        # User has no iam AND resolver returns missing. We do NOT distinguish
+        # this from a real miss — legacy users without prior IAM data must
+        # still enter the missing -> offboarding pipeline.
         now = datetime(2026, 5, 1)
         await make_user()  # no iam
         handler = make_iam_handler(person=[])  # search returns empty
@@ -490,11 +494,15 @@ class TestSyncUserIAM:
                 username='jdoe', iam_api=api,
                 grace_days=14, expiry_offset_days=30, now=now,
             )
-        assert result.outcome == 'no_iam_id'
+        assert result.outcome == 'miss_first'
 
         fetched = await User.find_one(User.name == 'jdoe')
-        # No iam was created (no first_missing_at to record).
-        assert fetched.iam is None
+        assert fetched.iam is not None
+        assert fetched.iam.iam_status == 'missing'
+        assert fetched.iam.first_missing_at == now
+        assert fetched.iam.iam_synced_at == now
+        # No person snapshot — we never had one to capture.
+        assert fetched.iam.person is None
 
     async def test_resolver_hits_but_get_person_misses_records_streak(
         self, beanie_client, make_user,

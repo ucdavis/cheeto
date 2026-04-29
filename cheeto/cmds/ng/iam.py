@@ -261,6 +261,4 @@ def _outcome_style(outcome: str) -> str:
         return 'red'
     if outcome.startswith('miss'):
         return 'yellow'
-    if outcome == 'no_iam_id':
-        return 'dim'
     return 'magenta'
