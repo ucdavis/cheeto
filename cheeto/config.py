@@ -44,7 +44,6 @@ class LDAPConfig(BaseModel):
     group_attrs: Optional[Mapping[str, str]] = None
 
 
-
 @require_kwargs
 @dataclass(frozen=True)
 class MongoConfig(BaseModel):
@@ -56,7 +55,6 @@ class MongoConfig(BaseModel):
     database: str
     old_database: Optional[str] = None
     tls_ca_file: Optional[str] = None
-
 
 
 @require_kwargs
@@ -73,7 +71,7 @@ class HippoConfig(BaseModel):
 class IAMConfig(BaseModel):
     api_key: str
     base_url: str
-    grace_days: int = 14
+    grace_days: int = 3
     expiry_offset_days: int = 30
     request_timeout_seconds: float = 30.0
 
