@@ -1,4 +1,5 @@
 from argparse import Namespace
+from datetime import datetime, timedelta, timezone
 
 from ponderosa import ArgParser
 from rich.panel import Panel
@@ -40,10 +41,33 @@ def _announce_password(console: Console, password: str) -> None:
     console.print('[red]Save this password now \u2014 it will not be displayed again.[/]')
 
 
+def _project_iam_dates(
+    first_missing_at: datetime,
+    grace_days: int,
+    expiry_offset_days: int,
+) -> dict:
+    """Compute the fixed grace-end and projected-expiry dates from
+    first_missing_at + the configured offsets, plus a 'grace_remaining'
+    timedelta relative to now (None if grace has already passed)."""
+    fma = first_missing_at
+    if fma.tzinfo is None:
+        fma = fma.replace(tzinfo=timezone.utc)
+    grace_ends = fma + timedelta(days=grace_days)
+    projected_expiry = grace_ends + timedelta(days=expiry_offset_days)
+    now = datetime.now(timezone.utc)
+    remaining = grace_ends - now
+    return {
+        'grace_ends_on': grace_ends,
+        'projected_expires_at': projected_expiry,
+        'grace_remaining': remaining if remaining.total_seconds() > 0 else None,
+    }
+
+
 def _user_to_dict(user: User,
                   ssh_keys: list[SshKey] | None = None,
                   site_info: dict | None = None,
-                  slurm_info: list[dict] | None = None) -> dict:
+                  slurm_info: list[dict] | None = None,
+                  iam_config=None) -> dict:
     data = {
         'name': user.name,
         'email': user.email,
@@ -87,6 +111,12 @@ def _user_to_dict(user: User,
                 }
                 for a in iam.person.associations
             ]
+        if iam.first_missing_at is not None and iam_config is not None:
+            iam_data.update(_project_iam_dates(
+                iam.first_missing_at,
+                iam_config.grace_days,
+                iam_config.expiry_offset_days,
+            ))
         data['iam'] = iam_data
     if site_info is not None:
         data['site_info'] = site_info
@@ -146,6 +176,27 @@ def _render_user_iam(iam: dict) -> Table:
         table.add_row(
             'first_missing_at',
             f'[red]{iam["first_missing_at"]}[/]',
+        )
+
+    # Grace/projection: only set when iam_config was passed AND the user
+    # is currently in a missing streak.
+    if iam.get('grace_ends_on'):
+        remaining = iam.get('grace_remaining')
+        if remaining is not None:
+            days = remaining.days
+            hours = remaining.seconds // 3600
+            table.add_row(
+                'grace remaining', f'[yellow]{days}d {hours}h[/]',
+            )
+        else:
+            table.add_row(
+                'grace remaining',
+                '[red]past — next sync will set expires_at[/]',
+            )
+        table.add_row('grace ends on', str(iam['grace_ends_on']))
+        table.add_row(
+            'projected expires_at',
+            f'[red]{iam["projected_expires_at"]}[/]',
         )
 
     associations = iam.get('associations') or []
@@ -471,6 +522,7 @@ async def user_show(args: Namespace):
 
     data = _user_to_dict(
         user, ssh_keys=ssh_keys, site_info=site_info, slurm_info=slurm_info,
+        iam_config=args.config.ucdiam,
     )
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))
