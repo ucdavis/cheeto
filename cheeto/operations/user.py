@@ -13,13 +13,46 @@ from ..constants import (
     UINT_MAX,
 )
 from ..encrypt import get_mcf_hasher, hash_yescrypt
-from ..models.group import Group
+from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.user import User
 from .base import Operation
 
 
 def _hash_password(plaintext: str) -> str:
     return hash_yescrypt(get_mcf_hasher(), plaintext).decode('UTF-8')
+
+
+async def _resolve_status_link(name: str | None) -> StatusGroup | None:
+    """Resolve a status shorthand (e.g. 'active') to a StatusGroup record.
+
+    Returns None when `name` is None. Raises ValueError if the shorthand
+    has no corresponding StatusGroup record (i.e. SeedAccessStatusGroups
+    has not been run, or the name is misspelled).
+    """
+    if name is None:
+        return None
+    sg = await StatusGroup.find_one(StatusGroup.status_name == name)
+    if sg is None:
+        raise ValueError(
+            f'No StatusGroup with status_name={name!r}; '
+            f'run SeedAccessStatusGroups first'
+        )
+    return sg
+
+
+async def _resolve_access_links(names: list[str]) -> list[AccessGroup]:
+    """Resolve access shorthands (e.g. ['login-ssh', 'sudo']) to AccessGroup
+    records. Raises ValueError if any shorthand is missing."""
+    out: list[AccessGroup] = []
+    for n in names:
+        ag = await AccessGroup.find_one(AccessGroup.access_name == n)
+        if ag is None:
+            raise ValueError(
+                f'No AccessGroup with access_name={n!r}; '
+                f'run SeedAccessStatusGroups first'
+            )
+        out.append(ag)
+    return out
 
 
 async def _get_next_id(min_id: int, max_id: int = UINT_MAX) -> int:
@@ -61,7 +94,10 @@ class CreateUser(Operation):
         self.type = type
         self.shell = shell
         self.status = status
-        self.access = access or ['login-ssh']
+        # Empty default — callers explicitly pass access shorthands they need.
+        # AccessGroup resolution happens at execute() time so the operation
+        # surfaces a clear error if SeedAccessStatusGroups hasn't been run.
+        self.access = access or []
         self.home_directory = home_directory or f'/home/{name}'
         self.password = password
 
@@ -69,6 +105,12 @@ class CreateUser(Operation):
         existing = await User.find_one(User.name == self.name)
         if existing is not None:
             raise ValueError(f'User {self.name} already exists')
+
+        # Resolve status/access shorthands to StatusGroup/AccessGroup records.
+        # Either field may be unset (status=None / access=[]) for system-style
+        # accounts that don't participate in the access pipeline.
+        status_link = await _resolve_status_link(self.status)
+        access_links = await _resolve_access_links(self.access)
 
         user = User(
             name=self.name,
@@ -78,8 +120,8 @@ class CreateUser(Operation):
             fullname=self.fullname,
             type=self.type,
             shell=self.shell,
-            status=self.status,
-            access=self.access,
+            status=status_link,
+            access=access_links,
             home_directory=self.home_directory,
             password=_hash_password(self.password) if self.password else None,
         )
@@ -256,8 +298,10 @@ class SetUserStatus(Operation):
         if user is None:
             raise ValueError(f'User {self.name} does not exist')
 
+        status_link = await _resolve_status_link(self.status)
+
         if self.site is None:
-            user.status = self.status
+            user.status = status_link
         else:
             from ..models.site import Site
             from ..models.user_site_info import UserSiteInfo
@@ -271,7 +315,7 @@ class SetUserStatus(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
-            usi.status = self.status
+            usi.status = status_link
             await usi.save(session=session)
 
         comment = (
@@ -391,10 +435,14 @@ class AddUserAccess(Operation):
         if user is None:
             raise ValueError(f'User {self.name} does not exist')
 
+        new_links = await _resolve_access_links(self.access)
+        new_ids = {ag.id for ag in new_links}
+
         if self.site is None:
-            for a in self.access:
-                if a not in user.access:
-                    user.access.append(a)
+            existing_ids = {link.ref.id for link in user.access}
+            for ag in new_links:
+                if ag.id not in existing_ids:
+                    user.access.append(ag)
             await user.save(session=session)
         else:
             from ..models.site import Site
@@ -409,9 +457,10 @@ class AddUserAccess(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
-            for a in self.access:
-                if a not in usi.access:
-                    usi.access.append(a)
+            existing_ids = {link.ref.id for link in usi.access}
+            for ag in new_links:
+                if ag.id not in existing_ids:
+                    usi.access.append(ag)
             await usi.save(session=session)
 
     def describe(self) -> dict[str, Any]:
@@ -444,8 +493,12 @@ class RemoveUserAccess(Operation):
         if user is None:
             raise ValueError(f'User {self.name} does not exist')
 
+        # Resolve to AccessGroup ids so we can filter Link list by ref.id.
+        targets = await _resolve_access_links(self.access)
+        target_ids = {ag.id for ag in targets}
+
         if self.site is None:
-            user.access = [a for a in user.access if a not in self.access]
+            user.access = [link for link in user.access if link.ref.id not in target_ids]
             await user.save(session=session)
         else:
             from ..models.site import Site
@@ -460,7 +513,7 @@ class RemoveUserAccess(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
-            usi.access = [a for a in usi.access if a not in self.access]
+            usi.access = [link for link in usi.access if link.ref.id not in target_ids]
             await usi.save(session=session)
 
     def describe(self) -> dict[str, Any]:

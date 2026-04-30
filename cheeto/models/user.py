@@ -8,20 +8,18 @@ from beanie import BackLink, Link
 from pydantic import BaseModel, Field, field_validator
 
 from ..constants import (
-    ACCESS_TYPES,
     DEFAULT_SHELL,
     EMAIL_REGEX,
     IAM_STATUSES,
     IAM_USER_TYPES,
     SHELLS,
     UINT_MAX,
-    USER_STATUSES,
     USER_TYPES,
 )
 from .base import BaseDocument, Expirable
 
 if TYPE_CHECKING:
-    from .group import Group
+    from .group import AccessGroup, Group, StatusGroup
     from .user_site_info import UserSiteInfo
 
 
@@ -94,9 +92,15 @@ class User(BaseDocument, Expirable):
 
     shell: str = DEFAULT_SHELL
     type: str = 'user'
-    status: str = 'active'
+    # Link to a StatusGroup record (`active`, `inactive`, `disabled`,
+    # `offboarding`). Optional during construction so existing operations
+    # that build users without setting status keep working; production code
+    # is expected to assign one before downstream effects (LDAP sync,
+    # offboarding) can fire.
+    status: Link['StatusGroup'] | None = None
     password: str | None = None
-    access: list[str] = Field(default_factory=lambda: ['login-ssh'])
+    # Links to AccessGroup records (`login-ssh`, `sudo`, etc.).
+    access: list[Link['AccessGroup']] = Field(default_factory=list)
     comments: list[str] = Field(default_factory=list)
 
     home_directory: str
@@ -129,21 +133,6 @@ class User(BaseDocument, Expirable):
     def validate_type(cls, v):
         if v not in USER_TYPES:
             raise ValueError(f'Invalid user type: {v}')
-        return v
-
-    @field_validator('status')
-    @classmethod
-    def validate_status(cls, v):
-        if v not in USER_STATUSES:
-            raise ValueError(f'Invalid user status: {v}')
-        return v
-
-    @field_validator('access')
-    @classmethod
-    def validate_access(cls, v):
-        for access in v:
-            if access not in ACCESS_TYPES:
-                raise ValueError(f'Invalid access type: {access}')
         return v
 
     class Settings:

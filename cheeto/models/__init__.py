@@ -1,7 +1,7 @@
 from .base import BaseDocument, Expirable
 from .site import Site
 from .user import SshKey, UCDIAMInfo, User
-from .group import Group
+from .group import AccessGroup, Group, StatusGroup
 from .slurm import (
     SlurmAccount,
     SlurmAccountLimits,
@@ -26,6 +26,9 @@ from .hippo import HippoEvent
 User.model_rebuild()
 SshKey.model_rebuild()
 Group.model_rebuild()
+AccessGroup.model_rebuild()
+StatusGroup.model_rebuild()
+UserSiteInfo.model_rebuild()
 SlurmAccount.model_rebuild()
 Storage.model_rebuild()
 
@@ -34,6 +37,8 @@ ALL_MODELS = [
     User,
     SshKey,
     Group,
+    AccessGroup,
+    StatusGroup,
     UserSiteInfo,
     SlurmAccount,
     SlurmAllocation,

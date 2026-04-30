@@ -37,7 +37,7 @@ from ..operations import (
     SyncUserIAM,
 )
 
-from .conftest import MONGODB_PORT
+from .conftest import MONGODB_PORT, seed_access_status_groups, status_link
 
 
 BEANIE_TEST_DB = 'cheeto_iam_test'
@@ -59,6 +59,7 @@ async def clean_db(beanie_client):
     for model in ALL_MODELS:
         await model.find_all().delete()
     await History.find_all().delete()
+    await seed_access_status_groups()
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +285,11 @@ class TestSyncUserIAM:
     @pytest_asyncio.fixture(loop_scope='session')
     async def make_user(self, beanie_client):
         async def _make(name='jdoe', user_type='user', uid=10000, **extra):
+            # Resolve string status to a StatusGroup link for ergonomic test
+            # input — callers can write `status='offboarding'` and have the
+            # link looked up automatically.
+            if isinstance(extra.get('status'), str):
+                extra['status'] = await status_link(extra['status'])
             u = User(
                 name=name, email=f'{name}@example.edu',
                 uid=uid, gid=uid, fullname=name.capitalize(),
@@ -353,8 +359,11 @@ class TestSyncUserIAM:
             )
         assert result.outcome == 'hit_restored'
 
-        fetched = await User.find_one(User.name == user.name)
-        assert fetched.status == 'active'
+        fetched = await User.find_one(
+            User.name == user.name, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'active'
         assert fetched.expires_at is None
         assert fetched.iam.first_missing_at is None
         assert fetched.iam.last_seen_at == now
@@ -379,8 +388,11 @@ class TestSyncUserIAM:
             )
         assert result.outcome == 'hit'  # not 'hit_restored'
 
-        fetched = await User.find_one(User.name == user.name)
-        assert fetched.status == 'inactive'
+        fetched = await User.find_one(
+            User.name == user.name, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'inactive'
         assert fetched.expires_at == future_expiry  # unchanged
 
     async def test_miss_first(self, beanie_client, make_user):
@@ -401,7 +413,8 @@ class TestSyncUserIAM:
         assert fetched.iam.first_missing_at == now
         assert fetched.iam.iam_synced_at == now
         assert fetched.expires_at is None
-        assert fetched.status == 'active'
+        # Status untouched on a first miss — fixture didn't set one
+        assert fetched.status is None
 
     async def test_miss_within_grace(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
@@ -427,17 +440,21 @@ class TestSyncUserIAM:
         assert fetched.iam.first_missing_at == first_missed
         assert fetched.iam.iam_synced_at == now
         assert fetched.expires_at is None
-        assert fetched.status == 'active'
+        # Status untouched while still within grace.
+        assert fetched.status is None
 
     async def test_miss_offboarding(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
         first_missed = now - timedelta(days=20)
-        await make_user(iam=UCDIAMInfo(
-            iam_status='missing',
-            person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
-            first_missing_at=first_missed,
-        ))
+        await make_user(
+            status='active',
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+                first_missing_at=first_missed,
+            ),
+        )
 
         handler = make_iam_handler(person_status=404)
         async with make_iam_api(handler) as api:
@@ -448,9 +465,12 @@ class TestSyncUserIAM:
             )
         assert result.outcome == 'miss_offboarding'
 
-        fetched = await User.find_one(User.name == 'jdoe')
+        fetched = await User.find_one(
+            User.name == 'jdoe', fetch_links=True, nesting_depth=1,
+        )
         assert fetched.expires_at == now + timedelta(days=30)
-        assert fetched.status == 'offboarding'
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'offboarding'
         assert fetched.iam.first_missing_at == first_missed
 
     async def test_miss_already_expiring(self, beanie_client, make_user):
@@ -614,7 +634,7 @@ class TestSyncUserIAM:
 
     async def test_lifecycle_hit_miss_offboard_restore(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
-        await make_user()
+        await make_user(status='active')
         # Phase 1: hit. Resolver finds them, get_person returns data.
         def hit(req):
             if '/iam/people/prikerbacct/search' in req.url.path:
@@ -654,8 +674,11 @@ class TestSyncUserIAM:
                 grace_days=14, expiry_offset_days=30, now=t2,
             )
         assert r3.outcome == 'miss_offboarding'
-        fetched = await User.find_one(User.name == 'jdoe')
-        assert fetched.status == 'offboarding'
+        fetched = await User.find_one(
+            User.name == 'jdoe', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'offboarding'
         assert fetched.expires_at == t2 + timedelta(days=30)
 
         # Phase 4: reappears, restored
@@ -667,8 +690,11 @@ class TestSyncUserIAM:
                 grace_days=14, expiry_offset_days=30, now=t3,
             )
         assert r4.outcome == 'hit_restored'
-        fetched = await User.find_one(User.name == 'jdoe')
-        assert fetched.status == 'active'
+        fetched = await User.find_one(
+            User.name == 'jdoe', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'active'
         assert fetched.expires_at is None
 
 
@@ -757,25 +783,27 @@ class TestReapOffboardedUsers:
 
     async def test_reaps_only_past_expiry(self, beanie_client):
         now = datetime(2026, 5, 1)
+        offboarding = await status_link('offboarding')
+        inactive = await status_link('inactive')
         users = [
             # Past expiry — should be reaped
             User(name='past', email='p@x.test', uid=30001, gid=30001,
                  fullname='Past', home_directory='/home/past', type='user',
-                 status='offboarding',
+                 status=offboarding,
                  expires_at=now - timedelta(days=1)),
             # Future expiry — should NOT be reaped
             User(name='future', email='f@x.test', uid=30002, gid=30002,
                  fullname='Future', home_directory='/home/future', type='user',
-                 status='offboarding',
+                 status=offboarding,
                  expires_at=now + timedelta(days=10)),
             # Offboarding but no expiry set — should NOT be reaped
             User(name='no_expiry', email='n@x.test', uid=30003, gid=30003,
                  fullname='No Expiry', home_directory='/home/no_expiry', type='user',
-                 status='offboarding'),
+                 status=offboarding),
             # Past expiry but already inactive — should NOT be reaped
             User(name='already_inactive', email='i@x.test', uid=30004, gid=30004,
                  fullname='Already Inactive', home_directory='/home/already_inactive',
-                 type='user', status='inactive',
+                 type='user', status=inactive,
                  expires_at=now - timedelta(days=5)),
         ]
         for u in users:
@@ -784,14 +812,18 @@ class TestReapOffboardedUsers:
         reaped = await ReapOffboardedUsers.run(beanie_client, None, now=now)
         assert reaped == ['past']
 
-        past = await User.find_one(User.name == 'past')
-        future = await User.find_one(User.name == 'future')
-        no_expiry = await User.find_one(User.name == 'no_expiry')
-        already = await User.find_one(User.name == 'already_inactive')
-        assert past.status == 'inactive'
-        assert future.status == 'offboarding'
-        assert no_expiry.status == 'offboarding'
-        assert already.status == 'inactive'
+        past = await User.find_one(User.name == 'past',
+                                   fetch_links=True, nesting_depth=1)
+        future = await User.find_one(User.name == 'future',
+                                     fetch_links=True, nesting_depth=1)
+        no_expiry = await User.find_one(User.name == 'no_expiry',
+                                        fetch_links=True, nesting_depth=1)
+        already = await User.find_one(User.name == 'already_inactive',
+                                      fetch_links=True, nesting_depth=1)
+        assert past.status.status_name == 'inactive'
+        assert future.status.status_name == 'offboarding'
+        assert no_expiry.status.status_name == 'offboarding'
+        assert already.status.status_name == 'inactive'
 
     async def test_empty_when_nothing_due(self, beanie_client):
         now = datetime(2026, 5, 1)

@@ -18,6 +18,69 @@ from ..types import is_listlike
 MONGODB_PORT = 28080
 
 
+# Default seed data for AccessGroup / StatusGroup records used by the async
+# test fixtures. Mirrors operations.group.DEFAULT_*_GROUPS but kept inline
+# here to avoid pulling beanie at conftest-import time (operations import
+# beanie's Link, which requires init_beanie). The async beanie_client
+# fixtures call seed_access_status_groups() after clean_db() so every test
+# starts with these records present.
+TEST_DEFAULT_ACCESS_GROUPS = (
+    ('login-ssh', 'login-ssh-users'),
+    ('ondemand', 'ondemand-users'),
+    ('compute-ssh', 'compute-ssh-users'),
+    ('root-ssh', 'root-ssh-users'),
+    ('sudo', 'sudo-users'),
+    ('slurm', 'slurm-users'),
+)
+TEST_DEFAULT_STATUS_GROUPS = (
+    ('active', 'active-users'),
+    ('inactive', 'inactive-users'),
+    ('disabled', 'disabled-users'),
+    ('offboarding', 'offboarding-users'),
+)
+TEST_SPECIAL_GROUP_GID_START = 6000
+
+
+async def seed_access_status_groups():
+    """Insert the standard AccessGroup / StatusGroup records used by tests.
+
+    Async test fixtures call this after clean_db() so every test has the
+    full set available for find_one(access_name=...) lookups in operations
+    that require Links.
+    """
+    from cheeto.models.group import AccessGroup, StatusGroup
+
+    gid = TEST_SPECIAL_GROUP_GID_START
+    for access_name, ldap_name in TEST_DEFAULT_ACCESS_GROUPS:
+        await AccessGroup(
+            name=ldap_name, gid=gid, access_name=access_name, type='access',
+        ).insert()
+        gid += 1
+    for status_name, ldap_name in TEST_DEFAULT_STATUS_GROUPS:
+        await StatusGroup(
+            name=ldap_name, gid=gid, status_name=status_name, type='status',
+        ).insert()
+        gid += 1
+
+
+async def status_link(name: str):
+    """Test helper: fetch the StatusGroup record by status_name."""
+    from cheeto.models.group import StatusGroup
+    return await StatusGroup.find_one(StatusGroup.status_name == name)
+
+
+async def access_links(names: list[str]) -> list:
+    """Test helper: fetch AccessGroup records for the given access_names."""
+    from cheeto.models.group import AccessGroup
+    out = []
+    for n in names:
+        ag = await AccessGroup.find_one(AccessGroup.access_name == n)
+        if ag is None:
+            raise RuntimeError(f'Test fixture missing AccessGroup {n!r}')
+        out.append(ag)
+    return out
+
+
 @pytest.fixture
 def testdata(tmpdir, request):
     '''

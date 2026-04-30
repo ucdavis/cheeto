@@ -37,8 +37,25 @@ from ..iam_async import (
     IAMUserPayload,
     build_ucdiam_info,
 )
+from ..models.group import StatusGroup
 from ..models.user import UCDIAMInfo, User
 from .base import Operation
+
+
+async def _status_name_of(user: User) -> str | None:
+    """Resolve `user.status` (a Link[StatusGroup] or None) to its
+    status_name string. Returns None when status is unset."""
+    if user.status is None:
+        return None
+    if isinstance(user.status, StatusGroup):
+        return user.status.status_name
+    sg = await StatusGroup.get(user.status.ref.id)
+    return sg.status_name if sg is not None else None
+
+
+async def _status_link(name: str) -> StatusGroup | None:
+    """Find the StatusGroup record with the given status_name, or None."""
+    return await StatusGroup.find_one(StatusGroup.status_name == name)
 
 logger = logging.getLogger(__name__)
 
@@ -133,9 +150,10 @@ class SyncUserIAM(Operation):
         else:
             await self._handle_hit(user, bundle, session)
 
-        # Snapshot for describe()
+        # Snapshot for describe(): resolve the StatusGroup link to a string
+        # so the History entry stays JSON-serializable.
         self._expires_at = user.expires_at
-        self._status = user.status
+        self._status = await _status_name_of(user) or ''
         if user.iam is not None:
             self._first_missing_at = user.iam.first_missing_at
             self._last_seen_at = user.iam.last_seen_at
@@ -177,13 +195,14 @@ class SyncUserIAM(Operation):
         # expires_at hasn't passed. Operator-set statuses (inactive, disabled)
         # are NOT auto-resurrected.
         restored = False
+        current_status = await _status_name_of(user)
         if (
             user.expires_at is not None
             and user.expires_at > self.now
-            and user.status == 'offboarding'
+            and current_status == 'offboarding'
         ):
             user.expires_at = None
-            user.status = 'active'
+            user.status = await _status_link('active')
             restored = True
 
         await user.save(session=session)
@@ -214,8 +233,9 @@ class SyncUserIAM(Operation):
                 user.expires_at = self.now + timedelta(
                     days=self.expiry_offset_days
                 )
-                if user.status == 'active':
-                    user.status = 'offboarding'
+                current_status = await _status_name_of(user)
+                if current_status == 'active':
+                    user.status = await _status_link('offboarding')
                 self._outcome = 'miss_offboarding'
             else:
                 self._outcome = 'miss_already_expiring'
@@ -393,12 +413,19 @@ class ReapOffboardedUsers(Operation):
         self._reaped: list[str] = []
 
     async def execute(self, session: AsyncClientSession) -> list[str]:
+        offboarding_sg = await _status_link('offboarding')
+        inactive_sg = await _status_link('inactive')
+        if offboarding_sg is None or inactive_sg is None:
+            # SeedAccessStatusGroups hasn't been run; nothing can have status
+            # 'offboarding' yet, so nothing to reap.
+            return []
+
         users = await User.find(
-            User.status == 'offboarding',
+            User.status.id == offboarding_sg.id,
             LTE(User.expires_at, self.now),
         ).to_list()
         for user in users:
-            user.status = 'inactive'
+            user.status = inactive_sg
             await user.save(session=session)
             self._reaped.append(user.name)
             logger.info(

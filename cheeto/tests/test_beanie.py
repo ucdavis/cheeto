@@ -69,7 +69,7 @@ from ..operations import (
     SetUserType,
 )
 
-from .conftest import MONGODB_PORT
+from .conftest import MONGODB_PORT, access_links, seed_access_status_groups, status_link
 
 
 BEANIE_TEST_DB = 'cheeto_beanie_test'
@@ -88,10 +88,13 @@ async def beanie_client(start_mongodb):
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
 async def clean_db(beanie_client):
-    """Delete all documents before each test (preserves indexes)."""
+    """Delete all documents before each test (preserves indexes), then
+    re-seed AccessGroup / StatusGroup records so operations that resolve
+    Links via access_name/status_name find them."""
     for model in ALL_MODELS:
         await model.find_all().delete()
     await History.find_all().delete()
+    await seed_access_status_groups()
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +118,12 @@ class TestUserModel:
         fetched = await User.find_one(User.name == 'testuser')
         assert fetched is not None
         assert fetched.uid == 10000
-        assert fetched.status == 'active'
+        # Default User has no status/access Links assigned at construction.
+        # Operations that care (CreateUser, SyncUserIAM) resolve them from
+        # status_name / access_name strings.
+        assert fetched.status is None
         assert fetched.shell == '/usr/bin/bash'
-        assert fetched.access == ['login-ssh']
+        assert fetched.access == []
         assert fetched.created_at is not None
         assert fetched.updated_at is not None
 
@@ -321,15 +327,20 @@ class TestUserSiteInfoModel:
         site = Site(name='usisite', fqdn='usi.hpc.test')
         await site.insert()
 
-        usi = UserSiteInfo(user=user, site=site, access=['login-ssh', 'slurm'])
+        active = await status_link('active')
+        usi = UserSiteInfo(
+            user=user, site=site, status=active,
+            access=await access_links(['login-ssh', 'slurm']),
+        )
         await usi.insert()
 
         fetched = await UserSiteInfo.find_one(
             UserSiteInfo.user.id == user.id, fetch_links=True,
         )
         assert fetched is not None
-        assert fetched.status == 'active'
-        assert 'slurm' in fetched.access
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'active'
+        assert {a.access_name for a in fetched.access} == {'login-ssh', 'slurm'}
 
 
 class TestStorageModel:
@@ -587,8 +598,11 @@ class TestUserMutationOps:
             beanie_client, None,
             name='mutuser', status='inactive', reason='testing',
         )
-        fetched = await User.find_one(User.name == 'mutuser')
-        assert fetched.status == 'inactive'
+        fetched = await User.find_one(
+            User.name == 'mutuser', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'inactive'
         assert any('status=inactive' in c for c in fetched.comments)
 
     async def test_set_user_type(self, beanie_client, user):
@@ -610,15 +624,19 @@ class TestUserMutationOps:
             beanie_client, None,
             name='mutuser', access='slurm',
         )
-        fetched = await User.find_one(User.name == 'mutuser')
-        assert 'slurm' in fetched.access
+        fetched = await User.find_one(
+            User.name == 'mutuser', fetch_links=True, nesting_depth=1,
+        )
+        assert 'slurm' in {ag.access_name for ag in fetched.access}
 
         await RemoveUserAccess.run(
             beanie_client, None,
             name='mutuser', access='slurm',
         )
-        fetched = await User.find_one(User.name == 'mutuser')
-        assert 'slurm' not in fetched.access
+        fetched = await User.find_one(
+            User.name == 'mutuser', fetch_links=True, nesting_depth=1,
+        )
+        assert 'slurm' not in {ag.access_name for ag in fetched.access}
 
     async def test_add_comment(self, beanie_client, user):
         await AddUserComment.run(
@@ -673,9 +691,11 @@ class TestSiteUserOps:
 
         fetched = await UserSiteInfo.find_one(
             UserSiteInfo.user.id == user.id,
+            fetch_links=True, nesting_depth=1,
         )
         assert fetched is not None
-        assert fetched.status == 'active'
+        assert fetched.status is not None
+        assert fetched.status.status_name == 'active'
 
         await RemoveSiteUser.run(
             beanie_client, None,

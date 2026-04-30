@@ -5,6 +5,7 @@ from typing import Any
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
+from ..models.group import StatusGroup
 from ..models.site import Site
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
@@ -44,7 +45,11 @@ class AddSiteUser(Operation):
                 f'User {self.user_name} already on site {self.site_name}'
             )
 
-        usi = UserSiteInfo(user=user, site=site)
+        # Default new site users to 'active' status if a StatusGroup record
+        # exists for it (matches v1 implicit default). Falls back to None
+        # gracefully if the seed step hasn't run yet.
+        active = await StatusGroup.find_one(StatusGroup.status_name == 'active')
+        usi = UserSiteInfo(user=user, site=site, status=active)
         await usi.insert(session=session)
         self._usi = usi
         return usi

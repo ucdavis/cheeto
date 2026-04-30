@@ -35,9 +35,44 @@ from ..models.slurm import (
     SlurmQOS,
     SlurmTRES,
 )
+from ..models.group import AccessGroup, StatusGroup
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from .base import Operation
+
+
+async def _resolve_access_links_for_migration(
+    names: list[str],
+) -> list[AccessGroup]:
+    """Migration variant of access-link resolution that warns and skips
+    missing AccessGroup records instead of raising. v1 may have access
+    types that didn't get seeded; we don't want one orphaned name to
+    abort an entire user migration."""
+    out: list[AccessGroup] = []
+    for n in names:
+        ag = await AccessGroup.find_one(AccessGroup.access_name == n)
+        if ag is None:
+            logger.warning(
+                'No AccessGroup with access_name=%r for migrated user; '
+                'skipping that access type', n,
+            )
+            continue
+        out.append(ag)
+    return out
+
+
+async def _resolve_status_link_for_migration(
+    name: str | None,
+) -> StatusGroup | None:
+    if name is None:
+        return None
+    sg = await StatusGroup.find_one(StatusGroup.status_name == name)
+    if sg is None:
+        logger.warning(
+            'No StatusGroup with status_name=%r for migrated user; '
+            'leaving status unset', name,
+        )
+    return sg
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +141,10 @@ class MigrateUser(Operation):
         if old_user is None:
             raise ValueError(f'User {self.username} not found in old database')
 
+        user_status = await _resolve_status_link_for_migration(old_user.status)
+        user_access = await _resolve_access_links_for_migration(
+            list(old_user.access) if old_user.access else ['login-ssh']
+        )
         user = User(
             name=old_user.username,
             email=old_user.email,
@@ -114,9 +153,9 @@ class MigrateUser(Operation):
             fullname=old_user.fullname,
             shell=old_user.shell,
             type=old_user.type,
-            status=old_user.status,
+            status=user_status,
             password=old_user.password,
-            access=list(old_user.access) if old_user.access else ['login-ssh'],
+            access=user_access,
             comments=list(old_user.comments) if old_user.comments else [],
             home_directory=old_user.home_directory,
         )
@@ -137,11 +176,18 @@ class MigrateUser(Operation):
                 )
                 continue
 
+            usi_status = await _resolve_status_link_for_migration(
+                old_site_user._status or 'active'
+            )
+            usi_access = await _resolve_access_links_for_migration(
+                list(old_site_user._access) if old_site_user._access
+                else ['login-ssh']
+            )
             usi = UserSiteInfo(
                 user=user,
                 site=site,
-                status=old_site_user._status or 'active',
-                access=list(old_site_user._access) if old_site_user._access else ['login-ssh'],
+                status=usi_status,
+                access=usi_access,
             )
             if old_site_user.expiry:
                 usi.expires_at = old_site_user.expiry

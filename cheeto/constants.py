@@ -61,6 +61,7 @@ USER_TYPES : Final = (
 GROUP_TYPES : Final = (
     'user',
     'access',
+    'status',
     'system',
     'group',
     'admin',
