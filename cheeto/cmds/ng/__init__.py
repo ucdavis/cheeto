@@ -37,4 +37,4 @@ async def resolve_author(args: Namespace):
 
 
 # Import submodules after registration to avoid circular re-registration
-from . import site, user, user_site, group, slurm, storage, history, migrate, hippo, iam  # noqa: E402, F401
+from . import site, user, user_site, group, slurm, storage, history, migrate, hippo, iam, ldap  # noqa: E402, F401
