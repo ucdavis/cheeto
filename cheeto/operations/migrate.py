@@ -17,6 +17,7 @@ from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..database.group import GlobalGroup, SiteGroup
+from ..database.group import GlobalGroup as OldGlobalGroup
 from ..database.site import Site as OldSite
 from ..database.slurm import (
     SiteSlurmAssociation,
@@ -75,6 +76,160 @@ async def _resolve_status_link_for_migration(
     return sg
 
 logger = logging.getLogger(__name__)
+
+
+class MigrateAccessStatusGroups(Operation):
+    """Seed beanie AccessGroup/StatusGroup records from the v1 mongoengine
+    layer so MigrateUsers (which expects access/status to resolve to Links)
+    can run successfully.
+
+    For each `(shorthand, ldap_groupname)` pair in the v1 config's
+    `user_access_groups` / `user_status_groups` mappings, look up the
+    corresponding v1 `GlobalGroup` record by groupname to inherit its gid,
+    then create the beanie `AccessGroup` / `StatusGroup` record.
+
+    Falls back to `DEFAULT_*_GROUPS` from operations.group when the v1
+    config doesn't carry the mapping (e.g. fresh installs or migrations
+    from a partial config). Falls back to allocating from `gid_start` when
+    the v1 GlobalGroup record is absent.
+
+    Idempotent: any AccessGroup/StatusGroup whose access_name/status_name
+    already exists in beanie is skipped (preserves any operator-tweaked
+    gids on the v2 side).
+
+    Run BEFORE `MigrateUsers` — users have `Link[AccessGroup]` /
+    `Link[StatusGroup]` fields that need these records to exist.
+    """
+
+    op_name = 'migrate_access_status_groups'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        access_groups: dict | None = None,
+        status_groups: dict | None = None,
+        gid_start: int = 6000,
+    ) -> None:
+        super().__init__(client, author)
+        self.access_groups = access_groups or {}
+        self.status_groups = status_groups or {}
+        self.gid_start = gid_start
+        self._created_access: dict[str, str] = {}
+        self._created_status: dict[str, str] = {}
+
+    async def _next_unused_gid(self, used: set[int]) -> int:
+        gid = self.gid_start + len(used)
+        while gid in used:
+            gid += 1
+        used.add(gid)
+        return gid
+
+    async def _seed_access(
+        self,
+        access_name: str,
+        ldap_name: str,
+        used_gids: set[int],
+        session: AsyncClientSession,
+    ) -> None:
+        existing = await AccessGroup.find_one(
+            AccessGroup.access_name == access_name,
+        )
+        if existing is not None:
+            self._created_access[access_name] = 'already_exists'
+            used_gids.add(existing.gid)
+            return
+
+        old_group = OldGlobalGroup.objects(groupname=ldap_name).first()
+        if old_group is not None and old_group.gid not in used_gids:
+            gid = old_group.gid
+            used_gids.add(gid)
+        else:
+            gid = await self._next_unused_gid(used_gids)
+            if old_group is not None:
+                logger.warning(
+                    'v1 GlobalGroup %s gid=%d already in use; allocating %d '
+                    'instead', ldap_name, old_group.gid, gid,
+                )
+        record = AccessGroup(
+            name=ldap_name, gid=gid, access_name=access_name, type='access',
+        )
+        await record.insert(session=session)
+        self._created_access[access_name] = 'created'
+
+    async def _seed_status(
+        self,
+        status_name: str,
+        ldap_name: str,
+        used_gids: set[int],
+        session: AsyncClientSession,
+    ) -> None:
+        existing = await StatusGroup.find_one(
+            StatusGroup.status_name == status_name,
+        )
+        if existing is not None:
+            self._created_status[status_name] = 'already_exists'
+            used_gids.add(existing.gid)
+            return
+
+        old_group = OldGlobalGroup.objects(groupname=ldap_name).first()
+        if old_group is not None and old_group.gid not in used_gids:
+            gid = old_group.gid
+            used_gids.add(gid)
+        else:
+            gid = await self._next_unused_gid(used_gids)
+            if old_group is not None:
+                logger.warning(
+                    'v1 GlobalGroup %s gid=%d already in use; allocating %d '
+                    'instead', ldap_name, old_group.gid, gid,
+                )
+        record = StatusGroup(
+            name=ldap_name, gid=gid, status_name=status_name, type='status',
+        )
+        await record.insert(session=session)
+        self._created_status[status_name] = 'created'
+
+    async def execute(
+        self, session: AsyncClientSession,
+    ) -> dict[str, dict[str, str]]:
+        # If the v1 config didn't carry the mapping, fall back to defaults.
+        access = dict(self.access_groups)
+        status = dict(self.status_groups)
+        if not access:
+            from .group import DEFAULT_ACCESS_GROUPS
+            access = dict(DEFAULT_ACCESS_GROUPS)
+        if not status:
+            from .group import DEFAULT_STATUS_GROUPS
+            status = dict(DEFAULT_STATUS_GROUPS)
+
+        # Pre-load all gids in use across the polymorphic groups collection
+        # so we can avoid duplicate-gid violations when allocating.
+        all_groups = await Group.find_all(with_children=True).to_list()
+        used_gids: set[int] = {g.gid for g in all_groups}
+
+        for access_name, ldap_name in access.items():
+            await self._seed_access(access_name, ldap_name, used_gids, session)
+        for status_name, ldap_name in status.items():
+            await self._seed_status(status_name, ldap_name, used_gids, session)
+
+        return {
+            'access': dict(self._created_access),
+            'status': dict(self._created_status),
+        }
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'access_groups_count': len(self._created_access),
+            'access_groups_created': sum(
+                1 for v in self._created_access.values() if v == 'created'
+            ),
+            'status_groups_count': len(self._created_status),
+            'status_groups_created': sum(
+                1 for v in self._created_status.values() if v == 'created'
+            ),
+            'gid_start': self.gid_start,
+        }
 
 
 class MigrateSites(Operation):

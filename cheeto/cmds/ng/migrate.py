@@ -8,7 +8,7 @@ from ponderosa import ArgParser
 from .. import commands
 from ...database import connect_mongoengine
 from ...log import Console
-from ...models.group import Group
+from ...models.group import AccessGroup, Group, StatusGroup
 from ...models.site import Site
 from ...models.slurm import (
     SlurmAccount,
@@ -20,6 +20,7 @@ from ...models.slurm import (
 from ...models.user import SshKey, User
 from ...models.user_site_info import UserSiteInfo
 from ...operations import (
+    MigrateAccessStatusGroups,
     MigrateGroups,
     MigrateSites,
     MigrateSlurmAccounts,
@@ -156,6 +157,42 @@ async def migrate_user(args: Namespace):
 USER_DROP_MODELS: list[type[Document]] = [User, UserSiteInfo, SshKey]
 
 
+# AccessGroup and StatusGroup share the same `groups` collection as Group
+# (polymorphic via is_root=True), so dropping them by class is a partial
+# wipe — we use the class-specific find for the seed step's drop scope.
+ACCESS_STATUS_DROP_MODELS: list[type[Document]] = [AccessGroup, StatusGroup]
+
+
+@commands.register('ng', 'migrate', 'access-status-groups',
+                   help='Migrate AccessGroup/StatusGroup records from v1 '
+                        '(must run before "users")')
+async def migrate_access_status_groups(args: Namespace):
+    console = Console()
+    if not await _maybe_drop(
+        args, console, 'AccessGroup/StatusGroup records',
+        ACCESS_STATUS_DROP_MODELS,
+    ):
+        return 1
+    cfg = args.config.ldap
+    result = await MigrateAccessStatusGroups.run(
+        args.db, args.author,
+        access_groups=dict(cfg.user_access_groups or {}),
+        status_groups=dict(cfg.user_status_groups or {}),
+    )
+    a_created = sum(1 for v in result['access'].values() if v == 'created')
+    s_created = sum(1 for v in result['status'].values() if v == 'created')
+    a_skipped = len(result['access']) - a_created
+    s_skipped = len(result['status']) - s_created
+    console.print(
+        f'AccessGroup: [green]{a_created}[/] created, '
+        f'[dim]{a_skipped}[/] already existed'
+    )
+    console.print(
+        f'StatusGroup: [green]{s_created}[/] created, '
+        f'[dim]{s_skipped}[/] already existed'
+    )
+
+
 @commands.register('ng', 'migrate', 'users',
                    help='Migrate all users and their site memberships')
 async def migrate_users(args: Namespace):
@@ -266,7 +303,8 @@ ALL_DROP_MODELS: list[type[Document]] = [
 
 
 @commands.register('ng', 'migrate', 'all',
-                   help='Migrate sites, users, groups, and all Slurm records in order')
+                   help='Migrate sites, access/status groups, users, regular '
+                        'groups, and all Slurm records in order')
 async def migrate_all(args: Namespace):
     console = Console()
     if not await _maybe_drop(args, console,
@@ -277,6 +315,23 @@ async def migrate_all(args: Namespace):
     console.rule('Migrating sites')
     sites = await MigrateSites.run(args.db, args.author)
     console.print(f'  [green]{len(sites)}[/] sites migrated')
+
+    # AccessGroup / StatusGroup must exist before MigrateUsers runs — the
+    # new User schema has Link[AccessGroup] and Link[StatusGroup] fields
+    # that resolve via find_one(access_name=...) at migration time.
+    console.rule('Migrating AccessGroup/StatusGroup records')
+    cfg = args.config.ldap
+    seed_result = await MigrateAccessStatusGroups.run(
+        args.db, args.author,
+        access_groups=dict(cfg.user_access_groups or {}),
+        status_groups=dict(cfg.user_status_groups or {}),
+    )
+    console.print(
+        f'  [green]{sum(1 for v in seed_result["access"].values() if v == "created")}[/] '
+        f'AccessGroup records created, '
+        f'[green]{sum(1 for v in seed_result["status"].values() if v == "created")}[/] '
+        f'StatusGroup records created'
+    )
 
     console.rule('Migrating users')
     users = await MigrateUsers.run(args.db, args.author)

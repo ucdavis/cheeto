@@ -62,6 +62,7 @@ from .ldap import (
 )
 from .storage import CreateHomeStorage
 from .migrate import (
+    MigrateAccessStatusGroups,
     MigrateGroups,
     MigrateSites,
     MigrateSlurmAccounts,

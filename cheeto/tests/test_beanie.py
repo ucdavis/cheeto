@@ -42,6 +42,7 @@ from ..operations import (
     AddGroupSudoer,
     AddQOSAllocation,
     EditSlurmQOS,
+    MigrateAccessStatusGroups,
     ProvisionSlurmAllocation,
     RemoveSlurmAssociation,
     RemoveSlurmPartition,
@@ -1596,3 +1597,111 @@ class TestHippoEventModel:
         ).to_list()
         assert len(pending) == 1
         assert pending[0].hippo_id == 100
+
+
+class TestMigrateAccessStatusGroups:
+    """Tests for the v1 -> v2 AccessGroup/StatusGroup migration step.
+
+    Connects mongoengine to the same MongoDB the test suite already uses
+    (via the existing connect_mongoengine path), drops the v1 group
+    collection, then runs the op. The autouse clean_db fixture pre-seeds
+    AccessGroup/StatusGroup records for every test, so these tests start
+    by deleting those to test the actual migration path.
+    """
+
+    @pytest_asyncio.fixture(loop_scope='session')
+    async def clean_polymorphic_groups(self, beanie_client):
+        """Wipe all groups (Group + AccessGroup + StatusGroup share the
+        polymorphic collection) before each test."""
+        from cheeto.models.group import Group
+        await Group.find_all(with_children=True).delete()
+
+    async def test_no_v1_data_falls_back_to_defaults(
+        self, beanie_client, clean_polymorphic_groups,
+    ):
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+        from cheeto.models.group import AccessGroup, StatusGroup
+        from cheeto.operations.group import (
+            DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS,
+        )
+
+        # Connect mongoengine to the same MongoDB so OldGlobalGroup.objects()
+        # works. v1 GlobalGroup collection is empty in this fresh DB.
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database='cheeto_migrate_test',
+        )
+        connect_mongoengine(mongo_cfg, quiet=True)
+
+        # No mapping passed → falls back to the defaults from operations.group
+        result = await MigrateAccessStatusGroups.run(
+            beanie_client, None,
+        )
+        assert all(v == 'created' for v in result['access'].values()), result
+        assert all(v == 'created' for v in result['status'].values()), result
+
+        # All defaults landed.
+        ag_names = {ag.access_name for ag in await AccessGroup.find_all().to_list()}
+        sg_names = {sg.status_name for sg in await StatusGroup.find_all().to_list()}
+        assert ag_names == {an for an, _ in DEFAULT_ACCESS_GROUPS}
+        assert sg_names == {sn for sn, _ in DEFAULT_STATUS_GROUPS}
+
+        # Names match the LDAP groupnames from defaults.
+        ag_records = await AccessGroup.find_all().to_list()
+        ag_by_access = {ag.access_name: ag for ag in ag_records}
+        for access_name, ldap_name in DEFAULT_ACCESS_GROUPS:
+            assert ag_by_access[access_name].name == ldap_name
+
+    async def test_idempotent(self, beanie_client, clean_polymorphic_groups):
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+        from cheeto.models.group import AccessGroup
+
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database='cheeto_migrate_test',
+        )
+        connect_mongoengine(mongo_cfg, quiet=True)
+
+        await MigrateAccessStatusGroups.run(beanie_client, None)
+        first_count = await AccessGroup.find_all().count()
+
+        # Re-running reports already_exists for everything.
+        result = await MigrateAccessStatusGroups.run(beanie_client, None)
+        assert all(
+            v == 'already_exists' for v in result['access'].values()
+        )
+        assert all(
+            v == 'already_exists' for v in result['status'].values()
+        )
+        assert await AccessGroup.find_all().count() == first_count
+
+    async def test_custom_mapping_overrides_defaults(
+        self, beanie_client, clean_polymorphic_groups,
+    ):
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+        from cheeto.models.group import AccessGroup
+
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database='cheeto_migrate_test',
+        )
+        connect_mongoengine(mongo_cfg, quiet=True)
+
+        # Operator-provided non-default mapping (mimics a v1 config with
+        # a different shorthand-to-LDAP-name relationship).
+        result = await MigrateAccessStatusGroups.run(
+            beanie_client, None,
+            access_groups={'gpu-access': 'gpu-users'},
+            status_groups={'paused': 'paused-users'},
+        )
+        assert result['access'] == {'gpu-access': 'created'}
+        assert result['status'] == {'paused': 'created'}
+
+        ag = await AccessGroup.find_one(
+            AccessGroup.access_name == 'gpu-access',
+        )
+        assert ag is not None
+        assert ag.name == 'gpu-users'
