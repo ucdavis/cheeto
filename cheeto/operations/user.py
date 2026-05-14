@@ -14,8 +14,12 @@ from ..constants import (
 )
 from ..encrypt import get_mcf_hasher, hash_yescrypt
 from ..models.group import AccessGroup, Group, StatusGroup
-from ..models.user import User
-from ..queries.access_status import find_access_group, find_status_group
+from ..models.user import SshKey, User
+from ..queries.access_status import (
+    find_access_group,
+    find_status_group,
+    resolve_status_name,
+)
 from .base import Operation
 
 
@@ -294,6 +298,13 @@ class SetUserStatus(Operation):
         status_link = await _resolve_status_link(self.status)
 
         if self.site is None:
+            # Clear the pending offboarding expiry when reactivating, so the
+            # next IAM sync doesn't immediately re-offboard the user.
+            if (
+                self.status == 'active'
+                and await resolve_status_name(user.status) == 'offboarding'
+            ):
+                user.expires_at = None
             user.status = status_link
         else:
             from ..models.site import Site
@@ -308,6 +319,11 @@ class SetUserStatus(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
+            if (
+                self.status == 'active'
+                and await resolve_status_name(usi.status) == 'offboarding'
+            ):
+                usi.expires_at = None
             usi.status = status_link
             await usi.save(session=session)
 
@@ -515,6 +531,83 @@ class RemoveUserAccess(Operation):
             'access': self.access,
             'site': self.site,
         }
+
+
+class AddUserSshKey(Operation):
+    """Insert an SshKey for `name`. If `replace=True`, delete every existing
+    SshKey for that user first so the new key is the only one."""
+
+    op_name = 'add_user_ssh_key'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        name: str,
+        key: str,
+        replace: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        self.name = name
+        self.key = key.strip()
+        self.replace = replace
+        self._replaced_count = 0
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        user = await User.find_one(User.name == self.name)
+        if user is None:
+            raise ValueError(f'User {self.name} does not exist')
+
+        if self.replace:
+            existing = await SshKey.find(SshKey.user.id == user.id).to_list()
+            self._replaced_count = len(existing)
+            for k in existing:
+                await k.delete(session=session)
+
+        await SshKey(key=self.key, user=user).insert(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'username': self.name,
+            'replace': self.replace,
+            'replaced_count': self._replaced_count,
+            'key_fingerprint': (
+                self.key[:32] + '...' if len(self.key) > 32 else self.key
+            ),
+        }
+
+
+class RemoveUserSshKey(Operation):
+    """Delete one SshKey identified by its document id."""
+
+    op_name = 'remove_user_ssh_key'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        name: str,
+        key_id: Any,
+    ) -> None:
+        super().__init__(client, author)
+        self.name = name
+        self.key_id = key_id
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        user = await User.find_one(User.name == self.name)
+        if user is None:
+            raise ValueError(f'User {self.name} does not exist')
+        key = await SshKey.get(self.key_id)
+        if key is None or key.user.ref.id != user.id:
+            raise ValueError(
+                f'SshKey {self.key_id} not found for user {self.name}'
+            )
+        await key.delete(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {'username': self.name, 'key_id': str(self.key_id)}
 
 
 class AddUserComment(Operation):

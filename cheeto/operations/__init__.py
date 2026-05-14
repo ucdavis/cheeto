@@ -3,11 +3,13 @@ from .site import CreateSite
 from .user import (
     AddUserAccess,
     AddUserComment,
+    AddUserSshKey,
     CreateClassUser,
     CreateSharedUser,
     CreateSystemUser,
     CreateUser,
     RemoveUserAccess,
+    RemoveUserSshKey,
     SetUserPassword,
     SetUserShell,
     SetUserStatus,

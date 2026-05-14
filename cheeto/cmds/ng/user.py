@@ -16,11 +16,13 @@ from ...models.user_site_info import UserSiteInfo
 from ...operations import (
     AddUserAccess,
     AddUserComment,
+    AddUserSshKey,
     CreateClassUser,
     CreateSharedUser,
     CreateSystemUser,
     CreateUser,
     RemoveUserAccess,
+    RemoveUserSshKey,
     SetUserPassword,
     SetUserShell,
     SetUserStatus,
@@ -486,6 +488,102 @@ async def user_remove_access(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--access', '-a', nargs='+', required=True,
                         choices=list(ACCESS_TYPES))
+
+
+def _read_ssh_key(args: Namespace) -> str | None:
+    """Resolve the key text from --key or --key-file. Returns None and
+    prints the error if neither/both are given or the file is unreadable."""
+    console = Console()
+    if (args.key is None) == (args.key_file is None):
+        console.print('[red]Specify exactly one of --key or --key-file[/]')
+        return None
+    if args.key is not None:
+        return args.key.strip()
+    try:
+        return open(args.key_file).read().strip()
+    except OSError as e:
+        console.print(f'[red]Could not read {args.key_file}: {e}[/]')
+        return None
+
+
+@user_args.apply(required=True)
+@commands.register('ng', 'user', 'add', 'ssh-key',
+                   help='Add an SSH public key for a user')
+async def user_add_ssh_key(args: Namespace):
+    console = Console()
+    key = _read_ssh_key(args)
+    if key is None:
+        return 1
+    await AddUserSshKey.run(
+        args.db, args.author,
+        name=args.user, key=key, replace=args.replace,
+    )
+    if args.replace:
+        console.print(
+            f'Replaced ssh keys for [green]{args.user}[/] with the new key'
+        )
+    else:
+        console.print(f'Added ssh key for [green]{args.user}[/]')
+
+
+@user_add_ssh_key.args()
+def _(parser: ArgParser):
+    parser.add_argument('--key', '-k', default=None,
+                        help='SSH public key text (quote it)')
+    parser.add_argument('--key-file', '-f', default=None,
+                        help='Path to a file containing the SSH public key')
+    parser.add_argument('--replace', action='store_true', default=False,
+                        help='Delete all existing SSH keys for this user '
+                             'and replace with the new one')
+
+
+@user_args.apply(required=True)
+@commands.register('ng', 'user', 'remove', 'ssh-key',
+                   help='Remove an SSH public key from a user; prompts if '
+                        'more than one is configured')
+async def user_remove_ssh_key(args: Namespace):
+    console = Console()
+    user = await find_user(name=args.user)
+    if user is None:
+        console.print(f'[red]No user found: {args.user}[/]')
+        return 1
+    keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+    if not keys:
+        console.print(f'[yellow]{args.user} has no ssh keys[/]')
+        return
+
+    if len(keys) == 1:
+        target = keys[0]
+        console.print(f'Removing the only ssh key for [green]{args.user}[/]:')
+        console.print(f'  [dim]{target.key}[/]')
+    else:
+        console.print(
+            f'[bold]{args.user}[/] has {len(keys)} ssh keys; pick one to '
+            f'remove:'
+        )
+        for i, k in enumerate(keys, start=1):
+            console.print(f'  [cyan]{i}[/]) {k.key}')
+        try:
+            choice = input(f'Number to remove [1-{len(keys)}] (or blank to abort): ').strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[red]Aborted.[/]')
+            return 1
+        if not choice:
+            console.print('[red]Aborted.[/]')
+            return 1
+        try:
+            idx = int(choice) - 1
+            target = keys[idx]
+            assert 0 <= idx < len(keys)
+        except (ValueError, AssertionError, IndexError):
+            console.print(f'[red]Invalid selection: {choice!r}[/]')
+            return 1
+
+    await RemoveUserSshKey.run(
+        args.db, args.author,
+        name=args.user, key_id=target.id,
+    )
+    console.print(f'Removed ssh key from [green]{args.user}[/]')
 
 
 @user_args.apply(required=True)
