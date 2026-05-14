@@ -89,6 +89,7 @@ class User(BaseDocument, Expirable):
     uid: Annotated[int, Field(ge=0, le=UINT_MAX)]
     gid: Annotated[int, Field(ge=0, le=UINT_MAX)]
     fullname: str
+    surname: str | None = None
 
     shell: str = DEFAULT_SHELL
     type: str = 'user'

@@ -10,6 +10,7 @@ opens/closes cleanly per invocation.
 
 from __future__ import annotations
 
+import secrets
 from argparse import Namespace
 
 from ponderosa import ArgParser
@@ -22,6 +23,7 @@ from ...log import Console
 from ...models.user import User
 from ...operations import (
     BootstrapLDAPSite,
+    ClearLDAPTree,
     PruneSiteLDAP,
     SyncGroupToLDAP,
     SyncSiteLDAP,
@@ -293,6 +295,146 @@ def _(parser: ArgParser):
                              '(default 50; pass -1 to disable)')
     parser.add_argument('--dry-run', action='store_true', default=False,
                         help='Show would-delete list without writing')
+
+
+# ---------------------------------------------------------------------------
+# `ng ldap clear-tree`
+# ---------------------------------------------------------------------------
+
+
+def _confirm_clear_tree(
+    console: Console, base: str, exclude_bases: list[str], count: int,
+) -> bool:
+    """Typed 6-digit confirmation before a destructive clear. Mirrors
+    the migrate --drop confirm flow. Returns True only on exact match."""
+    code = f'{secrets.randbelow(1_000_000):06d}'
+    console.print()
+    console.rule(
+        '[bold red]DANGER: clear-tree will PERMANENTLY DELETE LDAP entries[/]',
+        style='red',
+    )
+    console.print(f'[bold red]Base:[/] [yellow]{base}[/]')
+    console.print(f'[bold red]Entries to delete:[/] [yellow]{count}[/]')
+    if exclude_bases:
+        console.print('[bold red]Excluded subtrees:[/]')
+        for eb in exclude_bases:
+            console.print(f'  [green]•[/] [dim]{eb}[/]')
+    console.print(
+        '\n[bold red]This action is IRREVERSIBLE.[/]\n'
+        f'To confirm, re-type this code exactly: [bold yellow]{code}[/]'
+    )
+    try:
+        entered = input('Confirmation code: ').strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print('\n[red]Aborted: no confirmation received.[/]')
+        return False
+    if entered != code:
+        console.print('[red]Aborted: confirmation code did not match.[/]')
+        return False
+    console.print('[green]Confirmed. Proceeding.[/]\n')
+    return True
+
+
+@commands.register(
+    'ng', 'ldap', 'clear-tree',
+    help='Delete every LDAP entry under the searchbase (excluding Services)',
+)
+async def ldap_clear_tree_cmd(args: Namespace):
+    console = Console()
+    cfg = args.config.ldap
+    exclude_bases = (
+        [b.strip() for b in args.exclude.split(',') if b.strip()]
+        if args.exclude else None
+    )
+    max_deletions = (
+        None if args.max_deletions is not None and args.max_deletions < 0
+        else args.max_deletions
+    )
+    # sitename is unused for clear-tree but required by the manager.
+    sitename = args.site or '__clear__'
+    async with AsyncLDAPManager(cfg, sitename=sitename) as ldap:
+        try:
+            preview = await ClearLDAPTree.run(
+                args.db, args.author,
+                ldap=ldap,
+                base=args.base,
+                exclude_bases=exclude_bases,
+                max_deletions=max_deletions,
+                dry_run=True,
+            )
+        except LDAPPruneAborted as e:
+            console.print(f'[red]Aborted:[/] {e}')
+            for cat, items in e.would_delete.items():
+                console.print(f'  [yellow]{cat}[/] ({len(items)} entries):')
+                for dn in items[:25]:
+                    console.print(f'    {dn}')
+                if len(items) > 25:
+                    console.print(f'    ... {len(items) - 25} more')
+            return 1
+
+        will_delete = preview['would_delete']
+        if not will_delete:
+            console.print('[green]Nothing to delete.[/]')
+            return
+
+        for dn in will_delete[:25]:
+            console.print(f'  [red]-[/] {dn}')
+        if len(will_delete) > 25:
+            console.print(f'  ... {len(will_delete) - 25} more')
+
+        if args.dry_run:
+            console.print(
+                f'[yellow]dry-run:[/] {len(will_delete)} DNs would be deleted',
+            )
+            return
+
+        base = args.base or cfg.searchbase
+        if not _confirm_clear_tree(
+            console, base,
+            exclude_bases or [f'ou=Services,{cfg.searchbase}'],
+            len(will_delete),
+        ):
+            return 1
+
+        result = await ClearLDAPTree.run(
+            args.db, args.author,
+            ldap=ldap,
+            base=args.base,
+            exclude_bases=exclude_bases,
+            max_deletions=max_deletions,
+            dry_run=False,
+        )
+
+    console.print(
+        f'[green]Deleted[/] {result["count"]} LDAP entries',
+    )
+
+
+@ldap_clear_tree_cmd.args()
+def _(parser: ArgParser):
+    parser.add_argument(
+        '--base', default=None,
+        help='Base DN to clear (default: LDAPConfig.searchbase)',
+    )
+    parser.add_argument(
+        '--exclude', default=None,
+        help='Comma-separated DNs to exclude (subtree match). Default: '
+             'ou=Services,<searchbase>',
+    )
+    parser.add_argument(
+        '--site', default=None,
+        help='Sitename for the LDAP manager (cosmetic; clear-tree is '
+             'site-agnostic). Default: synthetic placeholder.',
+    )
+    parser.add_argument(
+        '--max-deletions', type=int, default=200,
+        help='Abort if more than N entries would be deleted '
+             '(default 200; pass -1 to disable)',
+    )
+    parser.add_argument(
+        '--dry-run', action='store_true', default=False,
+        help='Show what would be deleted without prompting or writing',
+    )
 
 
 # ---------------------------------------------------------------------------

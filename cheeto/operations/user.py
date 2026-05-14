@@ -15,6 +15,7 @@ from ..constants import (
 from ..encrypt import get_mcf_hasher, hash_yescrypt
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.user import User
+from ..queries.access_status import find_access_group, find_status_group
 from .base import Operation
 
 
@@ -23,15 +24,9 @@ def _hash_password(plaintext: str) -> str:
 
 
 async def _resolve_status_link(name: str | None) -> StatusGroup | None:
-    """Resolve a status shorthand (e.g. 'active') to a StatusGroup record.
-
-    Returns None when `name` is None. Raises ValueError if the shorthand
-    has no corresponding StatusGroup record (i.e. SeedAccessStatusGroups
-    has not been run, or the name is misspelled).
-    """
     if name is None:
         return None
-    sg = await StatusGroup.find_one(StatusGroup.status_name == name)
+    sg = await find_status_group(name)
     if sg is None:
         raise ValueError(
             f'No StatusGroup with status_name={name!r}; '
@@ -41,11 +36,9 @@ async def _resolve_status_link(name: str | None) -> StatusGroup | None:
 
 
 async def _resolve_access_links(names: list[str]) -> list[AccessGroup]:
-    """Resolve access shorthands (e.g. ['login-ssh', 'sudo']) to AccessGroup
-    records. Raises ValueError if any shorthand is missing."""
     out: list[AccessGroup] = []
     for n in names:
-        ag = await AccessGroup.find_one(AccessGroup.access_name == n)
+        ag = await find_access_group(n)
         if ag is None:
             raise ValueError(
                 f'No AccessGroup with access_name={n!r}; '

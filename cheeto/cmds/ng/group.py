@@ -303,7 +303,7 @@ async def group_remove_slurmer(args: Namespace):
                    help='Show group information')
 async def group_show(args: Namespace):
     console = Console()
-    group = await Group.find_one(Group.name == args.group, fetch_links=True)
+    group = await Group.find_one(Group.name == args.group, fetch_links=True, with_children=True)
     if group is None:
         console.print(f'[red]Group {args.group} not found[/]')
         return 1

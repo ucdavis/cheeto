@@ -90,24 +90,57 @@ def _confirm_drop(console: Console, scope_label: str,
     return True
 
 
-async def _drop_models(console: Console, models: Iterable[type[Document]]) -> None:
-    for model in models:
-        result = await model.find_all().delete()
-        deleted = getattr(result, 'deleted_count', None) if result else None
-        suffix = f' ({deleted} documents)' if deleted is not None else ''
-        console.print(f'  [red]dropped[/] {model.Settings.name}{suffix}')
+def _unique_collection_names(
+    models: Iterable[type[Document]],
+) -> list[str]:
+    # Polymorphic subclasses share a collection, so dedupe by name.
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in models:
+        n = m.Settings.name
+        if n in seen:
+            continue
+        seen.add(n)
+        out.append(n)
+    return out
+
+
+async def _drop_models(
+    args: Namespace,
+    console: Console,
+    models: Iterable[type[Document]],
+) -> None:
+    models = list(models)
+    name_to_model = {m.Settings.name: m for m in models}
+    for name in _unique_collection_names(models):
+        await name_to_model[name].get_pymongo_collection().drop()
+        console.print(f'  [red]dropped collection[/] {name}')
+
+    # Re-init so beanie recreates the collection-level indexes (unique
+    # name/gid, etc.) on the next insert. Without this, the drop leaves
+    # a fresh collection with no constraints, and silent dup-key data
+    # corruption would be possible.
+    from beanie import init_beanie
+
+    from ...models import ALL_MODELS
+    await init_beanie(
+        database=args.db[args.config.mongo.database],
+        document_models=ALL_MODELS,
+    )
 
 
 async def _maybe_drop(args: Namespace, console: Console,
                       scope_label: str,
                       models: list[type[Document]]) -> bool:
-    """If --drop is set, confirm + drop the listed models. Returns False to abort."""
+    """If --drop is set, confirm + drop the listed models' collections.
+    Returns False to abort."""
     if not args.drop:
         return True
-    collection_names = [m.Settings.name for m in models]
-    if not _confirm_drop(console, scope_label, collection_names):
+    if not _confirm_drop(
+        console, scope_label, _unique_collection_names(models),
+    ):
         return False
-    await _drop_models(console, models)
+    await _drop_models(args, console, models)
     return True
 
 
@@ -157,9 +190,10 @@ async def migrate_user(args: Namespace):
 USER_DROP_MODELS: list[type[Document]] = [User, UserSiteInfo, SshKey]
 
 
-# AccessGroup and StatusGroup share the same `groups` collection as Group
-# (polymorphic via is_root=True), so dropping them by class is a partial
-# wipe — we use the class-specific find for the seed step's drop scope.
+# AccessGroup and StatusGroup share the `groups` collection with Group
+# (polymorphic via is_root=True). --drop on this step drops the entire
+# `groups` collection, including any regular Group records. The
+# confirmation prompt names `groups` so the operator can see this.
 ACCESS_STATUS_DROP_MODELS: list[type[Document]] = [AccessGroup, StatusGroup]
 
 
@@ -298,7 +332,7 @@ async def migrate_slurm_all(args: Namespace):
 
 ALL_DROP_MODELS: list[type[Document]] = [
     SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
-    Group, SshKey, UserSiteInfo, User, Site,
+    Group, SshKey, UserSiteInfo, User, Site, AccessGroup, StatusGroup,
 ]
 
 

@@ -23,9 +23,11 @@ class UserSiteInfo(BaseDocument, Expirable):
     # User.status. Same semantics as User.status — a Link to a StatusGroup
     # record.
     status: Link['StatusGroup'] | None = None
-    # Per-site access override. Effective access for a (user, site) is the
-    # union of User.access and UserSiteInfo.access (matches v1 SiteUser
-    # semantics in cheeto/database/user.py).
+    # Per-site access override. Override semantics: a non-empty list
+    # replaces User.access entirely at this site; an empty list (the
+    # default) falls through to User.access. Use
+    # `cheeto.queries.user.effective_access_links(user, usi)` to compute
+    # the effective list rather than reading this field directly.
     access: list[Link['AccessGroup']] = Field(default_factory=list)
 
     class Settings:

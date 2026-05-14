@@ -5,7 +5,14 @@ from typing import Any
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
-from ..constants import MIN_CLASS_ID, MIN_LABGROUP_ID, MAX_LABGROUP_ID, MIN_PIGROUP_GID, MIN_SYSTEM_UID
+from ..constants import (
+    MAX_LABGROUP_ID,
+    MIN_CLASS_ID,
+    MIN_LABGROUP_ID,
+    MIN_PIGROUP_GID,
+    MIN_SPECIAL_GID,
+    MIN_SYSTEM_UID,
+)
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.user import User
 from .base import Operation
@@ -34,9 +41,6 @@ DEFAULT_STATUS_GROUPS: tuple[tuple[str, str], ...] = (
     ('disabled', 'disabled-users'),
     ('offboarding', 'offboarding-users'),
 )
-
-DEFAULT_SPECIAL_GROUP_GID_START = 6000
-
 
 async def _get_next_gid(min_id: int, max_id: int) -> int:
     result = await Group.find(
@@ -225,7 +229,7 @@ class SeedAccessStatusGroups(Operation):
         client: AsyncMongoClient,
         author: User | None,
         *,
-        gid_start: int = DEFAULT_SPECIAL_GROUP_GID_START,
+        gid_start: int = MIN_SPECIAL_GID,
         access_groups: list[tuple[str, str]] | None = None,
         status_groups: list[tuple[str, str]] | None = None,
     ) -> None:

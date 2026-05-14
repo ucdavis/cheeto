@@ -43,6 +43,11 @@ from ..models.site import Site
 from ..models.storage import Storage
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
+from ..queries.access_status import (
+    resolve_access_ldapnames,
+    resolve_status_ldapname,
+)
+from ..queries.user import effective_access_links
 from .base import Operation
 
 logger = logging.getLogger(__name__)
@@ -51,43 +56,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Helpers shared across ops
 # ---------------------------------------------------------------------------
-
-
-async def _resolve_user_status_name(user: User) -> str | None:
-    """Resolve User.status (a Link[StatusGroup] or None) to its
-    status_name string. Avoids requiring fetch_links= at every call site."""
-    if user.status is None:
-        return None
-    if isinstance(user.status, StatusGroup):
-        return user.status.status_name
-    sg = await StatusGroup.get(user.status.ref.id)
-    return sg.status_name if sg is not None else None
-
-
-async def _resolve_user_status_ldapname(user: User) -> str | None:
-    """Resolve User.status to its LDAP groupname (Group.name)."""
-    if user.status is None:
-        return None
-    if isinstance(user.status, StatusGroup):
-        return user.status.name
-    sg = await StatusGroup.get(user.status.ref.id)
-    return sg.name if sg is not None else None
-
-
-async def _resolve_access_ldapnames(
-    access_links: list, /,
-) -> list[str]:
-    """Resolve a list of Link[AccessGroup] (or fetched AccessGroup docs)
-    into their LDAP groupnames."""
-    out: list[str] = []
-    for link in access_links:
-        if isinstance(link, AccessGroup):
-            out.append(link.name)
-            continue
-        ag = await AccessGroup.get(link.ref.id)
-        if ag is not None:
-            out.append(ag.name)
-    return out
 
 
 async def _build_user_record(user: User) -> LDAPUserRecord:
@@ -100,10 +68,12 @@ async def _build_user_record(user: User) -> LDAPUserRecord:
         uid=user.uid,
         gid=user.gid,
         fullname=user.fullname,
+        surname=user.surname if user.surname is not None else user.fullname.split(' ')[-1],
         home_directory=user.home_directory,
         shell=user.shell,
         ssh_keys=[k.key for k in keys],
         password=user.password,
+        expires_at=user.expires_at
     )
 
 
@@ -249,10 +219,12 @@ class SyncUserToLDAP(Operation):
                 f'User {self.username!r} is not on site {self.sitename!r}'
             )
 
-        # Compute target group memberships.
-        access_links = list(user.access) + list(usi.access)
-        target_groups = set(await _resolve_access_ldapnames(access_links))
-        status_ldapname = await _resolve_user_status_ldapname(user)
+        # Compute target group memberships. Override semantics: when
+        # usi.access is non-empty it replaces user.access entirely for
+        # this site; an empty usi.access falls through to the global.
+        access_links = effective_access_links(user, usi)
+        target_groups = set(await resolve_access_ldapnames(access_links))
+        status_ldapname = await resolve_status_ldapname(user.status)
         if status_ldapname is not None:
             target_groups.add(status_ldapname)
 
@@ -526,13 +498,102 @@ class SyncSiteAutomounts(Operation):
 
 
 # ---------------------------------------------------------------------------
-# PruneSiteLDAP
+# PruneSiteLDAP / ClearLDAPTree
 # ---------------------------------------------------------------------------
 
 
 _PRUNE_DEFAULT_MAX = 50
+_CLEAR_DEFAULT_MAX = 200
 _PROTECTED_USER_DNS = {'admin'}  # canonical names of admin/system entries
                                  # in user_base that must never be pruned
+
+
+class ClearLDAPTree(Operation):
+    """Delete every LDAP entry under a base (default: configured
+    searchbase), excluding any subtree listed in `exclude_bases`.
+
+    The LDAP-side analogue of `cheeto ng migrate --drop`: wipe the
+    directory so a subsequent `bootstrap` + `sync-site` starts clean.
+    The Services OU is excluded by default since cheeto doesn't manage
+    it.
+
+    Safety guards mirror PruneSiteLDAP: `max_deletions` cap (default
+    `_CLEAR_DEFAULT_MAX`, pass `None` to disable), `dry_run` preview
+    that returns the would-delete list without writing.
+    """
+
+    op_name = 'clear_ldap_tree'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        ldap: AsyncLDAPManager,
+        base: str | None = None,
+        exclude_bases: list[str] | None = None,
+        max_deletions: int | None = _CLEAR_DEFAULT_MAX,
+        dry_run: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        self.ldap = ldap
+        self.base = base or ldap.config.searchbase
+        # Default exclusion: the Services OU directly under searchbase.
+        # Anything inside it (e.g. service accounts, replication agents)
+        # is left alone.
+        self.exclude_bases = (
+            list(exclude_bases) if exclude_bases is not None
+            else [f'ou=Services,{ldap.config.searchbase}']
+        )
+        self.max_deletions = max_deletions
+        self.dry_run = dry_run
+        self._deleted: list[str] = []
+
+    async def execute(
+        self, session: AsyncClientSession,
+    ) -> dict[str, Any]:
+        dns = await self.ldap.list_subtree_dns(
+            self.base, exclude_bases=self.exclude_bases,
+        )
+        self.logger.info(
+            'ClearLDAPTree planning: base=%s exclude=%s candidates=%d',
+            self.base, self.exclude_bases, len(dns),
+        )
+
+        if (
+            self.max_deletions is not None
+            and len(dns) > self.max_deletions
+        ):
+            raise LDAPPruneAborted(
+                f'ClearLDAPTree would delete {len(dns)} entries, exceeding '
+                f'cap of {self.max_deletions}. Pass max_deletions=None '
+                f'(or --max-deletions=-1 on the CLI) to disable.',
+                would_delete={'tree': dns},
+            )
+
+        if self.dry_run:
+            self.logger.info(
+                'ClearLDAPTree dry-run: %d DNs would be deleted', len(dns),
+            )
+            return {'would_delete': dns, 'count': len(dns), 'dry_run': True}
+
+        for dn in dns:
+            deleted = await self.ldap.delete_dn(dn)
+            if deleted:
+                self._deleted.append(dn)
+        self.logger.info(
+            'ClearLDAPTree done: %d DNs deleted', len(self._deleted),
+        )
+        return {'deleted': self._deleted, 'count': len(self._deleted)}
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'base': self.base,
+            'exclude_bases': list(self.exclude_bases),
+            'dry_run': self.dry_run,
+            'max_deletions': self.max_deletions,
+            'deleted_count': len(self._deleted),
+        }
 
 
 class PruneSiteLDAP(Operation):

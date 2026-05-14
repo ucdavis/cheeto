@@ -9,6 +9,7 @@ from .. import commands
 from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
 from ...log import Console
+from ...models.group import AccessGroup, StatusGroup
 from ...models.site import Site
 from ...models.user import SshKey, User
 from ...models.user_site_info import UserSiteInfo
@@ -24,6 +25,13 @@ from ...operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+)
+from ...queries import (
+    effective_access_links,
+    find_user,
+    find_users,
+    resolve_access_names,
+    resolve_status_name,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import (
@@ -63,11 +71,11 @@ def _project_iam_dates(
     }
 
 
-def _user_to_dict(user: User,
-                  ssh_keys: list[SshKey] | None = None,
-                  site_info: dict | None = None,
-                  slurm_info: list[dict] | None = None,
-                  iam_config=None) -> dict:
+async def _user_to_dict(user: User,
+                        ssh_keys: list[SshKey] | None = None,
+                        site_info: dict | None = None,
+                        slurm_info: list[dict] | None = None,
+                        iam_config=None) -> dict:
     data = {
         'name': user.name,
         'email': user.email,
@@ -76,9 +84,9 @@ def _user_to_dict(user: User,
         'fullname': user.fullname,
         'shell': user.shell,
         'type': user.type,
-        'status': user.status,
+        'status': await resolve_status_name(user.status),
         'home_directory': user.home_directory,
-        'access': list(user.access),
+        'access': await resolve_access_names(user.access),
         'created_at': user.created_at,
         'updated_at': user.updated_at,
     }
@@ -243,9 +251,20 @@ def _render_user_panel(data: dict) -> Panel:
 
     if 'site_info' in data:
         si = data['site_info']
+        override = si['access']
+        effective = si.get('effective_access', override)
+        if override:
+            access_str = (
+                f'access={", ".join(override)} '
+                f'(override; effective={", ".join(effective) or "—"})'
+            )
+        else:
+            access_str = (
+                f'access=[] (no override; effective from global: '
+                f'{", ".join(effective) or "—"})'
+            )
         si_str = (
-            f'site={si["site"]}, status={si["status"]}, '
-            f'access={", ".join(si["access"])}'
+            f'site={si["site"]}, status={si["status"]}, {access_str}'
             + (f', expires_at={si["expires_at"]}' if si.get('expires_at') else '')
             + (f', provisioned_at={si["provisioned_at"]}' if si.get('provisioned_at') else '')
         )
@@ -487,14 +506,23 @@ def _(parser: ArgParser):
 
 
 @site_args.apply()
-@user_args.apply(required=True)
 @commands.register('ng', 'user', 'show',
-                   help='Show user information')
+                   help='Show one user, identified by name, uid, or email')
 async def user_show(args: Namespace):
     console = Console()
-    user = await User.find_one(User.name == args.user)
+    identifiers = {
+        k: v for k, v in (
+            ('name', args.user), ('uid', args.uid), ('email', args.email),
+        ) if v is not None
+    }
+    try:
+        user = await find_user(**identifiers)
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
     if user is None:
-        console.print(f'[red]User {args.user} not found[/]')
+        ident_str = ', '.join(f'{k}={v!r}' for k, v in identifiers.items())
+        console.print(f'[red]No user found for {ident_str}[/]')
         return 1
 
     ssh_keys = await SshKey.find(SshKey.user.id == user.id).to_list()
@@ -513,14 +541,17 @@ async def user_show(args: Namespace):
         if usi is not None:
             site_info = {
                 'site': args.site,
-                'status': usi.status,
-                'access': list(usi.access),
+                'status': await resolve_status_name(usi.status),
+                'access': await resolve_access_names(usi.access),
+                'effective_access': await resolve_access_names(
+                    effective_access_links(user, usi),
+                ),
                 'expires_at': usi.expires_at,
                 'provisioned_at': usi.provisioned_at,
             }
         slurm_info = await user_slurm_at_site(user, site)
 
-    data = _user_to_dict(
+    data = await _user_to_dict(
         user, ssh_keys=ssh_keys, site_info=site_info, slurm_info=slurm_info,
         iam_config=args.config.ucdiam,
     )
@@ -532,5 +563,120 @@ async def user_show(args: Namespace):
 
 @user_show.args()
 def _(parser: ArgParser):
+    parser.add_argument('--user', '-u', default=None, help='Username')
+    parser.add_argument('--uid', type=int, default=None, help='Numeric UID')
+    parser.add_argument('--email', default=None, help='Email address')
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
+
+
+@commands.register('ng', 'user', 'list',
+                   help='List users matching one or more filters '
+                        '(combined by --operator)')
+async def user_list(args: Namespace):
+    console = Console()
+    operator = (args.operator or 'AND').upper()
+    if operator not in ('AND', 'OR'):
+        console.print(
+            f'[red]--operator must be AND or OR (got {args.operator!r})[/]'
+        )
+        return 1
+
+    users = await find_users(
+        status=args.status,
+        access=args.access,
+        type=args.type,
+        site=args.site,
+        group=args.group,
+        operator=operator,
+    )
+
+    if args.limit is not None and args.limit > 0:
+        users = users[:args.limit]
+
+    status_names = {
+        sg.id: sg.status_name
+        for sg in await StatusGroup.find_all().to_list()
+    }
+    access_names = {
+        ag.id: ag.access_name
+        for ag in await AccessGroup.find_all().to_list()
+    }
+
+    def _status_of(u: User) -> str | None:
+        if u.status is None:
+            return None
+        if isinstance(u.status, StatusGroup):
+            return u.status.status_name
+        return status_names.get(u.status.ref.id)
+
+    def _access_of(u: User) -> list[str]:
+        out: list[str] = []
+        for link in u.access:
+            if isinstance(link, AccessGroup):
+                out.append(link.access_name)
+                continue
+            name = access_names.get(link.ref.id)
+            if name is not None:
+                out.append(name)
+        return out
+
+    if args.yaml:
+        rows = [{
+            'name': u.name,
+            'uid': u.uid,
+            'email': u.email,
+            'fullname': u.fullname,
+            'type': u.type,
+            'status': _status_of(u),
+            'access': _access_of(u),
+        } for u in users]
+        console.print(highlight_yaml(dumps_yaml({
+            'count': len(rows),
+            'users': rows,
+        })))
+        return
+
+    title = f'Users (count={len(users)}, operator={operator})'
+    table = Table(title=title)
+    table.add_column('name', style='green', no_wrap=True)
+    table.add_column('uid', justify='right')
+    table.add_column('type', style='cyan')
+    table.add_column('status')
+    table.add_column('access')
+    if args.long:
+        table.add_column('fullname')
+        table.add_column('email')
+    for u in users:
+        status = _status_of(u) or '—'
+        access = ', '.join(_access_of(u)) or '—'
+        row = [u.name, str(u.uid), u.type, status, access]
+        if args.long:
+            row += [u.fullname, u.email]
+        table.add_row(*row)
+    console.print(table)
+
+
+@user_list.args()
+def _(parser: ArgParser):
+    parser.add_argument('--status', default=None,
+                        help="Filter by user status shorthand "
+                             "(e.g. 'active', 'inactive')")
+    parser.add_argument('--access', default=None,
+                        help="Filter by access shorthand "
+                             "(e.g. 'login-ssh', 'sudo')")
+    parser.add_argument('--type', default=None, choices=list(USER_TYPES),
+                        help='Filter by user type')
+    parser.add_argument('--site', '-s', default=None,
+                        help='Filter by site membership')
+    parser.add_argument('--group', '-g', default=None,
+                        help='Filter by group membership')
+    parser.add_argument('--operator', default='AND',
+                        help='Combine filters with AND (default) or OR. '
+                             'Case-insensitive.')
+    parser.add_argument('--limit', type=int, default=None,
+                        help='Cap the number of users shown')
+    parser.add_argument('--long', '-l', action='store_true', default=False,
+                        help='Show extra columns (fullname, email)')
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML')

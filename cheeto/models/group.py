@@ -71,14 +71,6 @@ class AccessGroup(Group):
         self.type = 'access'
         return self
 
-    class Settings(Group.Settings):
-        # access_name is unique within AccessGroups (the polymorphic
-        # discriminator narrows this when querying via AccessGroup.find_one).
-        indexes = [
-            *Group.Settings.indexes,
-            IndexModel([('access_name', pymongo.ASCENDING)]),
-        ]
-
 
 class StatusGroup(Group):
     """An active/inactive/disabled/offboarding status bucket.
@@ -95,9 +87,3 @@ class StatusGroup(Group):
     def _enforce_type(self) -> 'StatusGroup':
         self.type = 'status'
         return self
-
-    class Settings(Group.Settings):
-        indexes = [
-            *Group.Settings.indexes,
-            IndexModel([('status_name', pymongo.ASCENDING)]),
-        ]

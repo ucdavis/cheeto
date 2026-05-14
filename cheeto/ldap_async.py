@@ -21,6 +21,7 @@ cutover; both stacks coexist.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import re
 from dataclasses import dataclass, field
@@ -116,6 +117,7 @@ class LDAPUserRecord:
     surname: str = ''
     ssh_keys: list[str] = field(default_factory=list)
     password: str | None = None
+    expires_at: datetime | None = None
 
 
 @dataclass
@@ -176,7 +178,7 @@ class DNBuilder:
         self.site_ou_dn = f'{site_rdn},{self.searchbase}'
         self.groups_ou_dn = f'ou=groups,{self.site_ou_dn}'
         self.automount_ou_dn = f'ou=automount,{self.site_ou_dn}'
-
+    
     def user_dn(self, username: str) -> str:
         return f'uid={escape_dn_value(username)},{self.user_base}'
 
@@ -459,6 +461,9 @@ class AsyncLDAPManager:
     # -----------------------------------------------------------------
     # DN helpers (pass through to DNBuilder)
     # -----------------------------------------------------------------
+
+    def user_ou_dn(self) -> str:
+        return self.dn.user_base
 
     def user_dn(self, username: str) -> str:
         return self.dn.user_dn(username)
@@ -831,6 +836,67 @@ class AsyncLDAPManager:
             host=host, path=path, options=options,
         ))
 
+    async def list_subtree_dns(
+        self, base: str | None = None, *,
+        exclude_bases: Iterable[str] = (),
+    ) -> list[str]:
+        """All DNs under `base` (default: configured searchbase), excluding
+        any DN that lies within one of `exclude_bases` (suffix match, case
+        insensitive). Returned list is sorted leaf-first (deepest DNs
+        first) so callers can delete in order without orphaning OUs.
+
+        `exclude_bases` entries also exclude the base DNs themselves and
+        any descendants. Missing bases return [].
+        """
+        base = base or self.config.searchbase
+        excludes_lower = [b.lower() for b in exclude_bases]
+
+        async def _op(conn):
+            try:
+                results = await conn.search(
+                    base, LDAPSearchScope.SUB, '(objectClass=*)',
+                    attrlist=['1.1'],  # 1.1 = no attributes, DNs only
+                    timeout=self.config.request_timeout_seconds,
+                )
+            except bonsai.NoSuchObjectError:
+                return []
+            return [str(e.dn) for e in results]
+
+        all_dns = await self._pooled_op(_op)
+        base_lower = base.lower()
+        kept: list[str] = []
+        for dn in all_dns:
+            dn_lower = dn.lower()
+            if dn_lower == base_lower:
+                # The base itself is included by SUB scope; we don't
+                # delete it (it's the search root, often the searchbase).
+                continue
+            if any(
+                dn_lower == eb or dn_lower.endswith(',' + eb)
+                for eb in excludes_lower
+            ):
+                continue
+            kept.append(dn)
+        # Leaf-first: deeper DNs (more commas) before shallower so a
+        # single linear pass can delete children before their parents.
+        kept.sort(key=lambda d: -d.count(','))
+        return kept
+
+    async def delete_dn(self, dn: str, *, missing_ok: bool = True) -> bool:
+        """Delete a single DN. Returns True if deleted, False when the DN
+        was already absent and `missing_ok=True`."""
+        async def _op(conn):
+            try:
+                await conn.delete(
+                    dn, timeout=self.config.request_timeout_seconds,
+                )
+                return True
+            except bonsai.NoSuchObjectError:
+                if missing_ok:
+                    return False
+                raise
+        return await self._pooled_op(_op)
+
     async def list_automounts(self, mapname: str) -> list[str]:
         """Return automountKey values under the given map. Useful for prune."""
         async def _op(conn):
@@ -903,6 +969,7 @@ class AsyncLDAPManager:
             await self._pooled_op(_op)
             result[dn] = 'created'
 
+        await _ensure_ou(self.user_ou_dn(), 'users')
         await _ensure_ou(self.site_ou_dn(), self.sitename)
         await _ensure_ou(self.groups_ou_dn(), 'groups')
         await _ensure_ou(self.automount_ou_dn(), 'automount')

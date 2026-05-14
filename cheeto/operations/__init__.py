@@ -52,6 +52,7 @@ from .iam import (
 )
 from .ldap import (
     BootstrapLDAPSite,
+    ClearLDAPTree,
     PruneSiteLDAP,
     SyncGroupToLDAP,
     SyncGroupToLDAPResult,

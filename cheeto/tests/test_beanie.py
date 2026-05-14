@@ -43,6 +43,7 @@ from ..operations import (
     AddQOSAllocation,
     EditSlurmQOS,
     MigrateAccessStatusGroups,
+    MigrateUser,
     ProvisionSlurmAllocation,
     RemoveSlurmAssociation,
     RemoveSlurmPartition,
@@ -1620,6 +1621,7 @@ class TestMigrateAccessStatusGroups:
         self, beanie_client, clean_polymorphic_groups,
     ):
         from cheeto.config import MongoConfig
+        from cheeto.constants import MIN_SPECIAL_GID
         from cheeto.database import connect_mongoengine
         from cheeto.models.group import AccessGroup, StatusGroup
         from cheeto.operations.group import (
@@ -1653,6 +1655,12 @@ class TestMigrateAccessStatusGroups:
         for access_name, ldap_name in DEFAULT_ACCESS_GROUPS:
             assert ag_by_access[access_name].name == ldap_name
 
+        # All allocated gids land in the special-gid band.
+        for ag in ag_records:
+            assert ag.gid >= MIN_SPECIAL_GID, ag
+        for sg in await StatusGroup.find_all().to_list():
+            assert sg.gid >= MIN_SPECIAL_GID, sg
+
     async def test_idempotent(self, beanie_client, clean_polymorphic_groups):
         from cheeto.config import MongoConfig
         from cheeto.database import connect_mongoengine
@@ -1677,12 +1685,60 @@ class TestMigrateAccessStatusGroups:
         )
         assert await AccessGroup.find_all().count() == first_count
 
-    async def test_custom_mapping_overrides_defaults(
+    async def test_legacy_doc_upgraded_and_gid_rebanded(
+        self, beanie_client, clean_polymorphic_groups,
+    ):
+        """A pre-existing legacy doc (no _class_id, gid in SYSTEM_UID band)
+        gets stamped with the discriminator, marked with access_name, and
+        its gid pulled into the MIN_SPECIAL_GID band — file ownerships
+        don't apply to special groups so renumbering is safe."""
+        from cheeto.config import MongoConfig
+        from cheeto.constants import MIN_SPECIAL_GID, MIN_SYSTEM_UID
+        from cheeto.database import connect_mongoengine
+        from cheeto.models.group import AccessGroup, Group
+
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database='cheeto_migrate_test',
+        )
+        connect_mongoengine(mongo_cfg, quiet=True)
+
+        # Seed a legacy-style raw doc directly via pymongo so _class_id
+        # stays unset (mirrors data migrated before is_root=True landed).
+        coll = Group.get_pymongo_collection()
+        legacy_gid = MIN_SYSTEM_UID + 1001  # 4_000_001_001 — classic v1
+        await coll.insert_one({
+            'name': 'login-ssh-users',
+            'gid': legacy_gid,
+            'type': 'access',
+            '_class_id': None,
+            'members': [], 'sponsors': [], 'sudoers': [], 'slurmers': [],
+        })
+
+        result = await MigrateAccessStatusGroups.run(beanie_client, None)
+
+        # login-ssh was upgraded (not freshly created).
+        assert result['access']['login-ssh'] == 'upgraded'
+
+        ag = await AccessGroup.find_one(
+            AccessGroup.access_name == 'login-ssh',
+        )
+        assert ag is not None
+        assert ag.name == 'login-ssh-users'
+        assert ag.gid != legacy_gid
+        assert ag.gid >= MIN_SPECIAL_GID, (
+            f'gid {ag.gid} not pulled out of SYSTEM_UID range'
+        )
+
+    async def test_custom_mapping_extends_defaults(
         self, beanie_client, clean_polymorphic_groups,
     ):
         from cheeto.config import MongoConfig
         from cheeto.database import connect_mongoengine
-        from cheeto.models.group import AccessGroup
+        from cheeto.models.group import AccessGroup, StatusGroup
+        from cheeto.operations.group import (
+            DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS,
+        )
 
         mongo_cfg = MongoConfig(
             uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
@@ -1691,17 +1747,288 @@ class TestMigrateAccessStatusGroups:
         connect_mongoengine(mongo_cfg, quiet=True)
 
         # Operator-provided non-default mapping (mimics a v1 config with
-        # a different shorthand-to-LDAP-name relationship).
+        # extra shorthand-to-LDAP-name pairs). The defaults are always
+        # seeded; the kwargs add to them, they don't replace.
         result = await MigrateAccessStatusGroups.run(
             beanie_client, None,
             access_groups={'gpu-access': 'gpu-users'},
             status_groups={'paused': 'paused-users'},
         )
-        assert result['access'] == {'gpu-access': 'created'}
-        assert result['status'] == {'paused': 'created'}
+        # Defaults + the extra got created.
+        expected_access = {an for an, _ in DEFAULT_ACCESS_GROUPS} | {'gpu-access'}
+        expected_status = {sn for sn, _ in DEFAULT_STATUS_GROUPS} | {'paused'}
+        assert set(result['access']) == expected_access
+        assert set(result['status']) == expected_status
+        assert all(v == 'created' for v in result['access'].values())
+        assert all(v == 'created' for v in result['status'].values())
 
         ag = await AccessGroup.find_one(
             AccessGroup.access_name == 'gpu-access',
         )
         assert ag is not None
         assert ag.name == 'gpu-users'
+
+        sg = await StatusGroup.find_one(
+            StatusGroup.status_name == 'paused',
+        )
+        assert sg is not None
+        assert sg.name == 'paused-users'
+
+
+class TestAccessOverrideSemantics:
+    """Override (not union) semantics for User.access vs UserSiteInfo.access.
+
+    Contract: when `usi.access` is non-empty, it replaces `user.access`
+    entirely for that site. An empty `usi.access` falls through to the
+    global `user.access`.
+    """
+
+    async def test_effective_access_links_empty_usi_uses_global(
+        self, beanie_client,
+    ):
+        from cheeto.queries import effective_access_links
+
+        user = User(
+            name='effa1', email='effa1@test.com', uid=900001, gid=900001,
+            fullname='Effa One', home_directory='/home/effa1',
+            access=await access_links(['login-ssh', 'sudo']),
+        )
+        await user.insert()
+        site = Site(name='effa_site', fqdn='effa.test')
+        await site.insert()
+        usi = UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+            access=[],
+        )
+        await usi.insert()
+
+        result = effective_access_links(user, usi)
+        assert {a.access_name for a in result} == {'login-ssh', 'sudo'}
+
+    async def test_effective_access_links_nonempty_usi_overrides(
+        self, beanie_client,
+    ):
+        from cheeto.queries import effective_access_links
+
+        user = User(
+            name='effa2', email='effa2@test.com', uid=900002, gid=900002,
+            fullname='Effa Two', home_directory='/home/effa2',
+            access=await access_links(['login-ssh', 'sudo']),
+        )
+        await user.insert()
+        site = Site(name='effa2_site', fqdn='effa2.test')
+        await site.insert()
+        # usi overrides global completely: only compute-ssh applies here.
+        usi = UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+            access=await access_links(['compute-ssh']),
+        )
+        await usi.insert()
+
+        result = effective_access_links(user, usi)
+        assert {a.access_name for a in result} == {'compute-ssh'}
+        # sudo is in global but NOT in the override, so it's dropped:
+        assert 'sudo' not in {a.access_name for a in result}
+
+    async def test_effective_access_links_none_usi_uses_global(
+        self, beanie_client,
+    ):
+        from cheeto.queries import effective_access_links
+
+        user = User(
+            name='effa3', email='effa3@test.com', uid=900003, gid=900003,
+            fullname='Effa Three', home_directory='/home/effa3',
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+
+        result = effective_access_links(user, None)
+        assert {a.access_name for a in result} == {'login-ssh'}
+
+
+class TestFindUsersAccessSiteOverride:
+    """`find_users(access=..., site=...)` should honor the override
+    semantics rather than the older union semantics."""
+
+    async def test_site_scoped_access_filter_with_override(
+        self, beanie_client,
+    ):
+        from cheeto.queries import find_users
+
+        site = Site(name='ovrsite', fqdn='ovr.test')
+        await site.insert()
+
+        # User A: global has sudo, no override → effective at site = sudo
+        a = User(
+            name='ovr_a', email='a@ovr.test', uid=901001, gid=901001,
+            fullname='A', home_directory='/home/ovr_a',
+            access=await access_links(['sudo']),
+        )
+        await a.insert()
+        await UserSiteInfo(
+            user=a, site=site,
+            status=await status_link('active'),
+            access=[],
+        ).insert()
+
+        # User B: global has sudo, but override is [login-ssh] →
+        # effective at site = login-ssh (override drops sudo)
+        b = User(
+            name='ovr_b', email='b@ovr.test', uid=901002, gid=901002,
+            fullname='B', home_directory='/home/ovr_b',
+            access=await access_links(['sudo']),
+        )
+        await b.insert()
+        await UserSiteInfo(
+            user=b, site=site,
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        ).insert()
+
+        # User C: global has login-ssh only, but override grants sudo →
+        # effective at site = sudo
+        c = User(
+            name='ovr_c', email='c@ovr.test', uid=901003, gid=901003,
+            fullname='C', home_directory='/home/ovr_c',
+            access=await access_links(['login-ssh']),
+        )
+        await c.insert()
+        await UserSiteInfo(
+            user=c, site=site,
+            status=await status_link('active'),
+            access=await access_links(['sudo']),
+        ).insert()
+
+        # User D: has global sudo but NO usi at this site → not at site,
+        # should be excluded from a site-scoped filter regardless.
+        d = User(
+            name='ovr_d', email='d@ovr.test', uid=901004, gid=901004,
+            fullname='D', home_directory='/home/ovr_d',
+            access=await access_links(['sudo']),
+        )
+        await d.insert()
+
+        users = await find_users(access='sudo', site='ovrsite')
+        names = {u.name for u in users}
+        assert names == {'ovr_a', 'ovr_c'}, names
+
+    async def test_global_access_filter_unaffected_by_overrides(
+        self, beanie_client,
+    ):
+        """Without a site filter, only global User.access is consulted —
+        per-site overrides don't show up."""
+        from cheeto.queries import find_users
+
+        site = Site(name='gblsite', fqdn='gbl.test')
+        await site.insert()
+
+        # Global doesn't have slurm; per-site override grants it. Without
+        # --site, the user should NOT match `--access slurm`.
+        u = User(
+            name='gbl_x', email='x@gbl.test', uid=902001, gid=902001,
+            fullname='X', home_directory='/home/gbl_x',
+            access=await access_links(['login-ssh']),
+        )
+        await u.insert()
+        await UserSiteInfo(
+            user=u, site=site,
+            status=await status_link('active'),
+            access=await access_links(['slurm']),
+        ).insert()
+
+        users = await find_users(access='slurm')
+        assert all(usr.name != 'gbl_x' for usr in users)
+
+
+class TestMigrateUserAccessFolding:
+    """MigrateUser should fold v1 GlobalUser.access + every SiteUser._access
+    into the v2 user.access (the global), then leave UserSiteInfo.access
+    empty so the override-not-union semantics applies cleanly."""
+
+    @pytest_asyncio.fixture(loop_scope='session')
+    async def clean_polymorphic_groups(self, beanie_client):
+        await Group.find_all(with_children=True).delete()
+        await User.find_all().delete()
+        await UserSiteInfo.find_all().delete()
+        await Site.find_all().delete()
+        await seed_access_status_groups()
+
+    async def test_global_and_site_accesses_fold_into_global(
+        self, beanie_client, clean_polymorphic_groups,
+    ):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.user import GlobalUser as OldGlobalUser
+        from cheeto.database.user import SiteUser as OldSiteUser
+
+        # Drop any prior mongoengine alias so we can rebind to a fresh
+        # database name without `A different connection ... was already
+        # registered` from earlier tests in the session.
+        disconnect()
+
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database='cheeto_migrate_user_test',
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        # Start clean so a prior test run doesn't leave stale rows behind.
+        connection.drop_database(mongo_cfg.database)
+
+        # Sites (v1 mongoengine) and v2 beanie equivalents.
+        OldSite(sitename='foldfarm', fqdn='foldfarm.test').save()
+        OldSite(sitename='foldhive', fqdn='foldhive.test').save()
+        await Site(name='foldfarm', fqdn='foldfarm.test').insert()
+        await Site(name='foldhive', fqdn='foldhive.test').insert()
+
+        old_user = OldGlobalUser(
+            username='folduser', email='fold@test.com',
+            uid=910001, gid=910001, fullname='Fold User',
+            shell='/bin/bash', home_directory='/home/folduser',
+            type='user', status='active',
+            access=['login-ssh'],
+        )
+        old_user.save()
+
+        OldSiteUser(
+            username='folduser', sitename='foldfarm', parent=old_user,
+            _status='active', _access=['sudo', 'slurm'],
+        ).save()
+        OldSiteUser(
+            username='folduser', sitename='foldhive', parent=old_user,
+            _status='active', _access=['root-ssh'],
+        ).save()
+
+        await MigrateUser.run(
+            beanie_client, None, username='folduser',
+        )
+
+        new_user = await User.find_one(User.name == 'folduser')
+        assert new_user is not None
+        new_user_access = await access_links_to_names(new_user.access)
+        # Union of v1 global + every v1 site override.
+        assert set(new_user_access) == {
+            'login-ssh', 'sudo', 'slurm', 'root-ssh',
+        }
+
+        # And every UserSiteInfo carries an empty access list — overrides
+        # are intentionally cleared so the global drives effective access.
+        usis = await UserSiteInfo.find(
+            UserSiteInfo.user.id == new_user.id,
+        ).to_list()
+        assert len(usis) == 2
+        for usi in usis:
+            assert usi.access == []
+
+        connection.drop_database(mongo_cfg.database)
+
+
+async def access_links_to_names(links) -> list[str]:
+    """Helper for tests: resolve a list of Link[AccessGroup] (or fetched
+    AccessGroup) into access_name strings."""
+    from cheeto.queries.access_status import resolve_access_names
+    return await resolve_access_names(links)

@@ -22,6 +22,7 @@ from ...operations import (
     SyncAllUsersIAM,
     SyncUserIAM,
 )
+from ...queries import resolve_status_name
 from ._args import user_args
 
 
@@ -149,7 +150,9 @@ async def iam_show_cmd(args: Namespace):
     table.add_column()
     table.add_row('name', user.name)
     table.add_row('type', user.type)
-    table.add_row('status', user.status)
+    table.add_row(
+        'status', await resolve_status_name(user.status) or '[dim](none)[/]',
+    )
     table.add_row('expires_at', str(user.expires_at) if user.expires_at else '—')
 
     if user.iam is None:
