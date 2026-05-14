@@ -21,7 +21,6 @@ from ponderosa import ArgParser, arggroup
 from pymongo.errors import DuplicateKeyError
 
 from ..config import IAMConfig
-from ..ldap import LDAPManager
 from ..database.user import DuplicateGlobalUser, DuplicateUser
 from ..iam import IAMAPI, sync_user_iam
 
@@ -175,38 +174,6 @@ def _(parser: ArgParser):
     parser.add_argument('--push-merge', default=False, action='store_true')
     parser.add_argument('--write-keys', default=False, action='store_true')
     parser.add_argument('--delete-branch', default=False, action='store_true')
-
-
-@site_args.apply(required=True)
-@commands.register('database', 'site', 'to-ldap',
-                   help='Sync site to LDAP server')
-def sync_to_ldap(args: Namespace):
-    ldap_sync(args.site, args.config, force=args.force)
-
-
-@sync_to_ldap.args()
-def _(parser: ArgParser):
-    parser.add_argument('--force', '-f', default=False, action='store_true')
-
-
-@site_args.apply(required=True)
-@commands.register('database', 'site', 'check-ldap',
-                   help='Check LDAP server for site')
-def site_check_ldap(args: Namespace):
-    logger = logging.getLogger(__name__)
-    console = Console()
-    ldap_mgr = LDAPManager(args.config.ldap, pool_keepalive=15, pool_lifetime=30)
-    db_users = set((user.username for user in SiteUser.objects(sitename=args.site, ) if user.status == 'active'))
-    ldap_login_users = set(ldap_mgr.query_group('login-ssh-users', args.site).members) #type: ignore
-    ldap_inactive_users = set(ldap_mgr.query_group('inactive-users', args.site).members) #type: ignore
-    ldap_disabled_users = set(ldap_mgr.query_group('disabled-users', args.site).members) #type: ignore
-    ldap_users = ldap_login_users - ldap_inactive_users - ldap_disabled_users
-    if db_users == ldap_users:
-        console.success(f'All users in LDAP login-ssh-users group')
-    else:
-        console.warn('Databse users do not matchLDAP users.')
-        console.info(f'Users in LDAP login-ssh-users group but not in database: {sorted(ldap_users - db_users)}')
-        console.info(f'Users in database but not in LDAP login-ssh-users group: {sorted(db_users - ldap_users)}')
 
 
 @site_args.apply(required=True)

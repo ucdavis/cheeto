@@ -18,7 +18,13 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .. import commands
-from ...ldap_async import AsyncLDAPManager, LDAPPruneAborted
+from ...ldap_async import (
+    AUTO_GROUP,
+    AUTO_HOME,
+    AUTO_MASTER,
+    AsyncLDAPManager,
+    LDAPPruneAborted,
+)
 from ...log import Console
 from ...models.user import User
 from ...operations import (
@@ -187,17 +193,15 @@ async def ldap_sync_user_cmd(args: Namespace):
         'created': 'green', 'updated': 'cyan', 'recreated': 'yellow',
         'memberships_only': 'cyan', 'no_op': 'dim',
     }.get(result.outcome, 'magenta')
+    added = result.extra.get('added_groups') or []
+    removed = result.extra.get('removed_groups') or []
     console.print(
-        f'[bold]{result.username}[/] -> [{style}]{result.outcome}[/]',
+        f'[bold]{result.name}[/] -> [{style}]{result.outcome}[/]',
     )
-    if result.added_groups:
-        console.print(
-            f'  [green]+ groups:[/] {", ".join(result.added_groups)}',
-        )
-    if result.removed_groups:
-        console.print(
-            f'  [red]- groups:[/] {", ".join(result.removed_groups)}',
-        )
+    if added:
+        console.print(f'  [green]+ groups:[/] {", ".join(added)}')
+    if removed:
+        console.print(f'  [red]- groups:[/] {", ".join(removed)}')
 
 
 @ldap_sync_user_cmd.args()
@@ -226,8 +230,8 @@ async def ldap_sync_group_cmd(args: Namespace):
         )
 
     console.print(
-        f'[bold]{result.groupname}[/] -> [cyan]{result.outcome}[/] '
-        f'(members={result.member_count})',
+        f'[bold]{result.name}[/] -> [cyan]{result.outcome}[/] '
+        f'(members={result.extra.get("member_count", 0)})',
     )
 
 
@@ -518,9 +522,9 @@ async def ldap_show_site_cmd(args: Namespace):
             'site_ou': await ldap.dn_exists(site_ou),
             'groups_ou': await ldap.dn_exists(groups_ou),
             'automount_ou': await ldap.dn_exists(automount_ou),
-            'auto.master': await ldap.dn_exists(ldap.automount_map_dn('auto.master')),
-            'auto.home': await ldap.dn_exists(ldap.automount_map_dn('auto.home')),
-            'auto.group': await ldap.dn_exists(ldap.automount_map_dn('auto.group')),
+            AUTO_MASTER: await ldap.dn_exists(ldap.automount_map_dn(AUTO_MASTER)),
+            AUTO_HOME: await ldap.dn_exists(ldap.automount_map_dn(AUTO_HOME)),
+            AUTO_GROUP: await ldap.dn_exists(ldap.automount_map_dn(AUTO_GROUP)),
         }
         access_records = await AccessGroup.find_all().to_list()
         status_records = await StatusGroup.find_all().to_list()

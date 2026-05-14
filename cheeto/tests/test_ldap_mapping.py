@@ -7,11 +7,12 @@ covered by test_ldap_async.py against a real ephemeral slapd.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-import pytest
-
 from ..ldap_async import (
+    GROUP_OBJECT_CLASSES,
+    USER_OBJECT_CLASSES,
     DNBuilder,
     LDAPAutomountRecord,
     LDAPGroupRecord,
@@ -23,26 +24,6 @@ from ..ldap_async import (
     group_to_entry_attrs,
     user_to_entry_attrs,
 )
-
-
-USER_ATTRS = {
-    'username': 'uid',
-    'email': 'mail',
-    'uid': 'uidNumber',
-    'gid': 'gidNumber',
-    'fullname': 'displayName',
-    'surname': 'sn',
-    'home_directory': 'homeDirectory',
-    'shell': 'loginShell',
-    'ssh_keys': 'sshPublicKey',
-    'password': 'userPassword',
-}
-
-GROUP_ATTRS = {
-    'groupname': 'cn',
-    'gid': 'gidNumber',
-    'members': 'memberUid',
-}
 
 
 class TestEscapeDNValue:
@@ -108,16 +89,17 @@ class TestDNBuilder:
         assert b.user_dn('a,b') == 'uid=a\\,b,ou=users,dc=test'
 
 
-class TestEntryMapping:
+def _mock_entry(mapping: dict[str, list]) -> MagicMock:
+    m = MagicMock()
+    m.get = lambda k: mapping.get(k)
+    m.__getitem__ = lambda _, k: mapping[k]
+    return m
 
-    def _mock_entry(self, mapping: dict[str, list]) -> MagicMock:
-        m = MagicMock()
-        m.get = lambda k: mapping.get(k)
-        m.__getitem__ = lambda _, k: mapping[k]
-        return m
 
-    def test_entry_to_user_basic(self):
-        entry = self._mock_entry({
+class TestEntryToUser:
+
+    def test_basic(self):
+        entry = _mock_entry({
             'uid': ['alice'],
             'mail': ['alice@example.test'],
             'uidNumber': ['10001'],
@@ -127,7 +109,7 @@ class TestEntryMapping:
             'loginShell': ['/usr/bin/bash'],
             'sshPublicKey': ['ssh-ed25519 AAA', 'ssh-rsa BBB'],
         })
-        record = entry_to_user(entry, USER_ATTRS)
+        record = entry_to_user(entry)
         assert record.username == 'alice'
         assert record.email == 'alice@example.test'
         assert record.uid == 10001
@@ -136,9 +118,10 @@ class TestEntryMapping:
         assert record.home_directory == '/home/alice'
         assert record.shell == '/usr/bin/bash'
         assert record.ssh_keys == ['ssh-ed25519 AAA', 'ssh-rsa BBB']
+        assert record.expires_at is None
 
-    def test_entry_to_user_missing_optional(self):
-        entry = self._mock_entry({
+    def test_missing_optional(self):
+        entry = _mock_entry({
             'uid': ['bob'],
             'mail': ['bob@example.test'],
             'uidNumber': [10002],
@@ -146,13 +129,31 @@ class TestEntryMapping:
             'displayName': ['Bob'],
             'homeDirectory': ['/home/bob'],
             'loginShell': ['/usr/bin/bash'],
-            # no ssh keys, no password
+            # no ssh keys, no password, no shadowExpire
         })
-        record = entry_to_user(entry, USER_ATTRS)
+        record = entry_to_user(entry)
         assert record.ssh_keys == []
         assert record.password is None
+        assert record.expires_at is None
 
-    def test_user_to_entry_attrs_basic(self):
+    def test_fullname_falls_back_to_cn(self):
+        # No displayName, but cn is present.
+        entry = _mock_entry({
+            'uid': ['carol'],
+            'mail': ['carol@x.test'],
+            'uidNumber': ['10003'],
+            'gidNumber': ['10003'],
+            'cn': ['Carol Lastname'],
+            'homeDirectory': ['/home/carol'],
+            'loginShell': ['/usr/bin/zsh'],
+        })
+        record = entry_to_user(entry)
+        assert record.fullname == 'Carol Lastname'
+
+
+class TestUserToEntryAttrs:
+
+    def test_basic(self):
         record = LDAPUserRecord(
             username='carol', email='carol@example.test',
             uid=10003, gid=10003, fullname='Carol',
@@ -160,75 +161,130 @@ class TestEntryMapping:
             ssh_keys=['ssh-ed25519 AAA'],
             password='*',
         )
-        attrs = user_to_entry_attrs(
-            record, USER_ATTRS,
-            object_classes=['inetOrgPerson', 'posixAccount', 'ldapPublicKey'],
-        )
-        assert attrs['objectClass'] == [
-            'inetOrgPerson', 'posixAccount', 'ldapPublicKey',
-        ]
+        attrs = user_to_entry_attrs(record)
+        assert attrs['objectClass'] == list(USER_OBJECT_CLASSES)
+        # cn and displayName both written from fullname (operator-conventional).
         assert attrs['cn'] == ['Carol']
+        assert attrs['displayName'] == ['Carol']
         assert attrs['uid'] == ['carol']
         assert attrs['mail'] == ['carol@example.test']
         assert attrs['uidNumber'] == [10003]
         assert attrs['sshPublicKey'] == ['ssh-ed25519 AAA']
         assert attrs['userPassword'] == ['*']
 
-    def test_user_to_entry_attrs_skips_empty(self):
+    def test_skips_empty_optionals(self):
         record = LDAPUserRecord(
             username='dave', email='dave@example.test',
             uid=10004, gid=10004, fullname='Dave',
             home_directory='/home/dave', shell='/usr/bin/bash',
-            ssh_keys=[],            # skipped
-            password=None,           # skipped
+            ssh_keys=[],          # skipped
+            password=None,        # skipped
         )
-        attrs = user_to_entry_attrs(
-            record, USER_ATTRS,
-            object_classes=['inetOrgPerson', 'posixAccount'],
-        )
+        attrs = user_to_entry_attrs(record)
         assert 'sshPublicKey' not in attrs
         assert 'userPassword' not in attrs
+        assert 'sn' not in attrs
+        assert 'shadowExpire' not in attrs
+
+    def test_writes_surname(self):
+        record = LDAPUserRecord(
+            username='eve', email='eve@x.test',
+            uid=10005, gid=10005, fullname='Eve Smith',
+            home_directory='/home/eve', shell='/usr/bin/bash',
+            surname='Smith',
+        )
+        attrs = user_to_entry_attrs(record)
+        assert attrs['sn'] == ['Smith']
+
+
+class TestShadowExpireRoundTrip:
+
+    # 2030-01-01 00:00:00 UTC is exactly day 21915 since epoch.
+    _DAY = 21915
+    _DT = datetime(2030, 1, 1)
+
+    def test_write_then_read_back(self):
+        record = LDAPUserRecord(
+            username='exp', email='exp@x.test',
+            uid=10006, gid=10006, fullname='Exp',
+            home_directory='/home/exp', shell='/usr/bin/bash',
+            expires_at=self._DT,
+        )
+        attrs = user_to_entry_attrs(record)
+        assert attrs['shadowExpire'] == [str(self._DAY)]
+
+        entry = _mock_entry({
+            'uid': ['exp'],
+            'mail': ['exp@x.test'],
+            'uidNumber': ['10006'],
+            'gidNumber': ['10006'],
+            'displayName': ['Exp'],
+            'homeDirectory': ['/home/exp'],
+            'loginShell': ['/usr/bin/bash'],
+            'shadowExpire': [str(self._DAY)],
+        })
+        round_tripped = entry_to_user(entry)
+        assert round_tripped.expires_at == self._DT
+
+    def test_tz_aware_naive_equivalence(self):
+        # A tz-aware UTC value and the matching naive value project to the
+        # same shadowExpire day count.
+        aware = LDAPUserRecord(
+            username='a', email='a@x.test', uid=1, gid=1, fullname='A',
+            home_directory='/home/a', shell='/usr/bin/bash',
+            expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+        naive = LDAPUserRecord(
+            username='a', email='a@x.test', uid=1, gid=1, fullname='A',
+            home_directory='/home/a', shell='/usr/bin/bash',
+            expires_at=datetime(2030, 1, 1),
+        )
+        assert (
+            user_to_entry_attrs(aware)['shadowExpire']
+            == user_to_entry_attrs(naive)['shadowExpire']
+        )
+
+
+class TestGroupMapping:
 
     def test_entry_to_group(self):
-        entry = self._mock_entry({
+        entry = _mock_entry({
             'cn': ['staff'],
             'gidNumber': ['9001'],
             'memberUid': ['alice', 'bob'],
         })
-        record = entry_to_group(entry, GROUP_ATTRS)
+        record = entry_to_group(entry)
         assert record.groupname == 'staff'
         assert record.gid == 9001
         assert record.members == {'alice', 'bob'}
 
     def test_entry_to_group_no_members(self):
-        entry = self._mock_entry({
+        entry = _mock_entry({
             'cn': ['empty'],
             'gidNumber': ['9002'],
         })
-        record = entry_to_group(entry, GROUP_ATTRS)
+        record = entry_to_group(entry)
         assert record.members == set()
 
     def test_group_to_entry_attrs(self):
         record = LDAPGroupRecord(
             groupname='staff', gid=9001, members={'alice', 'bob'},
         )
-        attrs = group_to_entry_attrs(
-            record, GROUP_ATTRS,
-            object_classes=['posixGroup', 'groupOfMembers'],
-        )
-        assert attrs['objectClass'] == ['posixGroup', 'groupOfMembers']
+        attrs = group_to_entry_attrs(record)
+        assert attrs['objectClass'] == list(GROUP_OBJECT_CLASSES)
         assert attrs['cn'] == ['staff']
         assert attrs['gidNumber'] == [9001]
         assert set(attrs['memberUid']) == {'alice', 'bob'}
 
     def test_group_to_entry_attrs_no_members(self):
         record = LDAPGroupRecord(groupname='empty', gid=9002, members=set())
-        attrs = group_to_entry_attrs(
-            record, GROUP_ATTRS, object_classes=['posixGroup'],
-        )
+        attrs = group_to_entry_attrs(record)
         assert 'memberUid' not in attrs
 
-    def test_automount_to_entry_attrs_with_options(self):
+
+class TestAutomountMapping:
+
+    def test_with_options(self):
         record = LDAPAutomountRecord(
             mountname='alice', mapname='auto.home',
             host='nfs.example', path='/srv/home/alice',
@@ -241,7 +297,7 @@ class TestEntryMapping:
             '-rw,nosuid nfs.example:/srv/home/alice',
         ]
 
-    def test_automount_to_entry_attrs_no_options(self):
+    def test_no_options(self):
         record = LDAPAutomountRecord(
             mountname='alice', mapname='auto.home',
             host='nfs.example', path='/srv/home/alice',

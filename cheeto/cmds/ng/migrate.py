@@ -207,12 +207,7 @@ async def migrate_access_status_groups(args: Namespace):
         ACCESS_STATUS_DROP_MODELS,
     ):
         return 1
-    cfg = args.config.ldap
-    result = await MigrateAccessStatusGroups.run(
-        args.db, args.author,
-        access_groups=dict(cfg.user_access_groups or {}),
-        status_groups=dict(cfg.user_status_groups or {}),
-    )
+    result = await MigrateAccessStatusGroups.run(args.db, args.author)
     a_created = sum(1 for v in result['access'].values() if v == 'created')
     s_created = sum(1 for v in result['status'].values() if v == 'created')
     a_skipped = len(result['access']) - a_created
@@ -354,12 +349,7 @@ async def migrate_all(args: Namespace):
     # new User schema has Link[AccessGroup] and Link[StatusGroup] fields
     # that resolve via find_one(access_name=...) at migration time.
     console.rule('Migrating AccessGroup/StatusGroup records')
-    cfg = args.config.ldap
-    seed_result = await MigrateAccessStatusGroups.run(
-        args.db, args.author,
-        access_groups=dict(cfg.user_access_groups or {}),
-        status_groups=dict(cfg.user_status_groups or {}),
-    )
+    seed_result = await MigrateAccessStatusGroups.run(args.db, args.author)
     console.print(
         f'  [green]{sum(1 for v in seed_result["access"].values() if v == "created")}[/] '
         f'AccessGroup records created, '

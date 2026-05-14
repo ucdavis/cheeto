@@ -53,13 +53,12 @@ from .iam import (
 from .ldap import (
     BootstrapLDAPSite,
     ClearLDAPTree,
+    LDAPSyncResult,
     PruneSiteLDAP,
     SyncGroupToLDAP,
-    SyncGroupToLDAPResult,
     SyncSiteAutomounts,
     SyncSiteLDAP,
     SyncUserToLDAP,
-    SyncUserToLDAPResult,
 )
 from .storage import CreateHomeStorage
 from .migrate import (

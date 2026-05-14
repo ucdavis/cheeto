@@ -15,7 +15,6 @@ from ponderosa import ArgParser
 
 from . import commands
 from ..database import connect_mongoengine, connect_to_database
-from ..ldap import LDAPManager
 from ..hippo import hippoapi_client
 from ..iam import IAMAPI
 from ..log import Console
@@ -31,13 +30,11 @@ def cmd_ipython(args: Namespace):
 
     config = args.config
     db = args.db
-    lm = LDAPManager(config.ldap, pool_keepalive=15, pool_lifetime=30)
     hippo = hippoapi_client(config.hippo)
     iam = IAMAPI(config.ucdiam)
 
     console = Console()
     console.print(f'Connected to database: {db}')
-    console.print(f'Connected to LDAP: {lm}')
     console.print(f'Connected to HiPPO: {hippo}')
     console.print(f'Connected to IAM: {iam}')
 

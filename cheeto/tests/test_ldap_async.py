@@ -127,13 +127,19 @@ class TestUserCRUD:
             home_directory='/home/bob', shell='/usr/bin/bash',
         )
         await manager.add_user(record)
-        await manager.update_user('bob', email='bob@updated.test')
+        record.email = 'bob@updated.test'
+        await manager.update_user(record)
         fetched = await manager.get_user('bob')
         assert fetched.email == 'bob@updated.test'
 
     async def test_update_nonexistent_user_raises(self, manager, site):
+        ghost = LDAPUserRecord(
+            username='ghost', email='nope@x',
+            uid=99999, gid=99999, fullname='Ghost',
+            home_directory='/home/ghost', shell='/usr/bin/bash',
+        )
         with pytest.raises(LDAPNotFound):
-            await manager.update_user('ghost', email='nope@x')
+            await manager.update_user(ghost)
 
 
 class TestGroupCRUD:

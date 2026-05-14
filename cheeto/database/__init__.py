@@ -149,8 +149,6 @@ from .crud import (
 ) 
                    
 
-from .ldap import ldap_sync, ldap_sync_globaluser, ldap_sync_group, ldap_sync_siteuser
-
 COLLECTIONS = [Site,
                HippoEvent,
                GlobalUser,

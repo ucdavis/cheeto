@@ -30,24 +30,10 @@ class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
 
-    user_classes: List[str]
-    user_attrs: Mapping[str, str]
     user_base: Optional[str] = None
-
     login_dn: Optional[str] = None
     password: Optional[str] = None
 
-    group_classes: Optional[List[str]] = None
-    group_attrs: Optional[Mapping[str, str]] = None
-
-    # Deprecated v1 mappings — kept Optional during the parallel-stack window so
-    # v1 ldap3 code in `cheeto/database/ldap.py` keeps working. The async
-    # bonsai stack reads the same data from `AccessGroup` / `StatusGroup`
-    # records in beanie. Removed in the v1 cutover commit.
-    user_status_groups: Optional[Mapping[str, str]] = None
-    user_access_groups: Optional[Mapping[str, str]] = None
-
-    # Async (bonsai) stack knobs.
     request_timeout_seconds: float = 10.0
     pool_max_connections: int = 5
     pool_idle_connections: int = 2

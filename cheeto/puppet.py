@@ -20,7 +20,6 @@ from marshmallow import pre_dump
 from marshmallow_dataclass import dataclass
 
 from .errors import ExitCode
-from .ldap import LDAPManager
 from .yaml import (MergeStrategy,
                    parse_yaml_forest,
                    puppet_merge)

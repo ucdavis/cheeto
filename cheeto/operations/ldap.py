@@ -21,17 +21,20 @@ driver can count them and continue.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from beanie.operators import In
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..ldap_async import (
+    AUTO_GROUP,
+    AUTO_HOME,
     AsyncLDAPManager,
-    LDAPAutomountRecord,
+    LDAPAlreadyExists,
     LDAPGroupRecord,
     LDAPNotFound,
     LDAPPruneAborted,
@@ -53,14 +56,19 @@ from .base import Operation
 logger = logging.getLogger(__name__)
 
 
+_PRUNE_DEFAULT_MAX = 50
+_CLEAR_DEFAULT_MAX = 200
+# Canonical names of admin/system entries in user_base that must never
+# be pruned even if they don't have a corresponding beanie record.
+_PROTECTED_USER_DNS = {'admin'}
+
+
 # ---------------------------------------------------------------------------
-# Helpers shared across ops
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 
 async def _build_user_record(user: User) -> LDAPUserRecord:
-    """Construct an LDAPUserRecord from a beanie User. Pulls associated
-    SshKey records for ssh_keys."""
     keys = await SshKey.find(SshKey.user.id == user.id).to_list()
     return LDAPUserRecord(
         username=user.name,
@@ -68,12 +76,15 @@ async def _build_user_record(user: User) -> LDAPUserRecord:
         uid=user.uid,
         gid=user.gid,
         fullname=user.fullname,
-        surname=user.surname if user.surname is not None else user.fullname.split(' ')[-1],
+        surname=(
+            user.surname if user.surname is not None
+            else user.fullname.split()[-1]
+        ),
         home_directory=user.home_directory,
         shell=user.shell,
         ssh_keys=[k.key for k in keys],
         password=user.password,
-        expires_at=user.expires_at
+        expires_at=user.expires_at,
     )
 
 
@@ -109,7 +120,6 @@ class BootstrapLDAPSite(Operation):
     async def execute(
         self, session: AsyncClientSession,
     ) -> dict[str, dict[str, str]]:
-        # Verify seed step has run.
         access_groups = await AccessGroup.find_all().to_list()
         status_groups = await StatusGroup.find_all().to_list()
         if not access_groups and not status_groups:
@@ -118,15 +128,12 @@ class BootstrapLDAPSite(Operation):
                 'SeedAccessStatusGroups first'
             )
 
-        # 1) Site OU tree + automount maps.
         self._tree_result = await self.ldap.ensure_site_tree()
 
-        # 2) Special-group LDAP entries from the beanie records.
-        records: list[LDAPGroupRecord] = []
-        for ag in access_groups:
-            records.append(LDAPGroupRecord(groupname=ag.name, gid=ag.gid))
-        for sg in status_groups:
-            records.append(LDAPGroupRecord(groupname=sg.name, gid=sg.gid))
+        records = [
+            LDAPGroupRecord(groupname=g.name, gid=g.gid)
+            for g in itertools.chain(access_groups, status_groups)
+        ]
         self._special_result = await self.ldap.ensure_special_groups(records)
 
         return {'tree': self._tree_result, 'special_groups': self._special_result}
@@ -146,36 +153,31 @@ class BootstrapLDAPSite(Operation):
 
 
 # ---------------------------------------------------------------------------
-# SyncUserToLDAP
+# SyncUserToLDAP / SyncGroupToLDAP
 # ---------------------------------------------------------------------------
 
 
 @dataclass
-class SyncUserToLDAPResult:
-    username: str
+class LDAPSyncResult:
+    """One result type for both user and group sync ops. The driver only
+    reads `.outcome` for tally bucketing; `name` and `extra` are for ad-hoc
+    operator inspection."""
+
+    name: str
     outcome: str
-    dn: str
-    added_groups: list[str]
-    removed_groups: list[str]
+    extra: dict[str, Any]
 
 
 class SyncUserToLDAP(Operation):
     """Project one beanie User to LDAP.
 
     Upserts the user dn (delete-and-recreate when `force=True`) and
-    reconciles access/status special-group memberships against the
-    targets computed from `User.access | UserSiteInfo.access` plus
-    `User.status`. The membership patch uses
-    `add_users_to_group` / `remove_users_from_group` per group rather
-    than `set_group_members` to avoid clobbering memberships from other
-    sites that share the same special group.
+    reconciles access/status special-group memberships against the targets
+    computed from `effective_access_links(user, usi)` plus `user.status`.
+    The membership patch uses per-group add/remove to avoid clobbering
+    memberships from other sites that share the same special group.
 
-    Outcomes:
-      - `created` — the user dn did not exist before this run
-      - `updated` — the user dn was patched in place
-      - `recreated` — `force=True` deleted-then-added
-      - `memberships_only` — the dn already matched; only groups changed
-      - `no_op` — nothing to do (user already in target state)
+    Outcomes: `created`, `updated`, `recreated`, `no_op`.
     """
 
     op_name = 'sync_user_to_ldap'
@@ -201,7 +203,7 @@ class SyncUserToLDAP(Operation):
 
     async def execute(
         self, session: AsyncClientSession,
-    ) -> SyncUserToLDAPResult:
+    ) -> LDAPSyncResult:
         user = await User.find_one(User.name == self.username)
         if user is None:
             raise ValueError(f'User {self.username!r} does not exist')
@@ -219,41 +221,49 @@ class SyncUserToLDAP(Operation):
                 f'User {self.username!r} is not on site {self.sitename!r}'
             )
 
-        # Compute target group memberships. Override semantics: when
-        # usi.access is non-empty it replaces user.access entirely for
-        # this site; an empty usi.access falls through to the global.
         access_links = effective_access_links(user, usi)
         target_groups = set(await resolve_access_ldapnames(access_links))
         status_ldapname = await resolve_status_ldapname(user.status)
         if status_ldapname is not None:
             target_groups.add(status_ldapname)
 
-        # Upsert user dn.
         record = await _build_user_record(user)
+        outcome = await self._upsert_user(record)
+        await self._reconcile_memberships(target_groups)
 
+        if (
+            outcome == 'updated'
+            and not self._added_groups
+            and not self._removed_groups
+        ):
+            outcome = 'no_op'
+        self._outcome = outcome
+
+        return LDAPSyncResult(
+            name=self.username, outcome=outcome,
+            extra={
+                'dn': self.ldap.user_dn(self.username),
+                'added_groups': list(self._added_groups),
+                'removed_groups': list(self._removed_groups),
+            },
+        )
+
+    async def _upsert_user(self, record: LDAPUserRecord) -> str:
         if self.force:
             await self.ldap.delete_user(self.username)
-
-        existed_before = await self.ldap.user_exists(self.username)
-        dn = self.ldap.user_dn(self.username)
-
-        if not existed_before:
             await self.ldap.add_user(record)
-            self._outcome = 'recreated' if self.force else 'created'
-        else:
-            await self.ldap.update_user(self.username, **{
-                'email': record.email,
-                'uid': record.uid,
-                'gid': record.gid,
-                'fullname': record.fullname,
-                'home_directory': record.home_directory,
-                'shell': record.shell,
-                'ssh_keys': record.ssh_keys,
-                'password': record.password,
-            })
-            self._outcome = 'updated'
+            return 'recreated'
 
-        # Reconcile group memberships.
+        # Try update first; fall back to add on miss. Saves the existence
+        # probe round-trip per user across the driver.
+        try:
+            await self.ldap.update_user(record)
+            return 'updated'
+        except LDAPNotFound:
+            await self.ldap.add_user(record)
+            return 'created'
+
+    async def _reconcile_memberships(self, target_groups: set[str]) -> None:
         current = await self.ldap.list_user_memberships(self.username)
         to_add = target_groups - current
         to_remove = current - target_groups
@@ -275,28 +285,6 @@ class SyncUserToLDAP(Operation):
             except LDAPNotFound:
                 pass
 
-        if (
-            self._outcome == 'updated'
-            and not self._added_groups
-            and not self._removed_groups
-        ):
-            self._outcome = 'no_op'
-        elif (
-            self._outcome == 'updated'
-            and (self._added_groups or self._removed_groups)
-        ):
-            # Distinguish "fields and groups changed" from "only groups did";
-            # we don't compare field-level so just leave as 'updated'.
-            pass
-
-        return SyncUserToLDAPResult(
-            username=self.username,
-            outcome=self._outcome,
-            dn=dn,
-            added_groups=list(self._added_groups),
-            removed_groups=list(self._removed_groups),
-        )
-
     def describe(self) -> dict[str, Any]:
         return {
             'username': self.username,
@@ -306,18 +294,6 @@ class SyncUserToLDAP(Operation):
             'added_groups': list(self._added_groups),
             'removed_groups': list(self._removed_groups),
         }
-
-
-# ---------------------------------------------------------------------------
-# SyncGroupToLDAP
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SyncGroupToLDAPResult:
-    groupname: str
-    outcome: str
-    member_count: int
 
 
 class SyncGroupToLDAP(Operation):
@@ -350,7 +326,7 @@ class SyncGroupToLDAP(Operation):
 
     async def execute(
         self, session: AsyncClientSession,
-    ) -> SyncGroupToLDAPResult:
+    ) -> LDAPSyncResult:
         group = await Group.find_one(
             Group.name == self.groupname,
             with_children=True,
@@ -362,55 +338,65 @@ class SyncGroupToLDAP(Operation):
 
         if isinstance(group, (AccessGroup, StatusGroup)):
             self._outcome = 'skipped_special'
-            return SyncGroupToLDAPResult(
-                groupname=self.groupname, outcome='skipped_special',
-                member_count=0,
+            return LDAPSyncResult(
+                name=self.groupname, outcome='skipped_special',
+                extra={'member_count': 0},
             )
 
         site = await Site.find_one(Site.name == self.sitename)
         if site is None:
             raise ValueError(f'Site {self.sitename!r} does not exist')
 
-        # Filter members to those with a UserSiteInfo for this site.
-        member_names: set[str] = set()
-        for member_link in group.members:
-            member = (
-                member_link if isinstance(member_link, User)
-                else await User.get(member_link.ref.id)
-            )
-            if member is None:
-                continue
-            usi = await UserSiteInfo.find_one(
-                UserSiteInfo.user.id == member.id,
-                UserSiteInfo.site.id == site.id,
-            )
-            if usi is not None:
-                member_names.add(member.name)
+        member_names = await self._members_at_site(group, site)
 
         if not member_names and not self.force:
             self._outcome = 'skipped_no_members_on_site'
-            return SyncGroupToLDAPResult(
-                groupname=self.groupname,
-                outcome='skipped_no_members_on_site', member_count=0,
+            return LDAPSyncResult(
+                name=self.groupname, outcome=self._outcome,
+                extra={'member_count': 0},
             )
 
         if self.force:
             await self.ldap.delete_group(self.groupname)
 
-        if not await self.ldap.group_exists(self.groupname):
-            await self.ldap.add_group(LDAPGroupRecord(
-                groupname=self.groupname, gid=group.gid, members=member_names,
-            ))
-            self._outcome = 'created'
-        else:
+        # Try membership-diff first; fall back to add on miss. Saves the
+        # group_exists probe round-trip.
+        record = LDAPGroupRecord(
+            groupname=self.groupname, gid=group.gid, members=member_names,
+        )
+        try:
             await self.ldap.set_group_members(self.groupname, member_names)
             self._outcome = 'membership_diffed'
+        except LDAPNotFound:
+            await self.ldap.add_group(record)
+            self._outcome = 'created'
         self._member_count = len(member_names)
 
-        return SyncGroupToLDAPResult(
-            groupname=self.groupname, outcome=self._outcome,
-            member_count=self._member_count,
+        return LDAPSyncResult(
+            name=self.groupname, outcome=self._outcome,
+            extra={'member_count': self._member_count},
         )
+
+    async def _members_at_site(self, group: Group, site: Site) -> set[str]:
+        """Members of `group` that have a UserSiteInfo for `site`."""
+        users: dict[Any, User] = {}
+        missing_ids: list[Any] = []
+        for link in group.members:
+            if isinstance(link, User):
+                users[link.id] = link
+            else:
+                missing_ids.append(link.ref.id)
+        if missing_ids:
+            for u in await User.find(In(User.id, missing_ids)).to_list():
+                users[u.id] = u
+        if not users:
+            return set()
+        usis = await UserSiteInfo.find(
+            In(UserSiteInfo.user.id, list(users)),
+            UserSiteInfo.site.id == site.id,
+        ).to_list()
+        present = {usi.user.ref.id for usi in usis}
+        return {users[uid].name for uid in present if uid in users}
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -446,8 +432,7 @@ class SyncSiteAutomounts(Operation):
         super().__init__(client, author)
         self.sitename = sitename
         self.ldap = ldap
-        self._home_count: int = 0
-        self._group_count: int = 0
+        self._counts: dict[str, int] = {'home_automounts': 0, 'group_automounts': 0}
 
     async def execute(self, session: AsyncClientSession) -> dict[str, int]:
         from ..queries.storage import list_automap_storages
@@ -456,56 +441,36 @@ class SyncSiteAutomounts(Operation):
         if site is None:
             raise ValueError(f'Site {self.sitename!r} does not exist')
 
-        for storage in await list_automap_storages(site, 'home'):
-            options = (
-                ','.join(storage.mount_options)
-                if storage.mount_options else ''
-            )
-            opt_token = f'-{options}' if options else ''
-            await self.ldap.upsert_home_automount(
-                username=storage.mount_name or storage.name,
-                host=storage.host,
-                path=storage.host_path,
-                options=opt_token,
-            )
-            self._home_count += 1
-
-        for storage in await list_automap_storages(site, 'group'):
-            options = (
-                ','.join(storage.mount_options)
-                if storage.mount_options else ''
-            )
-            opt_token = f'-{options}' if options else ''
-            await self.ldap.upsert_group_automount(
-                storagename=storage.mount_name or storage.name,
-                host=storage.host,
-                path=storage.host_path,
-                options=opt_token,
-            )
-            self._group_count += 1
-
-        return {
-            'home_automounts': self._home_count,
-            'group_automounts': self._group_count,
-        }
+        for category, mapname, tally_key in (
+            ('home', AUTO_HOME, 'home_automounts'),
+            ('group', AUTO_GROUP, 'group_automounts'),
+        ):
+            for storage in await list_automap_storages(site, category):
+                await self.ldap.upsert_automount(
+                    mountname=storage.mount_name or storage.name,
+                    mapname=mapname,
+                    host=storage.host,
+                    path=storage.host_path,
+                    options=_render_mount_options(storage),
+                )
+                self._counts[tally_key] += 1
+        return dict(self._counts)
 
     def describe(self) -> dict[str, Any]:
-        return {
-            'sitename': self.sitename,
-            'home_automounts': self._home_count,
-            'group_automounts': self._group_count,
-        }
+        return {'sitename': self.sitename, **self._counts}
+
+
+def _render_mount_options(storage: Storage) -> str:
+    """`-opt1,opt2` token expected by automountInformation, or '' when no
+    options are configured."""
+    if not storage.mount_options:
+        return ''
+    return f'-{",".join(storage.mount_options)}'
 
 
 # ---------------------------------------------------------------------------
-# PruneSiteLDAP / ClearLDAPTree
+# ClearLDAPTree
 # ---------------------------------------------------------------------------
-
-
-_PRUNE_DEFAULT_MAX = 50
-_CLEAR_DEFAULT_MAX = 200
-_PROTECTED_USER_DNS = {'admin'}  # canonical names of admin/system entries
-                                 # in user_base that must never be pruned
 
 
 class ClearLDAPTree(Operation):
@@ -538,9 +503,8 @@ class ClearLDAPTree(Operation):
         super().__init__(client, author)
         self.ldap = ldap
         self.base = base or ldap.config.searchbase
-        # Default exclusion: the Services OU directly under searchbase.
-        # Anything inside it (e.g. service accounts, replication agents)
-        # is left alone.
+        # Default exclusion: the Services OU (service accounts, replication
+        # agents, etc. — cheeto doesn't manage these).
         self.exclude_bases = (
             list(exclude_bases) if exclude_bases is not None
             else [f'ou=Services,{ldap.config.searchbase}']
@@ -577,10 +541,18 @@ class ClearLDAPTree(Operation):
             )
             return {'would_delete': dns, 'count': len(dns), 'dry_run': True}
 
-        for dn in dns:
-            deleted = await self.ldap.delete_dn(dn)
-            if deleted:
-                self._deleted.append(dn)
+        # DNs in `dns` are already leaf-first (sorted by depth desc).
+        # Same-depth nodes are independent — delete each depth-band in
+        # parallel via gather, but keep deeper bands ahead of shallower
+        # so we never orphan a parent OU.
+        for _depth, batch in itertools.groupby(dns, key=lambda d: d.count(',')):
+            batch_dns = list(batch)
+            results = await asyncio.gather(*(
+                self.ldap.delete_dn(dn) for dn in batch_dns
+            ))
+            self._deleted.extend(
+                dn for dn, deleted in zip(batch_dns, results) if deleted
+            )
         self.logger.info(
             'ClearLDAPTree done: %d DNs deleted', len(self._deleted),
         )
@@ -596,6 +568,11 @@ class ClearLDAPTree(Operation):
         }
 
 
+# ---------------------------------------------------------------------------
+# PruneSiteLDAP
+# ---------------------------------------------------------------------------
+
+
 class PruneSiteLDAP(Operation):
     """Delete LDAP entries that have no corresponding beanie record.
 
@@ -606,10 +583,9 @@ class PruneSiteLDAP(Operation):
       - automounts: automountKey values in auto.home/auto.group not
         in beanie's Storage rows.
 
-    `max_deletions` caps total deletions across phases; passing it as
-    None disables the cap (operator confirms with eyes open). When the
-    cap would be exceeded, raises `LDAPPruneAborted` with the would-delete
-    list before any mutations.
+    `max_deletions` caps total deletions across phases; passing it as None
+    disables the cap. When the cap would be exceeded, raises
+    `LDAPPruneAborted` with the would-delete list before any mutations.
 
     `dry_run=True` returns what would be deleted without writing.
     """
@@ -642,57 +618,8 @@ class PruneSiteLDAP(Operation):
     async def execute(
         self, session: AsyncClientSession,
     ) -> dict[str, list[str]]:
-        # Compute the would-delete sets up front.
-        plan: dict[str, list[str]] = {
-            'users': [], 'groups': [], 'automounts': [],
-        }
+        plan = await self._plan()
 
-        if 'users' in self.scope:
-            ldap_users = await self.ldap.list_users()
-            beanie_names = {
-                u.name for u in await User.find_all().to_list()
-            }
-            for u in ldap_users:
-                if u.username in _PROTECTED_USER_DNS:
-                    continue
-                if u.username not in beanie_names:
-                    plan['users'].append(u.username)
-
-        if 'groups' in self.scope:
-            ldap_groups = await self.ldap.list_groups()
-            beanie_groups = await Group.find_all(with_children=True).to_list()
-            beanie_group_names = {g.name for g in beanie_groups}
-            access_names = {
-                ag.name for ag in await AccessGroup.find_all().to_list()
-            }
-            status_names = {
-                sg.name for sg in await StatusGroup.find_all().to_list()
-            }
-            protected = access_names | status_names
-            for g in ldap_groups:
-                if g.groupname in protected:
-                    continue
-                if g.groupname not in beanie_group_names:
-                    plan['groups'].append(g.groupname)
-
-        if 'automounts' in self.scope:
-            from ..queries.storage import list_automap_storages
-            site = await Site.find_one(Site.name == self.sitename)
-            if site is None:
-                raise ValueError(f'Site {self.sitename!r} does not exist')
-
-            for category, mapname in [('home', 'auto.home'),
-                                      ('group', 'auto.group')]:
-                ldap_keys = await self.ldap.list_automounts(mapname)
-                beanie_storages = await list_automap_storages(site, category)
-                expected = {
-                    s.mount_name or s.name for s in beanie_storages
-                }
-                for k in ldap_keys:
-                    if k not in expected:
-                        plan['automounts'].append(f'{mapname}:{k}')
-
-        # Safety cap.
         total = sum(len(v) for v in plan.values())
         if (
             self.max_deletions is not None
@@ -709,8 +636,6 @@ class PruneSiteLDAP(Operation):
             self._deleted = plan
             return plan
 
-        # Execute phase: delete each entry, populating self._deleted with
-        # successes so partial failures still produce an audit trail.
         for username in plan['users']:
             await self.ldap.delete_user(username)
             self._deleted['users'].append(username)
@@ -721,8 +646,63 @@ class PruneSiteLDAP(Operation):
             mapname, key = entry.split(':', 1)
             await self.ldap.delete_automount(key, mapname)
             self._deleted['automounts'].append(entry)
-
         return self._deleted
+
+    async def _plan(self) -> dict[str, list[str]]:
+        plan: dict[str, list[str]] = {
+            'users': [], 'groups': [], 'automounts': [],
+        }
+        if 'users' in self.scope:
+            plan['users'] = await self._plan_users()
+        if 'groups' in self.scope:
+            plan['groups'] = await self._plan_groups()
+        if 'automounts' in self.scope:
+            plan['automounts'] = await self._plan_automounts()
+        return plan
+
+    async def _plan_users(self) -> list[str]:
+        ldap_users = await self.ldap.list_users()
+        beanie_names = {u.name for u in await User.find_all().to_list()}
+        return [
+            u.username for u in ldap_users
+            if u.username not in _PROTECTED_USER_DNS
+            and u.username not in beanie_names
+        ]
+
+    async def _plan_groups(self) -> list[str]:
+        ldap_groups = await self.ldap.list_groups()
+        beanie_names = {
+            g.name for g in
+            await Group.find_all(with_children=True).to_list()
+        }
+        access_names = {
+            ag.name for ag in await AccessGroup.find_all().to_list()
+        }
+        status_names = {
+            sg.name for sg in await StatusGroup.find_all().to_list()
+        }
+        protected = access_names | status_names
+        return [
+            g.groupname for g in ldap_groups
+            if g.groupname not in protected
+            and g.groupname not in beanie_names
+        ]
+
+    async def _plan_automounts(self) -> list[str]:
+        from ..queries.storage import list_automap_storages
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        out: list[str] = []
+        for category, mapname in (('home', AUTO_HOME), ('group', AUTO_GROUP)):
+            ldap_keys = await self.ldap.list_automounts(mapname)
+            expected = {
+                s.mount_name or s.name
+                for s in await list_automap_storages(site, category)
+            }
+            out.extend(f'{mapname}:{k}' for k in ldap_keys if k not in expected)
+        return out
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -795,7 +775,7 @@ class SyncSiteLDAP(Operation):
         self._users_tally: dict[str, int] = {k: 0 for k in _SYNC_TALLY_KEYS}
         self._groups_tally: dict[str, int] = {k: 0 for k in _SYNC_TALLY_KEYS}
         self._automounts_result: dict[str, int] = {}
-        self._prune_result: dict[str, list[str]] = {}
+        self._prune_result: dict[str, Any] = {}
 
     async def execute(self, session: AsyncClientSession) -> dict[str, Any]:
         site = await Site.find_one(Site.name == self.sitename)
@@ -803,9 +783,35 @@ class SyncSiteLDAP(Operation):
             raise ValueError(f'Site {self.sitename!r} does not exist')
 
         if 'users' in self.scope:
-            await self._sync_users(site)
+            usis = await UserSiteInfo.find(
+                UserSiteInfo.site.id == site.id,
+                fetch_links=True, nesting_depth=1,
+            ).to_list()
+            usernames = [usi.user.name for usi in usis if usi.user is not None]
+            await self._run_per_record(
+                self._users_tally, 'user', usernames,
+                lambda name: SyncUserToLDAP.run(
+                    self.client, self.author,
+                    username=name, sitename=self.sitename,
+                    ldap=self.ldap, force=self.force,
+                ),
+            )
+
         if 'groups' in self.scope:
-            await self._sync_groups(site)
+            # Group.find_all() against the base class is polymorphic-aware:
+            # subclasses (AccessGroup/StatusGroup) are filtered by _class_id
+            # when with_children is omitted.
+            groups = await Group.find_all().to_list()
+            group_names = [g.name for g in groups]
+            await self._run_per_record(
+                self._groups_tally, 'group', group_names,
+                lambda name: SyncGroupToLDAP.run(
+                    self.client, self.author,
+                    groupname=name, sitename=self.sitename,
+                    ldap=self.ldap, force=self.force,
+                ),
+            )
+
         if 'automounts' in self.scope:
             await self._sync_automounts()
         if 'prune' in self.scope and self.prune:
@@ -818,69 +824,49 @@ class SyncSiteLDAP(Operation):
             'pruned': dict(self._prune_result),
         }
 
-    async def _sync_users(self, site: Site) -> None:
-        usis = await UserSiteInfo.find(
-            UserSiteInfo.site.id == site.id,
-            fetch_links=True, nesting_depth=1,
-        ).to_list()
-        usernames = [usi.user.name for usi in usis if usi.user is not None]
+    async def _run_per_record(
+        self,
+        tally: dict[str, int],
+        label: str,
+        names: list[str],
+        run_op: Callable[[str], Awaitable[LDAPSyncResult]],
+    ) -> None:
+        """Run `run_op(name)` for each name, bucketing the result outcome
+        into `tally`. Transient errors and unexpected exceptions are caught
+        per-record (one failure does not cascade)."""
 
         async def _one(name: str) -> None:
             try:
-                result = await SyncUserToLDAP.run(
-                    self.client, self.author,
-                    username=name, sitename=self.sitename,
-                    ldap=self.ldap, force=self.force,
-                )
-            except LDAPTransientError as e:
-                logger.warning('LDAP transient error for %s: %s', name, e)
-                self._users_tally['transient_error'] += 1
-                return
-            except Exception as e:
-                logger.exception('LDAP user sync failed for %s: %s', name, e)
-                self._users_tally['error'] += 1
-                return
-            self._users_tally.setdefault(result.outcome, 0)
-            self._users_tally[result.outcome] += 1
-
-        if self.concurrency == 1:
-            for name in usernames:
-                await _one(name)
-        else:
-            sem = asyncio.Semaphore(self.concurrency)
-
-            async def _bounded(n):
-                async with sem:
-                    await _one(n)
-
-            await asyncio.gather(*(_bounded(n) for n in usernames))
-
-    async def _sync_groups(self, site: Site) -> None:
-        # Only regular Groups, not AccessGroup/StatusGroup. Polymorphic
-        # find_all() against the base Group class returns ONLY base-class
-        # rows (subclasses are filtered by _class_id) when with_children=False.
-        groups = await Group.find_all().to_list()
-        for group in groups:
-            try:
-                result = await SyncGroupToLDAP.run(
-                    self.client, self.author,
-                    groupname=group.name, sitename=self.sitename,
-                    ldap=self.ldap, force=self.force,
-                )
+                result = await run_op(name)
             except LDAPTransientError as e:
                 logger.warning(
-                    'LDAP transient error for group %s: %s', group.name, e,
+                    'LDAP transient error for %s %s: %s', label, name, e,
                 )
-                self._groups_tally['transient_error'] += 1
-                continue
+                tally['transient_error'] += 1
+                return
             except Exception as e:
                 logger.exception(
-                    'LDAP group sync failed for %s: %s', group.name, e,
+                    'LDAP %s sync failed for %s: %s', label, name, e,
                 )
-                self._groups_tally['error'] += 1
-                continue
-            self._groups_tally.setdefault(result.outcome, 0)
-            self._groups_tally[result.outcome] += 1
+                tally['error'] += 1
+                return
+            tally.setdefault(result.outcome, 0)
+            tally[result.outcome] += 1
+
+        if self.concurrency == 1 or label == 'group':
+            # Groups stay serial — set_group_members order-sensitive within
+            # the same site. Users fan out via the connection pool.
+            for name in names:
+                await _one(name)
+            return
+
+        sem = asyncio.Semaphore(self.concurrency)
+
+        async def _bounded(name: str) -> None:
+            async with sem:
+                await _one(name)
+
+        await asyncio.gather(*(_bounded(n) for n in names))
 
     async def _sync_automounts(self) -> None:
         try:

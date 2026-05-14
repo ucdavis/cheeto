@@ -18,10 +18,9 @@ from ..models.user import User
 from .base import Operation
 
 
-# Standard set of access types and their LDAP groupnames. Mirrors what v1
-# carried in `LDAPConfig.user_access_groups`; moved here so the mapping is
-# data-driven from the new `AccessGroup` records and config no longer needs
-# to know.
+# Standard set of access types and their LDAP groupnames. Seeded into
+# the beanie `AccessGroup` collection; downstream LDAP sync reads them
+# from there (no config indirection).
 DEFAULT_ACCESS_GROUPS: tuple[tuple[str, str], ...] = (
     # (access_name, ldap_groupname stored as Group.name)
     ('login-ssh', 'login-ssh-users'),
