@@ -30,19 +30,17 @@ class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
 
-    user_status_groups: Mapping[str, str]
-    user_access_groups: Mapping[str, str]
-
-    user_classes: List[str]
-    user_attrs: Mapping[str, str]
     user_base: Optional[str] = None
-
     login_dn: Optional[str] = None
     password: Optional[str] = None
 
-    group_classes: Optional[List[str]] = None
-    group_attrs: Optional[Mapping[str, str]] = None
-
+    request_timeout_seconds: float = 10.0
+    pool_max_connections: int = 5
+    pool_idle_connections: int = 2
+    use_tls: bool = False
+    auth_mechanism: str = 'SIMPLE'   # 'SIMPLE' | 'GSSAPI' (only SIMPLE wired today)
+    gssapi_keytab: Optional[str] = None
+    gssapi_realm: Optional[str] = None
 
 
 @require_kwargs
@@ -54,8 +52,8 @@ class MongoConfig(BaseModel):
     tls: bool
     password: str
     database: str
+    old_database: Optional[str] = None
     tls_ca_file: Optional[str] = None
-
 
 
 @require_kwargs
@@ -72,6 +70,9 @@ class HippoConfig(BaseModel):
 class IAMConfig(BaseModel):
     api_key: str
     base_url: str
+    grace_days: int = 0
+    expiry_offset_days: int = 30
+    request_timeout_seconds: float = 30.0
 
 
 @require_kwargs
@@ -115,8 +116,8 @@ def get_config(config_path: Optional[pathlib.Path] = None,
         return None
     else:
         return Config(
-            ldap = config.ldap[profile],
-            mongo = config.mongo.get(profile, config.mongo[list(config.mongo.keys())[0]]),
+            ldap = config.ldap.get(profile, config.ldap['default']),
+            mongo = config.mongo.get(profile, config.mongo['default']),
             hippo = config.hippo,
             ucdiam = config.ucdiam
         )

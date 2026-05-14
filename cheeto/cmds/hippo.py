@@ -14,7 +14,7 @@ from pathlib import Path
 from ponderosa import ArgParser, arggroup
 
 from . import commands
-from ..database import connect_to_database
+from ..database import connect_mongoengine
 from ..hippoapi.api.action import action_sync_puppet_accounts
 from ..hippoapi.api.event_queue import event_queue_pending_events
 from ..hippo import (EventProcessor,
@@ -41,7 +41,7 @@ def event_args(parser: ArgParser):
 @commands.register('hippo', 'process',
                    help='Process Events from HiPPO API')
 def cmd_hippoapi_process(args: Namespace):
-    connect_to_database(args.config.mongo)
+    connect_mongoengine(args.config.mongo)
     console = Console()
     EventProcessor(args.config.hippo).process(
         post_back=args.post,
@@ -56,7 +56,7 @@ def cmd_hippoapi_process(args: Namespace):
 def cmd_hippoapi_events(args: Namespace):
     logger = logging.getLogger(__name__)
     console = Console()
-    connect_to_database(args.config.mongo)
+    connect_mongoengine(args.config.mongo)
     with hippoapi_client(args.config.hippo) as client:
         events = event_queue_pending_events.sync(client=client)
    

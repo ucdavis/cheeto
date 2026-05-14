@@ -11,13 +11,12 @@ from mongoengine import IntField, StringField
 
 from ..constants import (DATA_QUOTA_REGEX,
                          DEFAULT_SHELL,
-                         DISABLED_SHELLS, 
-                         ENABLED_SHELLS, 
                          GROUP_TYPES,
                          UINT_MAX,
                          USER_TYPES,
                          USER_STATUSES, 
-                         ACCESS_TYPES)
+                         ACCESS_TYPES,
+                         SHELLS)
 from ..types import SlurmQOSValidFlags
 
 
@@ -54,7 +53,7 @@ def GroupTypeField(**kwargs) -> StringField:
                        **kwargs)
 
 def ShellField(**kwargs) -> StringField:
-    return StringField(choices=ENABLED_SHELLS | DISABLED_SHELLS,
+    return StringField(choices=SHELLS,
                        default=DEFAULT_SHELL,
                        **kwargs)
 

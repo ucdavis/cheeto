@@ -109,8 +109,7 @@ def write(args: Namespace):
                         hpccf = LDAPConfig(servers=['ldaps://ldap1.hpc.ucdavis.edu', 'ldaps://ldap2.hpc.ucdavis.edu'],
                                            searchbase='dc=hpc,dc=ucdavis,dc=edu',
                                            login_dn='uid=cheeto,ou=Services,dc=hpc,dc=ucdavis,dc=edu',
-                                           password='password',
-                                           user_classes=['inetOrgPerson', 'posixAccount']),
+                                           password='password'),
 
                     ))
 

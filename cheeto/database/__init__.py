@@ -11,6 +11,8 @@ from mongoengine.context_managers import run_in_transaction
 
 from .base import (
     connect_to_database,
+    connect_mongoengine,
+    connect_beanie,
     SyncQuerySet,
     BaseDocument,
     handler
@@ -146,8 +148,6 @@ from .crud import (
     load_slurm_from_puppet
 ) 
                    
-
-from .ldap import ldap_sync, ldap_sync_globaluser, ldap_sync_group, ldap_sync_siteuser
 
 COLLECTIONS = [Site,
                HippoEvent,
