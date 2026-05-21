@@ -1,5 +1,5 @@
 from .base import BaseDocument, Expirable
-from .site import Site
+from .site import Site, SiteGroupSettings, SiteSlurmSettings
 from .user import SshKey, UCDIAMInfo, User
 from .group import AccessGroup, Group, StatusGroup
 from .slurm import (
@@ -31,6 +31,9 @@ StatusGroup.model_rebuild()
 UserSiteInfo.model_rebuild()
 SlurmAccount.model_rebuild()
 Storage.model_rebuild()
+SiteSlurmSettings.model_rebuild()
+SiteGroupSettings.model_rebuild()
+Site.model_rebuild()
 
 ALL_MODELS = [
     Site,

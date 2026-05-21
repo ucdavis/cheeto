@@ -14,7 +14,7 @@ from beanie.operators import In
 
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.site import Site
-from ..models.user import User
+from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 
 
@@ -29,6 +29,11 @@ def effective_access_links(
     if usi is not None and usi.access:
         return list(usi.access)
     return list(user.access)
+
+
+async def list_user_ssh_keys(user: User) -> list[SshKey]:
+    """Every SshKey belonging to `user`."""
+    return await SshKey.find(SshKey.user.id == user.id).to_list()
 
 
 # ---------------------------------------------------------------------------
@@ -163,18 +168,26 @@ async def _ids_at_site(site_name: str) -> set[PydanticObjectId]:
     return {usi.user.ref.id for usi in usis}
 
 
-async def _ids_in_group(group_name: str) -> set[PydanticObjectId]:
+async def _ids_in_group(
+    group_name: str, sitename: str | None = None,
+) -> set[PydanticObjectId]:
+    """Users in the named group. When `sitename` is supplied, unions in
+    every user at the site if the group is in `site.group.sticky`."""
     group = await Group.find_one(
         Group.name == group_name, with_children=True,
     )
     if group is None:
         return set()
-    out: set[PydanticObjectId] = set()
-    for m in group.members:
-        # Members may be unfetched Links or fetched Users depending on
-        # how the caller loaded the group.
-        out.add(m.id if isinstance(m, User) else m.ref.id)
-    return out
+    direct: set[PydanticObjectId] = {
+        m.id if isinstance(m, User) else m.ref.id for m in group.members
+    }
+    if sitename is None:
+        return direct
+    site = await Site.find_one(Site.name == sitename)
+    if site is None:
+        return direct
+    from .group import effective_group_members
+    return await effective_group_members(group, site)
 
 
 async def find_users(
@@ -210,7 +223,7 @@ async def find_users(
     if site is not None:
         id_sets.append(await _ids_at_site(site))
     if group is not None:
-        id_sets.append(await _ids_in_group(group))
+        id_sets.append(await _ids_in_group(group, sitename=site))
 
     if not id_sets:
         return await User.find_all().sort('+name').to_list()

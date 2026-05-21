@@ -1,5 +1,11 @@
 from .base import Operation
-from .site import CreateSite
+from .site import (
+    AddStickyGroup,
+    AddStickySlurmAccount,
+    CreateSite,
+    RemoveStickyGroup,
+    RemoveStickySlurmAccount,
+)
 from .user import (
     AddUserAccess,
     AddUserComment,
@@ -66,6 +72,7 @@ from .storage import CreateHomeStorage
 from .migrate import (
     MigrateAccessStatusGroups,
     MigrateGroups,
+    MigrateSiteGlobals,
     MigrateSites,
     MigrateSlurmAccounts,
     MigrateSlurmAssociations,

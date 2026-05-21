@@ -22,6 +22,7 @@ from ...models.user_site_info import UserSiteInfo
 from ...operations import (
     MigrateAccessStatusGroups,
     MigrateGroups,
+    MigrateSiteGlobals,
     MigrateSites,
     MigrateSlurmAccounts,
     MigrateSlurmAssociations,
@@ -152,6 +153,16 @@ async def migrate_sites(args: Namespace):
         return 1
     sites = await MigrateSites.run(args.db, args.author)
     console.print(f'Migrated [green]{len(sites)}[/] sites')
+
+
+@commands.register('ng', 'migrate', 'site-globals',
+                   help='Fold v1 Site.global_groups + global_slurmers into '
+                        'v2 site.{group,slurm}.sticky (run AFTER groups + '
+                        'slurm accounts have been migrated)')
+async def migrate_site_globals(args: Namespace):
+    console = Console()
+    updated = await MigrateSiteGlobals.run(args.db, args.author)
+    console.print(f'Updated globals on [green]{updated}[/] sites')
 
 
 @user_args.apply(required=True)
@@ -366,5 +377,11 @@ async def migrate_all(args: Namespace):
     console.print(f'  [green]{len(groups)}[/] groups migrated')
 
     await _run_slurm_migrations(args, console)
+
+    # Site globals (`global_groups` / `global_slurmers`) fold last —
+    # they reference v2 Groups + SlurmAccounts, so both must already
+    # exist.
+    console.rule('Migrating Site globals (sticky groups + slurmers)')
+    await MigrateSiteGlobals.run(args.db, args.author)
 
     console.rule('Migration complete')

@@ -7,11 +7,16 @@ Rich/YAML display happens in the caller (e.g. cheeto/cmds/ng/_slurm_show.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from beanie import PydanticObjectId
 from beanie.operators import In
 
+
+SlurmRole = Literal['member', 'slurmer', 'sticky-member', 'sticky']
+
 from ..models.group import Group
+from ..models.base import link_target_id
 from ..models.site import Site
 from ..models.slurm import (
     SlurmAccount,
@@ -22,7 +27,9 @@ from ..models.slurm import (
     SlurmTRES,
 )
 from ..models.user import User
+from ..models.user_site_info import UserSiteInfo
 from ..utils import size_to_megs
+from .group import user_groups_at_site
 
 
 def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
@@ -68,7 +75,7 @@ class GroupSlurm:
 class UserGroupSlurm:
     """One entry per (user's group, role) -> Slurm info accessible via that group."""
     group: Group
-    role: str              # 'member' | 'slurmer'
+    role: SlurmRole
     slurm: GroupSlurm
 
 
@@ -92,34 +99,61 @@ async def group_slurm_at_site(group: Group, site: Site) -> GroupSlurm | None:
 
 
 async def user_slurm_at_site(user: User, site: Site) -> list[UserGroupSlurm]:
-    """Find all Slurm resources the user has access to at `site` via their groups.
+    """Find all Slurm resources the user has access to at `site`.
 
-    Batched: issues ~4 queries total regardless of how many groups the user
-    belongs to.
+    Accounts come from two sources:
+      1. The user's group memberships at the site (`member` / `slurmer` /
+         `sticky-member` roles). `user_groups_at_site` handles the
+         direct + `site.group.sticky` union.
+      2. `site.slurm.sticky` — accounts every user at the site implicitly
+         has access to (role `sticky`). Only applies when the user has a
+         UserSiteInfo at `site`.
+
+    Batched: ~5 queries total regardless of group count.
     """
-    member_groups = await Group.find(Group.members.id == user.id).to_list()
-    slurmer_groups = await Group.find(Group.slurmers.id == user.id).to_list()
+    group_rows = await user_groups_at_site(user, site)
+    group_roles: dict[PydanticObjectId, tuple[Group, list[SlurmRole]]] = {
+        row.group.id: (row.group, list(row.roles)) for row in group_rows
+    }
 
-    # Dedupe by group id; collect every role the user has in each group.
-    group_roles: dict[PydanticObjectId, tuple[Group, list[str]]] = {}
-    for g in member_groups:
-        group_roles.setdefault(g.id, (g, []))[1].append('member')
-    for g in slurmer_groups:
-        if g.id in group_roles:
-            group_roles[g.id][1].append('slurmer')
-        else:
-            group_roles[g.id] = (g, ['slurmer'])
+    # Sticky accounts apply only to users present at the site. Skip the USI
+    # round-trip when the sticky list is empty (the common case). When
+    # `group_roles` is non-empty the user already has a USI (or a direct
+    # membership) at the site, but for sticky accounts we still require an
+    # explicit USI.
+    sticky_account_ids: set[PydanticObjectId] = set()
+    if site.slurm.sticky:
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site.id,
+        )
+        if usi is not None:
+            sticky_account_ids = {
+                link_target_id(link) for link in site.slurm.sticky
+            }
 
-    if not group_roles:
+    if not group_roles and not sticky_account_ids:
         return []
 
-    # One query for all SlurmAccounts across these groups at this site.
-    accounts = await SlurmAccount.find(
-        In(SlurmAccount.group.id, list(group_roles.keys())),
-        SlurmAccount.site.id == site.id,
-        fetch_links=True,
-        nesting_depth=1,
-    ).to_list()
+    # One query for all SlurmAccounts across these groups at this site,
+    # plus any sticky accounts not already covered by a group-derived
+    # account.
+    accounts: list[SlurmAccount] = []
+    if group_roles:
+        accounts.extend(await SlurmAccount.find(
+            In(SlurmAccount.group.id, list(group_roles.keys())),
+            SlurmAccount.site.id == site.id,
+            fetch_links=True,
+            nesting_depth=1,
+        ).to_list())
+    fetched_ids = {a.id for a in accounts}
+    missing_sticky = sticky_account_ids - fetched_ids
+    if missing_sticky:
+        accounts.extend(await SlurmAccount.find(
+            In(SlurmAccount.id, list(missing_sticky)),
+            fetch_links=True,
+            nesting_depth=1,
+        ).to_list())
     if not accounts:
         return []
 
@@ -150,7 +184,77 @@ async def user_slurm_at_site(user: User, site: Site) -> list[UserGroupSlurm]:
         )
         for role in roles:
             results.append(UserGroupSlurm(group=group, role=role, slurm=gs))
+
+    # Emit sticky-only entries for accounts the user didn't reach via a
+    # group membership at the site. `account.group` is a fetched Group at
+    # nesting_depth=1 so we can use it as the row's group label.
+    reached_group_ids = {gid for gid in group_roles}
+    for account in accounts:
+        if account.id not in sticky_account_ids:
+            continue
+        if account.group.id in reached_group_ids:
+            continue
+        gs = GroupSlurm(
+            account=account,
+            associations=assocs_by_account.get(account.id, []),
+        )
+        results.append(UserGroupSlurm(
+            group=account.group, role='sticky', slurm=gs,
+        ))
     return results
+
+
+async def resolve_slurm_account_label(link) -> str | None:
+    """Render a `Link[SlurmAccount]` as the owning group's name (the
+    `SlurmAccount` itself has no name — its identity is `(group, site)`).
+    Two lightweight fetches: one for the account, one for the group."""
+    if link is None:
+        return None
+    if isinstance(link, SlurmAccount):
+        account = link
+    else:
+        account = await SlurmAccount.get(link_target_id(link))
+    if account is None:
+        return None
+    group_id = link_target_id(account.group)
+    if group_id is None:
+        return None
+    if isinstance(account.group, Group):
+        return account.group.name
+    group = await Group.get(group_id, with_children=True)
+    return group.name if group is not None else None
+
+
+async def resolve_slurm_account_labels(links) -> list[str]:
+    """Batched: one `In()` query for accounts, one for their groups."""
+    if not links:
+        return []
+    account_ids: list[PydanticObjectId] = []
+    accounts: list[SlurmAccount] = []
+    for link in links:
+        if isinstance(link, SlurmAccount):
+            accounts.append(link)
+            continue
+        target_id = link_target_id(link)
+        if target_id is not None:
+            account_ids.append(target_id)
+    if account_ids:
+        accounts.extend(
+            await SlurmAccount.find(In(SlurmAccount.id, account_ids)).to_list()
+        )
+    if not accounts:
+        return []
+
+    group_ids = [link_target_id(a.group) for a in accounts]
+    group_ids = [gid for gid in group_ids if gid is not None]
+    groups = await Group.find(
+        In(Group.id, group_ids), with_children=True,
+    ).to_list()
+    name_by_id = {g.id: g.name for g in groups}
+    return sorted(
+        n for a in accounts
+        if (n := name_by_id.get(link_target_id(a.group))) is not None
+    )
 
 
 # ---------------------------------------------------------------------------

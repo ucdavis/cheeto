@@ -2027,6 +2027,221 @@ class TestMigrateUserAccessFolding:
         connection.drop_database(mongo_cfg.database)
 
 
+class TestSiteStickyValidation:
+    """`SiteSlurmSettings.default_account` must appear in `sticky`."""
+
+    async def _seed(self):
+        site = Site(name='vsf', fqdn='vsf.test')
+        await site.insert()
+        group = Group(name='gvalsticky', gid=42424)
+        await group.insert()
+        account = SlurmAccount(group=group, site=site)
+        await account.insert()
+        return site, group, account
+
+    async def test_default_must_be_in_sticky(self, beanie_client):
+        from cheeto.models.site import SiteSlurmSettings
+        _, _, account = await self._seed()
+        with pytest.raises(ValueError, match='default_account'):
+            SiteSlurmSettings(sticky=[], default_account=account)
+
+    async def test_default_in_sticky_validates(self, beanie_client):
+        from cheeto.models.site import SiteSlurmSettings
+        _, _, account = await self._seed()
+        settings = SiteSlurmSettings(sticky=[account], default_account=account)
+        assert settings.default_account is not None
+
+    async def test_in_place_mutation_caught_at_save(self, beanie_client):
+        from cheeto.models.site import SiteSlurmSettings
+        site, _, account = await self._seed()
+        site.slurm = SiteSlurmSettings(
+            sticky=[account], default_account=account,
+        )
+        await site.save()
+
+        # Mutate in place: drop sticky out from under default_account.
+        site.slurm.sticky.clear()
+        with pytest.raises(ValueError, match='default_account'):
+            await site.save()
+
+
+class TestEffectiveGroupMembers:
+    """`effective_group_members(group, site)` unions in users at the site
+    when the group is in `site.group.sticky`."""
+
+    async def test_non_sticky_returns_only_direct_members(self, beanie_client):
+        from cheeto.queries.group import effective_group_members
+        site = Site(name='egmsiteA', fqdn='a.test')
+        await site.insert()
+
+        u_member = User(
+            name='egm_direct', email='d@x.test',
+            uid=51001, gid=51001, fullname='Direct',
+            home_directory='/home/d',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        u_at_site = User(
+            name='egm_at_site', email='s@x.test',
+            uid=51002, gid=51002, fullname='At Site',
+            home_directory='/home/s',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await u_member.insert()
+        await u_at_site.insert()
+        await UserSiteInfo(
+            user=u_at_site, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        group = Group(name='egm_grp', gid=52000, members=[u_member])
+        await group.insert()
+
+        ids = await effective_group_members(group, site)
+        assert ids == {u_member.id}
+
+    async def test_sticky_unions_in_users_at_site(self, beanie_client):
+        from cheeto.queries.group import effective_group_members
+        site = Site(name='egmsiteB', fqdn='b.test')
+        await site.insert()
+
+        u_direct = User(
+            name='egmB_direct', email='d@x.test',
+            uid=51003, gid=51003, fullname='Direct',
+            home_directory='/home/d',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        u_at_site = User(
+            name='egmB_at_site', email='s@x.test',
+            uid=51004, gid=51004, fullname='At Site',
+            home_directory='/home/s',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await u_direct.insert()
+        await u_at_site.insert()
+        await UserSiteInfo(
+            user=u_at_site, site=site,
+            status=await status_link('active'),
+        ).insert()
+        # u_direct has no USI at this site; only via direct membership.
+
+        group = Group(name='egmB_grp', gid=52001, members=[u_direct])
+        await group.insert()
+
+        # Make group sticky on the site.
+        site.group.sticky = [group]
+        await site.save()
+        # Re-fetch to ensure sticky list reads back as Link references.
+        site = await Site.find_one(Site.name == 'egmsiteB')
+
+        ids = await effective_group_members(group, site)
+        assert ids == {u_direct.id, u_at_site.id}
+
+
+class TestUserSlurmAtSiteWithSticky:
+    """A user at a site with no group memberships still gets accounts via
+    `site.slurm.sticky` (role='sticky')."""
+
+    async def test_sticky_account_appears_for_user_at_site(self, beanie_client):
+        from cheeto.queries.slurm import user_slurm_at_site
+        site = Site(name='usswsite', fqdn='uss.test')
+        await site.insert()
+
+        user = User(
+            name='uss_user', email='u@x.test',
+            uid=53001, gid=53001, fullname='U',
+            home_directory='/home/u',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'slurm']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        sticky_group = Group(name='uss_sticky_grp', gid=54000)
+        await sticky_group.insert()
+        account = SlurmAccount(group=sticky_group, site=site)
+        await account.insert()
+
+        site.slurm.sticky = [account]
+        await site.save()
+        site = await Site.find_one(Site.name == 'usswsite')
+
+        results = await user_slurm_at_site(user, site)
+        assert len(results) == 1
+        assert results[0].role == 'sticky'
+        assert results[0].group.name == 'uss_sticky_grp'
+
+    async def test_no_usi_means_no_sticky_rows(self, beanie_client):
+        """User not at the site doesn't pick up sticky accounts even when
+        they exist."""
+        from cheeto.queries.slurm import user_slurm_at_site
+        site = Site(name='usswsite2', fqdn='uss2.test')
+        await site.insert()
+
+        user = User(
+            name='uss_outsider', email='o@x.test',
+            uid=53002, gid=53002, fullname='Out',
+            home_directory='/home/o',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        # NO UserSiteInfo at this site.
+
+        sticky_group = Group(name='uss_sticky_grp2', gid=54001)
+        await sticky_group.insert()
+        account = SlurmAccount(group=sticky_group, site=site)
+        await account.insert()
+        site.slurm.sticky = [account]
+        await site.save()
+
+        results = await user_slurm_at_site(user, site)
+        assert results == []
+
+    async def test_sticky_group_account_surfaces_for_user_at_site(
+        self, beanie_client,
+    ):
+        """A user at a site picks up the SlurmAccount of any group in
+        `site.group.sticky` with role `sticky-member`."""
+        from cheeto.queries.slurm import user_slurm_at_site
+        site = Site(name='usswsite3', fqdn='uss3.test')
+        await site.insert()
+
+        user = User(
+            name='uss_grp_user', email='g@x.test',
+            uid=53003, gid=53003, fullname='Grp',
+            home_directory='/home/g',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'slurm']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        sticky_group = Group(name='uss_sticky_grp3', gid=54002)
+        await sticky_group.insert()
+        account = SlurmAccount(group=sticky_group, site=site)
+        await account.insert()
+
+        site.group.sticky = [sticky_group]
+        await site.save()
+        site = await Site.find_one(Site.name == 'usswsite3')
+
+        results = await user_slurm_at_site(user, site)
+        assert len(results) == 1
+        assert results[0].role == 'sticky-member'
+        assert results[0].group.name == 'uss_sticky_grp3'
+        assert results[0].slurm.account.id == account.id
+
+
 async def access_links_to_names(links) -> list[str]:
     """Helper for tests: resolve a list of Link[AccessGroup] (or fetched
     AccessGroup) into access_name strings."""

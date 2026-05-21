@@ -1,7 +1,19 @@
 from datetime import datetime, timezone
 
-from beanie import Document, Insert, Replace, Save, SaveChanges, Update, before_event
+from beanie import Document, Insert, PydanticObjectId, Replace, Save, SaveChanges, Update, before_event
 from pydantic import BaseModel, Field
+
+
+def link_target_id(link) -> PydanticObjectId | None:
+    """Target id of a `Link[X]` regardless of whether it's been fetched.
+    Returns None for None. Use anywhere a Link[X] needs to be compared by
+    identity without a round-trip to materialize it."""
+    if link is None:
+        return None
+    ref = getattr(link, 'ref', None)
+    if ref is not None:
+        return ref.id
+    return link.id
 
 
 class BaseDocument(Document):

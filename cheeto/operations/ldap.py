@@ -50,6 +50,7 @@ from ..queries.access_status import (
     resolve_access_ldapnames,
     resolve_status_ldapname,
 )
+from ..queries.group import effective_group_members
 from ..queries.user import effective_access_links
 from .base import Operation
 
@@ -378,25 +379,26 @@ class SyncGroupToLDAP(Operation):
         )
 
     async def _members_at_site(self, group: Group, site: Site) -> set[str]:
-        """Members of `group` that have a UserSiteInfo for `site`."""
-        users: dict[Any, User] = {}
-        missing_ids: list[Any] = []
-        for link in group.members:
-            if isinstance(link, User):
-                users[link.id] = link
-            else:
-                missing_ids.append(link.ref.id)
-        if missing_ids:
-            for u in await User.find(In(User.id, missing_ids)).to_list():
-                users[u.id] = u
-        if not users:
+        """Members of `group` that have a UserSiteInfo for `site`.
+
+        Starts from `effective_group_members(group, site)` so sticky groups
+        get every user at the site, not just `group.members`. Filters by
+        USI presence FIRST, then loads only the surviving users — for
+        sticky groups (where effective_ids is the whole site population),
+        this skips loading users who turned out not to be at this site.
+        """
+        effective_ids = await effective_group_members(group, site)
+        if not effective_ids:
             return set()
         usis = await UserSiteInfo.find(
-            In(UserSiteInfo.user.id, list(users)),
+            In(UserSiteInfo.user.id, list(effective_ids)),
             UserSiteInfo.site.id == site.id,
         ).to_list()
-        present = {usi.user.ref.id for usi in usis}
-        return {users[uid].name for uid in present if uid in users}
+        present_ids = [usi.user.ref.id for usi in usis]
+        if not present_ids:
+            return set()
+        users = await User.find(In(User.id, present_ids)).to_list()
+        return {u.name for u in users}
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -783,11 +785,18 @@ class SyncSiteLDAP(Operation):
             raise ValueError(f'Site {self.sitename!r} does not exist')
 
         if 'users' in self.scope:
+            # Light USI fetch (no fetch_links) → batch User.find for names.
+            # Avoids resolving every Link[User]/Link[Site]/Link[StatusGroup]
+            # / Link[AccessGroup] on every USI just to read the username.
             usis = await UserSiteInfo.find(
                 UserSiteInfo.site.id == site.id,
-                fetch_links=True, nesting_depth=1,
             ).to_list()
-            usernames = [usi.user.name for usi in usis if usi.user is not None]
+            user_ids = [usi.user.ref.id for usi in usis]
+            users = (
+                await User.find(In(User.id, user_ids)).to_list()
+                if user_ids else []
+            )
+            usernames = [u.name for u in users]
             await self._run_per_record(
                 self._users_tally, 'user', usernames,
                 lambda name: SyncUserToLDAP.run(

@@ -1,8 +1,10 @@
 from argparse import Namespace
 
 from ponderosa import ArgParser
+from rich.columns import Columns
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from .. import commands
 from ...constants import GROUP_TYPES
@@ -99,10 +101,15 @@ def _render_group_panel(data: dict) -> Panel:
 
     for key in ('members', 'sponsors', 'sudoers', 'slurmers'):
         names = data.get(key) or []
-        if names:
-            table.add_row(key, '\n'.join(names))
-        else:
+        if not names:
             table.add_row(key, '[dim](none)[/]')
+        elif key in ('members', 'slurmers'):
+            table.add_row(key, Columns(
+                [Text(n, style='green') for n in names],
+                expand=True, equal=True,
+            ))
+        else:
+            table.add_row(key, '\n'.join(names))
 
     if 'site' in data:
         table.add_row('site', data['site'])
@@ -303,7 +310,10 @@ async def group_remove_slurmer(args: Namespace):
                    help='Show group information')
 async def group_show(args: Namespace):
     console = Console()
-    group = await Group.find_one(Group.name == args.group, fetch_links=True, with_children=True)
+    group = await Group.find_one(Group.name == args.group, 
+                                 fetch_links=True,
+                                 with_children=True,
+                                 nesting_depth=1)
     if group is None:
         console.print(f'[red]Group {args.group} not found[/]')
         return 1

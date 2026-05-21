@@ -341,6 +341,129 @@ class MigrateSites(Operation):
         }
 
 
+class MigrateSiteGlobals(Operation):
+    """Fold v1 `Site.global_groups` and `Site.global_slurmers` into the v2
+    sticky lists.
+
+    Must run AFTER `MigrateSites`, `MigrateGroups`, and
+    `MigrateSlurmAccounts` — both fields point at v2 records.
+    """
+
+    op_name = 'migrate_site_globals'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sites_updated = 0
+        self.groups_added = 0
+        self.slurmers_added = 0
+        self.groups_missing = 0
+        self.accounts_missing = 0
+
+    async def execute(self, session: AsyncClientSession) -> int:
+        from ..models.slurm import SlurmAccount
+
+        total = OldSite.objects.count()
+        self.logger.info(
+            'MigrateSiteGlobals starting: %d v1 sites to consider', total,
+        )
+
+        # One-shot preload: the migration is a batch run, so loading every
+        # Group + SlurmAccount up-front trades N+1 lookups for a constant.
+        groups_by_name: dict[str, Group] = {
+            g.name: g
+            for g in await Group.find_all(with_children=True).to_list()
+        }
+        accounts_by_pair: dict[tuple, SlurmAccount] = {
+            (a.group.ref.id, a.site.ref.id): a
+            for a in await SlurmAccount.find_all().to_list()
+        }
+
+        for old_site in OldSite.objects():
+            new_site = await Site.find_one(Site.name == old_site.sitename)
+            if new_site is None:
+                self.logger.warning(
+                    'Site %s not in beanie; skipping globals fold',
+                    old_site.sitename,
+                )
+                continue
+
+            existing_group_ids = {
+                link.ref.id for link in new_site.group.sticky
+            }
+            existing_account_ids = {
+                link.ref.id for link in new_site.slurm.sticky
+            }
+            changed = False
+
+            for old_sg in old_site.global_groups or []:
+                grp = groups_by_name.get(old_sg.parent.groupname)
+                if grp is None:
+                    self.logger.warning(
+                        'global_groups[%s] -> %s not in beanie; skipping',
+                        old_site.sitename, old_sg.parent.groupname,
+                    )
+                    self.groups_missing += 1
+                    continue
+                if grp.id in existing_group_ids:
+                    continue
+                new_site.group.sticky.append(grp)
+                existing_group_ids.add(grp.id)
+                self.groups_added += 1
+                changed = True
+
+            for old_sg in old_site.global_slurmers or []:
+                grp = groups_by_name.get(old_sg.parent.groupname)
+                if grp is None:
+                    self.logger.warning(
+                        'global_slurmers[%s] -> group %s not in beanie',
+                        old_site.sitename, old_sg.parent.groupname,
+                    )
+                    self.groups_missing += 1
+                    continue
+                account = accounts_by_pair.get((grp.id, new_site.id))
+                if account is None:
+                    self.logger.warning(
+                        'global_slurmers[%s] -> no SlurmAccount for group %s',
+                        old_site.sitename, old_sg.parent.groupname,
+                    )
+                    self.accounts_missing += 1
+                    continue
+                if account.id in existing_account_ids:
+                    continue
+                new_site.slurm.sticky.append(account)
+                existing_account_ids.add(account.id)
+                self.slurmers_added += 1
+                changed = True
+
+            if changed:
+                await new_site.save(session=session)
+                self.sites_updated += 1
+                self.logger.info(
+                    'MigrateSiteGlobals: %s updated', old_site.sitename,
+                )
+
+        self.logger.info(
+            'MigrateSiteGlobals done: sites=%d groups+=%d slurmers+=%d '
+            '(missing groups=%d, missing accounts=%d)',
+            self.sites_updated, self.groups_added, self.slurmers_added,
+            self.groups_missing, self.accounts_missing,
+        )
+        return self.sites_updated
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'sites_updated': self.sites_updated,
+            'groups_added': self.groups_added,
+            'slurmers_added': self.slurmers_added,
+            'groups_missing': self.groups_missing,
+            'accounts_missing': self.accounts_missing,
+        }
+
+
 class MigrateUser(Operation):
     """Migrate a single user and their site memberships from mongoengine to beanie."""
 

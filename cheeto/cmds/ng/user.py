@@ -30,10 +30,13 @@ from ...operations import (
 )
 from ...queries import (
     effective_access_links,
+    find_site_by_name,
     find_user,
     find_users,
+    list_user_ssh_keys,
     resolve_access_names,
     resolve_status_name,
+    user_groups_at_site,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import (
@@ -76,6 +79,7 @@ def _project_iam_dates(
 async def _user_to_dict(user: User,
                         ssh_keys: list[SshKey] | None = None,
                         site_info: dict | None = None,
+                        group_memberships: list[dict] | None = None,
                         slurm_info: list[dict] | None = None,
                         iam_config=None) -> dict:
     data = {
@@ -130,6 +134,8 @@ async def _user_to_dict(user: User,
         data['iam'] = iam_data
     if site_info is not None:
         data['site_info'] = site_info
+    if group_memberships is not None:
+        data['group_memberships'] = group_memberships
     if slurm_info is not None:
         data['slurm_info'] = slurm_info
     return data
@@ -158,6 +164,15 @@ def _render_user_slurm(slurm_info: list[dict]) -> Table:
                 ', '.join(a['qos_flags']),
                 a['qos_total_tres'],
             )
+    return table
+
+
+def _render_user_groups(memberships: list[dict]) -> Table:
+    table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column('group', style='green')
+    table.add_column('roles', style='yellow')
+    for entry in memberships:
+        table.add_row(entry['group'], ', '.join(entry['roles']))
     return table
 
 
@@ -271,6 +286,13 @@ def _render_user_panel(data: dict) -> Panel:
             + (f', provisioned_at={si["provisioned_at"]}' if si.get('provisioned_at') else '')
         )
         table.add_row('at site', si_str)
+
+    if 'group_memberships' in data:
+        memberships = data['group_memberships']
+        if not memberships:
+            table.add_row('groups', '[dim](no group memberships at site)[/]')
+        else:
+            table.add_row('groups', _render_user_groups(memberships))
 
     if 'slurm_info' in data:
         slurm = data['slurm_info']
@@ -547,7 +569,7 @@ async def user_remove_ssh_key(args: Namespace):
     if user is None:
         console.print(f'[red]No user found: {args.user}[/]')
         return 1
-    keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+    keys = await list_user_ssh_keys(user)
     if not keys:
         console.print(f'[yellow]{args.user} has no ssh keys[/]')
         return
@@ -623,12 +645,13 @@ async def user_show(args: Namespace):
         console.print(f'[red]No user found for {ident_str}[/]')
         return 1
 
-    ssh_keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+    ssh_keys = await list_user_ssh_keys(user)
 
     site_info = None
     slurm_info = None
+    group_memberships = None
     if args.site:
-        site = await Site.find_one(Site.name == args.site)
+        site = await find_site_by_name(args.site)
         if site is None:
             console.print(f'[red]Site {args.site} not found[/]')
             return 1
@@ -647,10 +670,17 @@ async def user_show(args: Namespace):
                 'expires_at': usi.expires_at,
                 'provisioned_at': usi.provisioned_at,
             }
+        group_rows = await user_groups_at_site(user, site)
+        group_memberships = sorted(
+            ({'group': r.group.name, 'roles': list(r.roles)}
+             for r in group_rows),
+            key=lambda d: d['group'],
+        )
         slurm_info = await user_slurm_at_site(user, site)
 
     data = await _user_to_dict(
-        user, ssh_keys=ssh_keys, site_info=site_info, slurm_info=slurm_info,
+        user, ssh_keys=ssh_keys, site_info=site_info,
+        group_memberships=group_memberships, slurm_info=slurm_info,
         iam_config=args.config.ucdiam,
     )
     if args.yaml:
