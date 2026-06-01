@@ -2,3 +2,4 @@ cheeto/**/__pycache__
 .ipynb_checkpoints
 *.txt
 .vscode
+scratch
