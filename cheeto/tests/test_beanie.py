@@ -2247,3 +2247,190 @@ async def access_links_to_names(links) -> list[str]:
     AccessGroup) into access_name strings."""
     from cheeto.queries.access_status import resolve_access_names
     return await resolve_access_names(links)
+
+
+class TestSiteToPuppetLegacy:
+    """`site_to_puppet_legacy(site)` reproduces v1's site_to_puppet output
+    shape from v2 data. Storage/share blocks are intentionally empty."""
+
+    async def test_empty_site_yields_empty_maps(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+        from cheeto.puppet import PuppetAccountMap
+
+        site = Site(name='puppet_empty', fqdn='empty.test')
+        await site.insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert result.user == {}
+        assert result.group == {}
+        assert result.share == {}
+        # Marshmallow serialization is exercised in test_puppet.py;
+        # here just verify the dump path doesn't choke on the empty map.
+        assert PuppetAccountMap.Schema().dumps(result) == '{}\n'
+
+    async def test_user_and_group_basic_fields(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_basic', fqdn='basic.test')
+        await site.insert()
+
+        user = User(
+            name='puppet_alice', email='alice@x.test',
+            uid=60001, gid=60001, fullname='Alice',
+            home_directory='/home/alice', shell='/bin/zsh',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'sudo']),
+        )
+        await user.insert()
+        # Primary group: same name as user, gid == uid → excluded from
+        # both the user's `groups` list and the top-level `group:` map.
+        primary = Group(name='puppet_alice', gid=60001, members=[user])
+        await primary.insert()
+        # Regular group: should land in user.groups and in the group: map.
+        lab = Group(name='puppet_lab', gid=61000, members=[user])
+        await lab.insert()
+
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert set(result.user.keys()) == {'puppet_alice'}
+        rec = result.user['puppet_alice']
+        assert rec.fullname == 'Alice'
+        assert rec.email == 'alice@x.test'
+        assert rec.uid == 60001
+        assert rec.gid == 60001
+        assert rec.shell == '/bin/zsh'
+        assert rec.home == '/home/alice'
+        assert rec.groups == ['puppet_lab']  # primary excluded
+        assert rec.tag == ['sudo-tag']
+        assert rec.slurm is None
+
+        assert set(result.group.keys()) == {'puppet_lab'}
+        assert result.group['puppet_lab'].gid == 61000
+
+    async def test_sticky_group_surfaces_in_user_groups(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_stickyg', fqdn='stickyg.test')
+        await site.insert()
+
+        user = User(
+            name='pl_bob', email='b@x.test',
+            uid=60002, gid=60002, fullname='Bob',
+            home_directory='/home/b',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        sticky_g = Group(name='pl_sticky', gid=61001)
+        await sticky_g.insert()  # bob is NOT in members
+
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        site.group.sticky = [sticky_g]
+        await site.save()
+        site = await Site.find_one(Site.name == 'puppet_stickyg')
+
+        result = await site_to_puppet_legacy(site)
+        assert result.user['pl_bob'].groups == ['pl_sticky']
+
+    async def test_sticky_slurm_account_in_user_slurm(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_stickys', fqdn='stickys.test')
+        await site.insert()
+
+        user = User(
+            name='pl_carol', email='c@x.test',
+            uid=60003, gid=60003, fullname='Carol',
+            home_directory='/home/c',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'slurm']),
+        )
+        await user.insert()
+        slurm_g = Group(name='pl_slurm_grp', gid=61002)
+        await slurm_g.insert()
+        account = SlurmAccount(group=slurm_g, site=site)
+        await account.insert()
+
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('active'),
+        ).insert()
+        site.slurm.sticky = [account]
+        await site.save()
+        site = await Site.find_one(Site.name == 'puppet_stickys')
+
+        result = await site_to_puppet_legacy(site)
+        assert result.user['pl_carol'].slurm is not None
+        assert result.user['pl_carol'].slurm.account == ['pl_slurm_grp']
+
+    async def test_inactive_user_keeps_raw_shell(self, beanie_client):
+        """v1 has dead-code shell translation; we match v1 verbatim and
+        emit the raw shell even for inactive users."""
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_inactive', fqdn='inactive.test')
+        await site.insert()
+
+        user = User(
+            name='pl_dave', email='d@x.test',
+            uid=60004, gid=60004, fullname='Dave',
+            home_directory='/home/d', shell='/bin/zsh',
+            status=await status_link('inactive'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link('inactive'),
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert result.user['pl_dave'].shell == '/bin/zsh'
+
+    async def test_sponsor_not_at_site_still_resolves(self, beanie_client):
+        """A group's sponsor doesn't have to have a UserSiteInfo at the
+        site; sponsor names are emitted regardless."""
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_sponsor', fqdn='sponsor.test')
+        await site.insert()
+
+        sponsor = User(
+            name='pl_sponsor', email='s@x.test',
+            uid=60005, gid=60005, fullname='Sponsor',
+            home_directory='/home/s',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await sponsor.insert()  # no USI at this site
+
+        member = User(
+            name='pl_member', email='m@x.test',
+            uid=60006, gid=60006, fullname='Member',
+            home_directory='/home/m',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await member.insert()
+        await UserSiteInfo(
+            user=member, site=site,
+            status=await status_link('active'),
+        ).insert()
+
+        lab = Group(
+            name='pl_lab', gid=61003,
+            members=[member], sponsors=[sponsor],
+        )
+        await lab.insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert 'pl_sponsor' not in result.user  # not at site
+        assert result.group['pl_lab'].sponsors == ['pl_sponsor']

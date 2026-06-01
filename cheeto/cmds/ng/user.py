@@ -670,6 +670,8 @@ async def user_show(args: Namespace):
                 'expires_at': usi.expires_at,
                 'provisioned_at': usi.provisioned_at,
             }
+        else:
+            console.print(f'[red]No site info found for {args.user} at {args.site}[/]')
         group_rows = await user_groups_at_site(user, site)
         group_memberships = sorted(
             ({'group': r.group.name, 'roles': list(r.roles)}

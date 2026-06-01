@@ -16,6 +16,7 @@ from .group import (
     resolve_group_names,
     user_groups_at_site,
 )
+from .puppet_legacy import site_to_puppet_legacy
 from .site import find_site_by_name
 from .slurm import (
     GroupSlurm,

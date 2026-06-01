@@ -1,5 +1,6 @@
 import asyncio
 from argparse import Namespace
+from pathlib import Path
 
 from ponderosa import ArgParser
 from rich.panel import Panel
@@ -15,11 +16,13 @@ from ...operations import (
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
 )
+from ...puppet import PuppetAccountMap
 from ...queries import (
     find_site_by_name,
     resolve_group_names,
     resolve_slurm_account_label,
     resolve_slurm_account_labels,
+    site_to_puppet_legacy,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import group_args, site_args
@@ -231,3 +234,39 @@ def _(parser: ArgParser):
         '--clear-default', action='store_true', default=False,
         help='Clear site.slurm.default_account if it points at this account',
     )
+
+
+# ---------------------------------------------------------------------------
+# `ng site export` — read-only exports of site data
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'site', 'export',
+                   help='Export site data in various formats')
+def site_export_cmd(args: Namespace):
+    pass
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'export', 'puppet-legacy',
+                   help="Export site users/groups as v1-compatible "
+                        "puppet.hpc YAML (omits storage/share blocks)")
+async def site_export_puppet_legacy(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+    puppet_map = await site_to_puppet_legacy(site)
+    yaml_text = PuppetAccountMap.Schema().dumps(puppet_map)
+    if args.output:
+        Path(args.output).write_text(yaml_text)
+        console.print(f'Wrote puppet YAML to [green]{args.output}[/]')
+    else:
+        console.print(highlight_yaml(yaml_text))
+
+
+@site_export_puppet_legacy.args()
+def _(parser: ArgParser):
+    parser.add_argument('--output', '-o', default=None,
+                        help='Write YAML to this path (default: stdout)')
