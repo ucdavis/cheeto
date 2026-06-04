@@ -47,7 +47,16 @@ async def history_cmd(args: Namespace):
     table.add_column('Changes')
 
     for entry in entries:
-        author_name = entry.author.name if entry.author is not None else ''
+        # entry.author is a resolved User when the link still points at a
+        # live record, None when it was never set, or an unresolved Link
+        # when the target was dropped (e.g. collections wiped) — fetch_links
+        # leaves the raw Link in place rather than raising.
+        if isinstance(entry.author, User):
+            author_name = entry.author.name
+        elif entry.author is None:
+            author_name = ''
+        else:
+            author_name = 'Unknown'
         ts = entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')
         changes = ', '.join(f'{k}={v}' for k, v in entry.changes.items())
         table.add_row(ts, entry.op, author_name, changes)
