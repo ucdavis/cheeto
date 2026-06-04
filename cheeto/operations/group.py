@@ -14,6 +14,8 @@ from ..constants import (
     MIN_SYSTEM_UID,
 )
 from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group_membership import GroupMembership
+from ..models.site import Site
 from ..models.user import User
 from .base import Operation
 
@@ -172,9 +174,11 @@ class CreateGroupFromSponsor(Operation):
         author: User | None,
         *,
         sponsor_name: str,
+        site_name: str,
     ) -> None:
         super().__init__(client, author)
         self.sponsor_name = sponsor_name
+        self.site_name = site_name
         self.group_name = f'{sponsor_name}grp'
 
     async def execute(self, session: AsyncClientSession) -> Group:
@@ -182,19 +186,26 @@ class CreateGroupFromSponsor(Operation):
         if sponsor is None:
             raise ValueError(f'Sponsor user {self.sponsor_name} does not exist')
 
+        site = await Site.find_one(Site.name == self.site_name)
+        if site is None:
+            raise ValueError(f'Site {self.site_name} does not exist')
+
         existing = await Group.find_one(Group.name == self.group_name)
         if existing is not None:
             raise ValueError(f'Group {self.group_name} already exists')
 
         gid = MIN_PIGROUP_GID + sponsor.uid
-        group = Group(
-            name=self.group_name,
-            gid=gid,
-            type='group',
-            sponsors=[sponsor],
-            members=[sponsor],
-        )
+        group = Group(name=self.group_name, gid=gid, type='group')
         await group.insert(session=session)
+
+        # The sponsor is both a member and sponsor of their own group at the
+        # creating site.
+        membership = GroupMembership(
+            user=sponsor, group=group, site=site,
+            roles=['member', 'sponsor'],
+        )
+        await membership.insert(session=session)
+
         self._group = group
         return group
 
@@ -202,6 +213,7 @@ class CreateGroupFromSponsor(Operation):
         return {
             'groupname': self.group_name,
             'sponsor': self.sponsor_name,
+            'site': self.site_name,
         }
 
 

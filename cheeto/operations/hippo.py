@@ -39,6 +39,7 @@ from ..mail import (
     UpdateSSHKeyEmail,
 )
 from ..models.group import Group
+from ..models.group_membership import GroupMembership
 from ..models.hippo import HippoEvent
 from ..models.site import Site
 from ..models.user import User
@@ -275,7 +276,9 @@ class CreateAccountHandler(BaseHippoHandler):
 
         added_groups: list[Group] = []
         for group_ref in (event.groups or []):
-            grp = await self._add_to_group(parsed.username, group_ref.name, context)
+            grp = await self._add_to_group(
+                parsed.username, group_ref.name, parsed.sitename, context,
+            )
             if grp is not None:
                 added_groups.append(grp)
 
@@ -323,6 +326,7 @@ class CreateAccountHandler(BaseHippoHandler):
         return None
 
     async def _add_to_group(self, username: str, groupname: str,
+                            sitename: str,
                             context: HippoContext) -> Group | None:
         grp = await Group.find_one(Group.name == groupname)
         if grp is None:
@@ -332,6 +336,7 @@ class CreateAccountHandler(BaseHippoHandler):
             await AddGroupMember.run(
                 context.client, context.author,
                 group_name=groupname, user_name=username,
+                site_name=sitename,
             )
         except Exception as e:
             logger.warning('could not add %s to %s: %s', username, groupname, e)
@@ -380,6 +385,7 @@ class AddAccountToGroupHandler(AccountHippoHandler):
             await AddGroupMember.run(
                 context.client, context.author,
                 group_name=group_ref.name, user_name=parsed.username,
+                site_name=parsed.sitename,
             )
             added.append(grp)
         context.event_record.target_user = user
@@ -429,6 +435,7 @@ class RemoveAccountFromGroupHandler(AccountHippoHandler):
         await RemoveGroupMember.run(
             context.client, context.author,
             group_name=group_ref.name, user_name=parsed.username,
+            site_name=parsed.sitename,
         )
         logger.info('Removed %s from %s', parsed.username, group_ref.name)
         context.event_record.target_user = user
@@ -440,9 +447,20 @@ class RemoveAccountFromGroupHandler(AccountHippoHandler):
         if not notify:
             return
         _user, grp = result
-        # re-fetch with fetch_links so sponsors resolve
-        grp = await Group.find_one(Group.name == grp.name, fetch_links=True)
-        sponsors = [(s.fullname or s.name, s.email) for s in (grp.sponsors or [])]
+        # Sponsors are per-site now: pull the sponsor-role membership edges
+        # for this group at this site and resolve the sponsor users.
+        sponsors: list[tuple[str, str]] = []
+        site = await Site.find_one(Site.name == parsed.sitename)
+        if site is not None:
+            edges = await GroupMembership.find(
+                GroupMembership.group.id == grp.id,
+                GroupMembership.site.id == site.id,
+                fetch_links=True,
+            ).to_list()
+            sponsors = [
+                (s.user.fullname or s.user.name, s.user.email)
+                for s in edges if 'sponsor' in s.roles
+            ]
         mail = RemovedFromGroupEmail(
             to=[parsed.hippo_account.email],
             group=grp.name,
@@ -467,6 +485,7 @@ class CreateGroupHandler(BaseHippoHandler):
         group = await CreateGroupFromSponsor.run(
             context.client, context.author,
             sponsor_name=parsed.username,
+            site_name=parsed.sitename,
         )
         context.event_record.target_user = sponsor
         context.event_record.target_groups = [group]

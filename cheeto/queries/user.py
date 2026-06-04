@@ -12,7 +12,9 @@ from typing import Literal
 from beanie import PydanticObjectId
 from beanie.operators import In
 
+from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
@@ -171,21 +173,25 @@ async def _ids_at_site(site_name: str) -> set[PydanticObjectId]:
 async def _ids_in_group(
     group_name: str, sitename: str | None = None,
 ) -> set[PydanticObjectId]:
-    """Users in the named group. When `sitename` is supplied, unions in
-    every user at the site if the group is in `site.group.sticky`."""
+    """Users who are `member`s of the named group. Without `sitename`,
+    unions `member`-role edges across every site. With `sitename`, scopes
+    to that site and unions in the whole-site population if the group is in
+    `site.group.sticky` (via `effective_group_members`)."""
     group = await Group.find_one(
         Group.name == group_name, with_children=True,
     )
     if group is None:
         return set()
-    direct: set[PydanticObjectId] = {
-        m.id if isinstance(m, User) else m.ref.id for m in group.members
-    }
     if sitename is None:
-        return direct
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+        ).to_list()
+        return {
+            link_target_id(e.user) for e in edges if 'member' in e.roles
+        }
     site = await Site.find_one(Site.name == sitename)
     if site is None:
-        return direct
+        return set()
     from .group import effective_group_members
     return await effective_group_members(group, site)
 

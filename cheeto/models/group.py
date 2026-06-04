@@ -3,13 +3,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Optional
 
 import pymongo
-from beanie import BackLink, Link
+from beanie import BackLink
 from pymongo import IndexModel
 from pydantic import Field, field_validator, model_validator
 
 from ..constants import GROUP_TYPES, UINT_MAX
 from .base import BaseDocument
-from .user import User
 
 if TYPE_CHECKING:
     from .slurm import SlurmAccount
@@ -28,10 +27,8 @@ class Group(BaseDocument):
     gid: Annotated[int, Field(ge=0, le=UINT_MAX)]
     type: str = 'group'
 
-    members: list[Link[User]] = Field(default_factory=list)
-    sponsors: list[Link[User]] = Field(default_factory=list)
-    sudoers: list[Link[User]] = Field(default_factory=list)
-    slurmers: list[Link[User]] = Field(default_factory=list)
+    # Membership is per-site and lives on GroupMembership edges, not here.
+    # See cheeto/models/group_membership.py.
 
     slurm: Optional[BackLink['SlurmAccount']] = Field(
         default=None,
@@ -59,9 +56,8 @@ class AccessGroup(Group):
 
     The inherited `name` field IS the LDAP groupname (e.g. `'sudo-users'`).
     `access_name` is the short shorthand referenced by `User.access` (e.g.
-    `'sudo'`). Members are computed via BackLink from `User.access`; the
-    inherited members/sponsors/sudoers/slurmers fields are unused on this
-    subclass and stay as their empty defaults.
+    `'sudo'`). Members are computed via the `User.access` links, not via
+    GroupMembership edges — access/status groups are not posix groups.
     """
 
     access_name: Annotated[str, Field(min_length=1)]

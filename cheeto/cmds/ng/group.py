@@ -26,23 +26,26 @@ from ...operations import (
     RemoveGroupSponsor,
     RemoveGroupSudoer,
 )
+from ...queries import group_members_at_site
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import group_args, site_args, user_args
 from ._slurm_show import group_slurm_at_site
 
 
-def _group_to_dict(group: Group) -> dict:
-    return {
+def _group_to_dict(group: Group, roster: dict[str, list[str]] | None = None) -> dict:
+    data: dict = {
         'name': group.name,
         'gid': group.gid,
         'type': group.type,
-        'members': sorted(m.name for m in group.members),
-        'sponsors': sorted(s.name for s in group.sponsors),
-        'sudoers': sorted(s.name for s in group.sudoers),
-        'slurmers': sorted(s.name for s in group.slurmers),
         'created_at': group.created_at,
         'updated_at': group.updated_at,
     }
+    if roster is not None:
+        data['members'] = roster['members']
+        data['sponsors'] = roster['sponsors']
+        data['sudoers'] = roster['sudoers']
+        data['slurmers'] = roster['slurmers']
+    return data
 
 
 def _render_group_slurm(site_name: str, slurm: dict | None) -> Table:
@@ -99,17 +102,25 @@ def _render_group_panel(data: dict) -> Panel:
         if key in data and data[key] is not None:
             table.add_row(key, str(data[key]))
 
-    for key in ('members', 'sponsors', 'sudoers', 'slurmers'):
-        names = data.get(key) or []
-        if not names:
-            table.add_row(key, '[dim](none)[/]')
-        elif key in ('members', 'slurmers'):
-            table.add_row(key, Columns(
-                [Text(n, style='green') for n in names],
-                expand=True, equal=True,
-            ))
-        else:
-            table.add_row(key, '\n'.join(names))
+    # Membership is per-site; the roster keys are only present when the
+    # command was given a --site.
+    if 'members' not in data:
+        table.add_row(
+            'membership',
+            '[dim](pass --site to list members/sponsors/sudoers/slurmers)[/]',
+        )
+    else:
+        for key in ('members', 'sponsors', 'sudoers', 'slurmers'):
+            names = data.get(key) or []
+            if not names:
+                table.add_row(key, '[dim](none)[/]')
+            elif key in ('members', 'slurmers'):
+                table.add_row(key, Columns(
+                    [Text(n, style='green') for n in names],
+                    expand=True, equal=True,
+                ))
+            else:
+                table.add_row(key, '\n'.join(names))
 
     if 'site' in data:
         table.add_row('site', data['site'])
@@ -188,120 +199,153 @@ async def group_new_lab(args: Namespace):
     console.print(f'Created lab group [green]{group.name}[/] (gid={group.gid})')
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @commands.register('ng', 'group', 'from-sponsor',
-                   help='Create a sponsor group from a user')
+                   help='Create a sponsor group from a user at a site')
 async def group_from_sponsor(args: Namespace):
     console = Console()
     group = await CreateGroupFromSponsor.run(
         args.db, args.author,
-        sponsor_name=args.user,
+        sponsor_name=args.user, site_name=args.site,
     )
     console.print(f'Created sponsor group [green]{group.name}[/] (gid={group.gid})')
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'member',
-                   help='Add a user to a group as a member')
+                   help='Add a user to a group as a member at a site')
 async def group_add_member(args: Namespace):
     console = Console()
     await AddGroupMember.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Added [green]{args.user}[/] to group [green]{args.group}[/]')
+    console.print(
+        f'Added [green]{args.user}[/] to group [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'member',
-                   help='Remove a user from a group')
+                   help='Remove a user from a group at a site')
 async def group_remove_member(args: Namespace):
     console = Console()
     await RemoveGroupMember.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Removed [green]{args.user}[/] from group [green]{args.group}[/]')
+    console.print(
+        f'Removed [green]{args.user}[/] from group [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'sponsor',
-                   help='Add a user as a group sponsor')
+                   help='Add a user as a group sponsor at a site')
 async def group_add_sponsor(args: Namespace):
     console = Console()
     await AddGroupSponsor.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Added [green]{args.user}[/] as sponsor of [green]{args.group}[/]')
+    console.print(
+        f'Added [green]{args.user}[/] as sponsor of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'sponsor',
-                   help='Remove a user as a group sponsor')
+                   help='Remove a user as a group sponsor at a site')
 async def group_remove_sponsor(args: Namespace):
     console = Console()
     await RemoveGroupSponsor.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Removed [green]{args.user}[/] as sponsor of [green]{args.group}[/]')
+    console.print(
+        f'Removed [green]{args.user}[/] as sponsor of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'sudoer',
-                   help='Add a user as a group sudoer')
+                   help='Add a user as a group sudoer at a site')
 async def group_add_sudoer(args: Namespace):
     console = Console()
     await AddGroupSudoer.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Added [green]{args.user}[/] as sudoer of [green]{args.group}[/]')
+    console.print(
+        f'Added [green]{args.user}[/] as sudoer of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'sudoer',
-                   help='Remove a user as a group sudoer')
+                   help='Remove a user as a group sudoer at a site')
 async def group_remove_sudoer(args: Namespace):
     console = Console()
     await RemoveGroupSudoer.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Removed [green]{args.user}[/] as sudoer of [green]{args.group}[/]')
+    console.print(
+        f'Removed [green]{args.user}[/] as sudoer of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'slurmer',
-                   help='Add a user as a group slurmer')
+                   help='Add a user as a group slurmer at a site')
 async def group_add_slurmer(args: Namespace):
     console = Console()
     await AddGroupSlurmer.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Added [green]{args.user}[/] as slurmer of [green]{args.group}[/]')
+    console.print(
+        f'Added [green]{args.user}[/] as slurmer of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
+@site_args.apply(required=True)
 @user_args.apply(required=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'slurmer',
-                   help='Remove a user as a group slurmer')
+                   help='Remove a user as a group slurmer at a site')
 async def group_remove_slurmer(args: Namespace):
     console = Console()
     await RemoveGroupSlurmer.run(
         args.db, args.author,
-        group_name=args.group, user_name=args.user,
+        group_name=args.group, user_name=args.user, site_name=args.site,
     )
-    console.print(f'Removed [green]{args.user}[/] as slurmer of [green]{args.group}[/]')
+    console.print(
+        f'Removed [green]{args.user}[/] as slurmer of [green]{args.group}[/] '
+        f'at [bold]{args.site}[/]'
+    )
 
 
 @site_args.apply()
@@ -318,14 +362,17 @@ async def group_show(args: Namespace):
         console.print(f'[red]Group {args.group} not found[/]')
         return 1
 
-    data = _group_to_dict(group)
     if args.site:
         site = await Site.find_one(Site.name == args.site)
         if site is None:
             console.print(f'[red]Site {args.site} not found[/]')
             return 1
+        roster = await group_members_at_site(group, site)
+        data = _group_to_dict(group, roster=roster)
         data['site'] = args.site
         data['slurm_at_site'] = await group_slurm_at_site(group, site)
+    else:
+        data = _group_to_dict(group)
 
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))

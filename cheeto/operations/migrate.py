@@ -27,6 +27,7 @@ from ..database.slurm import (
 from ..constants import MIN_SPECIAL_GID
 from ..database.user import GlobalUser, SiteUser
 from ..models.group import Group
+from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.slurm import (
     SlurmAccount,
@@ -696,6 +697,9 @@ class MigrateGroups(Operation):
         )
         groups = []
         coll = Group.get_pymongo_collection()
+        sites_by_name = {
+            s.name: s for s in await Site.find_all().to_list()
+        }
 
         for old_group in qs:
             # Probe the raw collection (any _class_id) so we catch legacy
@@ -742,54 +746,60 @@ class MigrateGroups(Operation):
                 self.skipped += 1
                 continue
 
-            # Aggregate (de-duped) usernames across all SiteGroup buckets
-            # for this old_group, then batch-resolve them in one query.
-            member_names: list[str] = []
-            sponsor_names: list[str] = []
-            sudoer_names: list[str] = []
-            slurmer_names: list[str] = []
-            for site_group in SiteGroup.objects(parent=old_group):
-                member_names += self._unique_usernames(site_group._members)
-                sponsor_names += self._unique_usernames(site_group._sponsors)
-                sudoer_names += self._unique_usernames(site_group._sudoers)
-                slurmer_names += self._unique_usernames(site_group._slurmers)
-            all_names = (
-                set(member_names) | set(sponsor_names)
-                | set(sudoer_names) | set(slurmer_names)
-            )
-            users_by_name = await self._load_users(all_names)
-
-            def _resolve_bucket(names: list[str]) -> list[User]:
-                out: list[User] = []
-                seen: set[str] = set()
-                for n in names:
-                    if n in seen or n not in users_by_name:
-                        continue
-                    seen.add(n)
-                    out.append(users_by_name[n])
-                return out
-
-            members = _resolve_bucket(member_names)
-            sponsors = _resolve_bucket(sponsor_names)
-            sudoers = _resolve_bucket(sudoer_names)
-            slurmers = _resolve_bucket(slurmer_names)
-
+            # Create the (global) Group record first; membership is per-site
+            # and lands on GroupMembership edges below.
             group = Group(
                 name=old_group.groupname,
                 gid=old_group.gid,
                 type=old_group.type,
-                members=members,
-                sponsors=sponsors,
-                sudoers=sudoers,
-                slurmers=slurmers,
             )
             await group.insert(session=session)
             groups.append(group)
             self.migrated += 1
+
+            # One GroupMembership edge per (user, site) for this group,
+            # with `roles` reflecting which v1 buckets the user appeared in.
+            # Resolve all usernames across every SiteGroup bucket in one query.
+            site_groups = list(SiteGroup.objects(parent=old_group))
+            all_names: set[str] = set()
+            for sg in site_groups:
+                for bucket in (sg._members, sg._sponsors, sg._sudoers, sg._slurmers):
+                    all_names |= set(self._unique_usernames(bucket))
+            users_by_name = await self._load_users(all_names)
+
+            edges_created = 0
+            for sg in site_groups:
+                site = sites_by_name.get(sg.sitename)
+                if site is None:
+                    self.logger.warning(
+                        'SiteGroup %s references non-existent site %s, '
+                        'skipping its memberships',
+                        old_group.groupname, sg.sitename,
+                    )
+                    continue
+                roles_by_username: dict[str, set[str]] = {}
+                for role, bucket in (
+                    ('member', sg._members), ('sponsor', sg._sponsors),
+                    ('sudoer', sg._sudoers), ('slurmer', sg._slurmers),
+                ):
+                    for username in self._unique_usernames(bucket):
+                        if username not in users_by_name:
+                            continue
+                        roles_by_username.setdefault(username, set()).add(role)
+                for username, roles in roles_by_username.items():
+                    edge = GroupMembership(
+                        user=users_by_name[username],
+                        group=group,
+                        site=site,
+                        roles=sorted(roles),
+                    )
+                    await edge.insert(session=session)
+                    edges_created += 1
+
             self.logger.info(
-                'Migrated group %s (gid=%d, %d members, %d sponsors, %d sudoers, %d slurmers)',
+                'Migrated group %s (gid=%d, %d membership edge(s) across %d site(s))',
                 old_group.groupname, old_group.gid,
-                len(members), len(sponsors), len(sudoers), len(slurmers),
+                edges_created, len(site_groups),
             )
 
         self.logger.info(

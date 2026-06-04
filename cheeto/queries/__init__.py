@@ -12,6 +12,7 @@ from .group import (
     effective_group_members,
     effective_user_groups,
     find_group_by_name,
+    group_members_at_site,
     is_sticky_group,
     resolve_group_names,
     user_groups_at_site,

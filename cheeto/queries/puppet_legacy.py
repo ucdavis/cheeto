@@ -17,10 +17,11 @@ a translated shell into a local variable that's never read
 
 from __future__ import annotations
 
-from beanie.operators import In, Or
+from beanie.operators import In
 
 from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
@@ -28,7 +29,6 @@ from ..puppet import (
     PuppetAccountMap,
     PuppetGroupRecord,
     PuppetUserRecord,
-    SlurmRecord,
 )
 from ..utils import removed_nones
 from .access_status import resolve_access_names
@@ -66,25 +66,32 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     user_ids = [usi.user.ref.id for usi in usis]
     usi_by_user_id = {usi.user.ref.id: usi for usi in usis}
     users = await User.find(In(User.id, user_ids)).to_list()
-    user_by_id = {u.id: u for u in users}
+    user_id_set = set(user_ids)
 
     sticky_group_ids = {
         link_target_id(link) for link in site.group.sticky
     }
     sticky_group_ids.discard(None)
 
-    or_clauses = [
-        In(Group.members.id, user_ids),
-        In(Group.slurmers.id, user_ids),
-        In(Group.sudoers.id, user_ids),
-        In(Group.sponsors.id, user_ids),
-    ]
-    if sticky_group_ids:
-        or_clauses.append(In(Group.id, list(sticky_group_ids)))
-
-    raw_groups = await Group.find(
-        Or(*or_clauses), with_children=True,
+    # Every membership edge at this site, in one query. Roles drive the
+    # member/sudoer/sponsor maps below.
+    edges = await GroupMembership.find(
+        GroupMembership.site.id == site.id,
     ).to_list()
+
+    # Sponsor edges may reference users who aren't present at the site
+    # (no UserSiteInfo); v1 emitted sponsor usernames regardless. So we
+    # collect every group id referenced by any edge, plus sticky groups.
+    referenced_group_ids = {link_target_id(e.group) for e in edges}
+    referenced_group_ids |= sticky_group_ids
+    referenced_group_ids.discard(None)
+
+    raw_groups = (
+        await Group.find(
+            In(Group.id, list(referenced_group_ids)), with_children=True,
+        ).to_list()
+        if referenced_group_ids else []
+    )
     # AccessGroup/StatusGroup are v2 metadata, not exportable POSIX groups.
     candidate_groups = [
         g for g in raw_groups
@@ -92,23 +99,22 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     ]
     group_by_id = {g.id: g for g in candidate_groups}
 
-    user_id_set = set(user_ids)
     member_groups_by_user: dict = {uid: set() for uid in user_ids}
-    slurmer_groups_by_user: dict = {uid: set() for uid in user_ids}
     sudoer_groups_by_user: dict = {uid: set() for uid in user_ids}
-    for g in candidate_groups:
-        for link in g.members:
-            uid = link_target_id(link)
-            if uid in user_id_set:
-                member_groups_by_user[uid].add(g.id)
-        for link in g.slurmers:
-            uid = link_target_id(link)
-            if uid in user_id_set:
-                slurmer_groups_by_user[uid].add(g.id)
-        for link in g.sudoers:
-            uid = link_target_id(link)
-            if uid in user_id_set:
-                sudoer_groups_by_user[uid].add(g.id)
+    sponsor_ids_by_group: dict = {}
+    for e in edges:
+        gid = link_target_id(e.group)
+        if gid not in group_by_id:
+            continue  # access/status group or otherwise not exportable
+        uid = link_target_id(e.user)
+        if 'sponsor' in e.roles:
+            sponsor_ids_by_group.setdefault(gid, set()).add(uid)
+        if uid not in user_id_set:
+            continue  # member/sudoer rows only matter for at-site users
+        if 'member' in e.roles:
+            member_groups_by_user[uid].add(gid)
+        if 'sudoer' in e.roles:
+            sudoer_groups_by_user[uid].add(gid)
     # Sticky groups: every at-site user is implicitly a member.
     for gid in sticky_group_ids:
         if gid in group_by_id:
@@ -125,13 +131,11 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             if g.name == u.name and g.gid == u.uid:
                 primary_group_ids.add(gid)
 
-    # Batch sponsor name resolution across every candidate group.
-    sponsor_ids: set = set()
-    for g in candidate_groups:
-        for link in g.sponsors:
-            sid = link_target_id(link)
-            if sid is not None:
-                sponsor_ids.add(sid)
+    # Batch sponsor name resolution across every sponsor edge.
+    sponsor_ids = {
+        sid for ids in sponsor_ids_by_group.values()
+        for sid in ids if sid is not None
+    }
     sponsor_name_by_id = {u.id: u.name for u in users if u.id in sponsor_ids}
     missing_sponsor_ids = sponsor_ids - set(sponsor_name_by_id.keys())
     if missing_sponsor_ids:
@@ -181,8 +185,8 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         if g.id in primary_group_ids:
             continue
         sponsor_names = sorted({
-            n for link in g.sponsors
-            if (n := sponsor_name_by_id.get(link_target_id(link))) is not None
+            n for sid in sponsor_ids_by_group.get(g.id, set())
+            if (n := sponsor_name_by_id.get(sid)) is not None
         })
         record_data = removed_nones({
             'gid': g.gid,

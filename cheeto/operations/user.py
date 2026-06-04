@@ -124,11 +124,13 @@ class CreateUser(Operation):
         )
         await user.insert(session=session)
 
+        # Primary (user-private) group. Membership is implicit via User.gid;
+        # there is no GroupMembership edge for the primary group, and CreateUser
+        # has no site context to scope one to anyway.
         group = Group(
             name=self.name,
             gid=self.gid,
             type='user',
-            members=[user],
         )
         await group.insert(session=session)
 

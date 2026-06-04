@@ -1,10 +1,12 @@
-"""Group-membership query helpers, including `Site.group.sticky` union logic.
+"""Group-membership query helpers over per-site `GroupMembership` edges.
 
-`effective_group_members(group, site)` is the central join: when `group` is
-listed in `site.group.sticky`, every user with a `UserSiteInfo` at the site
-counts as a member even if they're not in `group.members`. Used by LDAP
-projection (`SyncGroupToLDAP._members_at_site`) and the `--site`-scoped
-group filter on `find_users`.
+Membership is per-site: a `GroupMembership(user, group, site, roles)` edge
+records the capacities in which a user participates in a group at a site.
+`effective_group_members(group, site)` is the central join — it also unions
+in `site.group.sticky` so that when `group` is sticky, every user with a
+`UserSiteInfo` at the site counts as a member even without an explicit edge.
+Used by LDAP projection (`SyncGroupToLDAP._members_at_site`) and the
+`--site`-scoped group filter on `find_users`.
 """
 
 from __future__ import annotations
@@ -13,10 +15,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from beanie import PydanticObjectId
-from beanie.operators import In, Or
+from beanie.operators import In
 
-from ..models.group import Group
 from ..models.base import link_target_id
+from ..models.group import Group
+from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
@@ -79,23 +82,6 @@ async def _users_at_site_ids(site: Site) -> set[PydanticObjectId]:
     return {usi.user.ref.id for usi in usis}
 
 
-async def effective_group_members(
-    group: Group, site: Site,
-) -> set[PydanticObjectId]:
-    """User ids effectively members of `group` at `site`.
-
-    Unions `group.members` with every user that has a `UserSiteInfo` at
-    `site` when `group` is listed in `site.group.sticky`. Returns just
-    `group.members` otherwise.
-    """
-    direct = {
-        m.id if isinstance(m, User) else m.ref.id for m in group.members
-    }
-    if not is_sticky_group(group, site):
-        return direct
-    return direct | await _users_at_site_ids(site)
-
-
 async def _user_has_usi(user: User, site: Site) -> bool:
     usi = await UserSiteInfo.find_one(
         UserSiteInfo.user.id == user.id,
@@ -104,26 +90,103 @@ async def _user_has_usi(user: User, site: Site) -> bool:
     return usi is not None
 
 
+async def effective_group_members(
+    group: Group, site: Site,
+) -> set[PydanticObjectId]:
+    """User ids effectively members of `group` at `site`.
+
+    Unions the `member`-role edges for `(group, site)` with every user that
+    has a `UserSiteInfo` at `site` when `group` is listed in
+    `site.group.sticky`. Returns just the direct members otherwise.
+    """
+    edges = await GroupMembership.find(
+        GroupMembership.group.id == group.id,
+        GroupMembership.site.id == site.id,
+    ).to_list()
+    direct = {
+        link_target_id(e.user) for e in edges if 'member' in e.roles
+    }
+    if not is_sticky_group(group, site):
+        return direct
+    return direct | await _users_at_site_ids(site)
+
+
+async def group_members_at_site(
+    group: Group, site: Site,
+) -> dict[str, list[str]]:
+    """The per-site roster of `group`: sorted usernames bucketed by role
+    (`members`, `sponsors`, `sudoers`, `slurmers`).
+
+    `members` unions in the whole-site population when `group` is sticky at
+    `site` (the same semantics as `effective_group_members`). The other
+    buckets reflect explicit edges only.
+    """
+    edges = await GroupMembership.find(
+        GroupMembership.group.id == group.id,
+        GroupMembership.site.id == site.id,
+    ).to_list()
+
+    ids_by_role: dict[str, set[PydanticObjectId]] = {
+        'member': set(), 'sponsor': set(), 'sudoer': set(), 'slurmer': set(),
+    }
+    for e in edges:
+        uid = link_target_id(e.user)
+        for role in e.roles:
+            ids_by_role[role].add(uid)
+
+    if is_sticky_group(group, site):
+        ids_by_role['member'] |= await _users_at_site_ids(site)
+
+    all_ids = set().union(*ids_by_role.values())
+    name_by_id: dict[PydanticObjectId, str] = {}
+    if all_ids:
+        users = await User.find(In(User.id, list(all_ids))).to_list()
+        name_by_id = {u.id: u.name for u in users}
+
+    def _names(role: str) -> list[str]:
+        return sorted(
+            n for uid in ids_by_role[role]
+            if (n := name_by_id.get(uid)) is not None
+        )
+
+    return {
+        'members': _names('member'),
+        'sponsors': _names('sponsor'),
+        'sudoers': _names('sudoer'),
+        'slurmers': _names('slurmer'),
+    }
+
+
 async def effective_user_groups(
     user: User, site: Site,
 ) -> tuple[list[Group], set[PydanticObjectId]]:
     """All groups the user is effectively a member of at `site`.
 
-    Returns `(groups, sticky_ids)` where `groups` is the union of the
-    user's direct memberships and every group in `site.group.sticky`
-    (gated on the user having a `UserSiteInfo` at the site — sticky
-    membership only applies to users actually present at the site), and
-    `sticky_ids` is the set of group ids that came from the sticky list
-    (so callers can tell sticky from direct).
+    Returns `(groups, sticky_ids)` where `groups` is the union of the user's
+    `member`-role edges at the site and every group in `site.group.sticky`
+    (sticky gated on the user having a `UserSiteInfo` at the site — sticky
+    membership only applies to users actually present there), and
+    `sticky_ids` is the set of group ids that came from the sticky list (so
+    callers can tell sticky from direct).
     """
+    edges = await GroupMembership.find(
+        GroupMembership.user.id == user.id,
+        GroupMembership.site.id == site.id,
+    ).to_list()
+    group_ids = {
+        link_target_id(e.group) for e in edges if 'member' in e.roles
+    }
+
     sticky_ids = _sticky_group_ids(site)
     if sticky_ids and await _user_has_usi(user, site):
-        groups = await Group.find(
-            Or(Group.members.id == user.id, In(Group.id, list(sticky_ids))),
-        ).to_list()
+        group_ids |= sticky_ids
     else:
         sticky_ids = set()
-        groups = await Group.find(Group.members.id == user.id).to_list()
+
+    groups = (
+        await Group.find(In(Group.id, list(group_ids))).to_list()
+        if group_ids else []
+    )
     return groups, sticky_ids
 
 
@@ -133,27 +196,43 @@ async def user_groups_at_site(
     """All groups the user has any membership in at `site`, with roles.
 
     Each `UserGroupRoles` row has one or more roles from:
-      - `'member'`     — user in `group.members`
-      - `'slurmer'`    — user in `group.slurmers`
+      - `'member'`        — a `member`-role edge for `(user, group, site)`
+      - `'slurmer'`       — a `slurmer`-role edge for `(user, group, site)`
       - `'sticky-member'` — `group` is in `site.group.sticky` and the user
                             has a `UserSiteInfo` at the site
 
-    A group can carry multiple roles (e.g. both `member` and `slurmer`).
+    Only `member`/`slurmer` are surfaced from edge roles (sponsor/sudoer are
+    not group memberships in the posix sense); a group can carry multiple
+    roles (e.g. both `member` and `slurmer`).
     """
-    member_groups, sticky_group_ids = await effective_user_groups(user, site)
-    slurmer_groups = await Group.find(
-        Group.slurmers.id == user.id,
+    edges = await GroupMembership.find(
+        GroupMembership.user.id == user.id,
+        GroupMembership.site.id == site.id,
     ).to_list()
 
-    by_id: dict[PydanticObjectId, UserGroupRoles] = {}
-    for g in member_groups:
-        entry = by_id.setdefault(g.id, UserGroupRoles(group=g))
-        direct_member_ids = {link_target_id(m) for m in g.members}
-        if user.id in direct_member_ids:
-            entry.roles.append('member')
-        if g.id in sticky_group_ids:
-            entry.roles.append('sticky-member')
-    for g in slurmer_groups:
-        entry = by_id.setdefault(g.id, UserGroupRoles(group=g))
-        entry.roles.append('slurmer')
-    return list(by_id.values())
+    roles_by_group: dict[PydanticObjectId, list[GroupRole]] = {}
+    for e in edges:
+        gid = link_target_id(e.group)
+        roles: list[GroupRole] = []
+        if 'member' in e.roles:
+            roles.append('member')
+        if 'slurmer' in e.roles:
+            roles.append('slurmer')
+        if roles:
+            roles_by_group[gid] = roles
+
+    sticky_ids = _sticky_group_ids(site)
+    if sticky_ids and await _user_has_usi(user, site):
+        for gid in sticky_ids:
+            roles_by_group.setdefault(gid, []).append('sticky-member')
+
+    if not roles_by_group:
+        return []
+
+    groups = await Group.find(
+        In(Group.id, list(roles_by_group.keys())), with_children=True,
+    ).to_list()
+    return [
+        UserGroupRoles(group=g, roles=roles_by_group[g.id])
+        for g in groups
+    ]

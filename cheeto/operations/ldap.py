@@ -382,8 +382,8 @@ class SyncGroupToLDAP(Operation):
         """Members of `group` that have a UserSiteInfo for `site`.
 
         Starts from `effective_group_members(group, site)` so sticky groups
-        get every user at the site, not just `group.members`. Filters by
-        USI presence FIRST, then loads only the surviving users — for
+        get every user at the site, not just the direct member edges. Filters
+        by USI presence FIRST, then loads only the surviving users — for
         sticky groups (where effective_ids is the whole site population),
         this skips loading users who turned out not to be at this site.
         """

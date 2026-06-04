@@ -19,7 +19,8 @@ from ..constants import (
 from .base import BaseDocument, Expirable
 
 if TYPE_CHECKING:
-    from .group import AccessGroup, Group, StatusGroup
+    from .group import AccessGroup, StatusGroup
+    from .group_membership import GroupMembership
     from .user_site_info import UserSiteInfo
 
 
@@ -107,9 +108,9 @@ class User(BaseDocument, Expirable):
     home_directory: str
     iam: UCDIAMInfo | None = None
 
-    groups: list[BackLink['Group']] = Field(
+    memberships: list[BackLink['GroupMembership']] = Field(
         default_factory=list,
-        json_schema_extra={'original_field': 'members'},
+        json_schema_extra={'original_field': 'user'},
     )
 
     sites: list[BackLink['UserSiteInfo']] = Field(

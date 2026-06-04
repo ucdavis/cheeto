@@ -17,6 +17,7 @@ from ..models.history import History
 from ..models.site import Site
 from ..models.user import User, SshKey
 from ..models.group import Group
+from ..models.group_membership import GroupMembership
 from ..models.slurm import (
     SlurmAccount,
     SlurmAccountLimits,
@@ -274,47 +275,86 @@ class TestSiteModel:
 
 class TestGroupModel:
 
-    async def test_create_group_with_members(self, beanie_client):
+    async def test_group_membership_edge_roundtrip(self, beanie_client):
+        from cheeto.models.group_membership import GroupMembership
+
         user = User(
             name='gmember', email='gm@test.com',
             uid=20000, gid=20000, fullname='G Member',
             home_directory='/home/gmember',
         )
         await user.insert()
+        site = Site(name='gmsite', fqdn='gm.test')
+        await site.insert()
 
-        group = Group(
-            name='testgroup', gid=30000,
-            members=[user], sponsors=[user],
-        )
+        group = Group(name='testgroup', gid=30000)
         await group.insert()
 
-        fetched = await Group.find_one(
-            Group.name == 'testgroup', fetch_links=True,
+        edge = GroupMembership(
+            user=user, group=group, site=site,
+            roles=['member', 'sponsor'],
+        )
+        await edge.insert()
+
+        fetched = await GroupMembership.find_one(
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+            fetch_links=True,
         )
         assert fetched is not None
-        assert len(fetched.members) == 1
-        assert fetched.members[0].name == 'gmember'
-        assert len(fetched.sponsors) == 1
+        assert fetched.user.name == 'gmember'
+        assert fetched.roles == ['member', 'sponsor']
 
-    async def test_user_groups_backlink(self, beanie_client):
+    async def test_membership_roles_deduped_and_validated(self, beanie_client):
+        from cheeto.models.group_membership import GroupMembership
+
+        user = User(
+            name='rolesuser', email='ru@test.com',
+            uid=20009, gid=20009, fullname='Roles User',
+            home_directory='/home/rolesuser',
+        )
+        await user.insert()
+        site = Site(name='rolessite', fqdn='roles.test')
+        await site.insert()
+        group = Group(name='rolesgroup', gid=30009)
+        await group.insert()
+
+        # Duplicates collapse and roles sort into canonical order.
+        edge = GroupMembership(
+            user=user, group=group, site=site,
+            roles=['slurmer', 'member', 'member'],
+        )
+        assert edge.roles == ['member', 'slurmer']
+
+        # Unknown roles are rejected by the MembershipRole Literal itself.
+        with pytest.raises(ValueError, match='member.*sponsor.*sudoer.*slurmer'):
+            GroupMembership(
+                user=user, group=group, site=site, roles=['bogus'],
+            )
+
+    async def test_user_memberships_backlink(self, beanie_client):
+        from cheeto.models.group_membership import GroupMembership
+
         user = User(
             name='bluser', email='bl@test.com',
             uid=20001, gid=20001, fullname='BL User',
             home_directory='/home/bluser',
         )
         await user.insert()
+        site = Site(name='blsite', fqdn='bl.test')
+        await site.insert()
 
-        g1 = Group(name='grp1', gid=30001, members=[user])
-        g2 = Group(name='grp2', gid=30002, members=[user])
+        g1 = Group(name='grp1', gid=30001)
+        g2 = Group(name='grp2', gid=30002)
         await g1.insert()
         await g2.insert()
+        await GroupMembership(user=user, group=g1, site=site, roles=['member']).insert()
+        await GroupMembership(user=user, group=g2, site=site, roles=['member']).insert()
 
         fetched = await User.find_one(
             User.name == 'bluser', fetch_links=True,
         )
-        assert len(fetched.groups) == 2
-        group_names = {g.name for g in fetched.groups}
-        assert group_names == {'grp1', 'grp2'}
+        assert len(fetched.memberships) == 2
 
 
 class TestUserSiteInfoModel:
@@ -354,7 +394,7 @@ class TestStorageModel:
             home_directory='/home/storuser',
         )
         await user.insert()
-        group = Group(name='storuser', gid=20020, members=[user])
+        group = Group(name='storuser', gid=20020)
         await group.insert()
         site = Site(name='storsite', fqdn='stor.hpc.test')
         await site.insert()
@@ -379,7 +419,7 @@ class TestStorageModel:
             home_directory='/home/noalloc',
         )
         await user.insert()
-        group = Group(name='noalloc', gid=20021, members=[user])
+        group = Group(name='noalloc', gid=20021)
         await group.insert()
         site = Site(name='nasite', fqdn='na.hpc.test')
         await site.insert()
@@ -400,7 +440,7 @@ class TestStorageModel:
             home_directory='/home/qbuser',
         )
         await user.insert()
-        group = Group(name='qbuser', gid=20022, members=[user])
+        group = Group(name='qbuser', gid=20022)
         await group.insert()
         site = Site(name='qbsite', fqdn='qb.hpc.test')
         await site.insert()
@@ -747,22 +787,24 @@ class TestGroupOps:
         assert group.gid >= 4_000_000_000
 
     async def test_create_group_from_sponsor(self, beanie_client):
+        from cheeto.queries import group_members_at_site
+
         user, _ = await CreateUser.run(
             beanie_client, None,
             name='sponsor', email='sp@test.com', uid=43000,
             fullname='Sponsor User',
         )
+        site = Site(name='sponsorsite', fqdn='sponsor.test')
+        await site.insert()
         group = await CreateGroupFromSponsor.run(
-            beanie_client, None, sponsor_name='sponsor',
+            beanie_client, None, sponsor_name='sponsor', site_name='sponsorsite',
         )
         assert group.name == 'sponsorgrp'
         assert group.type == 'group'
 
-        fetched = await Group.find_one(
-            Group.name == 'sponsorgrp', fetch_links=True,
-        )
-        assert any(m.name == 'sponsor' for m in fetched.members)
-        assert any(s.name == 'sponsor' for s in fetched.sponsors)
+        roster = await group_members_at_site(group, site)
+        assert roster['members'] == ['sponsor']
+        assert roster['sponsors'] == ['sponsor']
 
         # Original personal group is unchanged
         personal = await Group.find_one(Group.name == 'sponsor')
@@ -781,61 +823,92 @@ class TestGroupMembershipOps:
         group = await CreateGroup.run(
             beanie_client, None, name='memgroup', gid=61000,
         )
-        return user, group
+        site = Site(name='memsite', fqdn='mem.test')
+        await site.insert()
+        return user, group, site
+
+    @staticmethod
+    async def _roster(group, site):
+        from cheeto.queries import group_members_at_site
+        return await group_members_at_site(group, site)
 
     async def test_add_and_remove_member(self, beanie_client, setup):
-        user, group = setup
+        user, group, site = setup
 
         await AddGroupMember.run(
             beanie_client, None,
-            group_name='memgroup', user_name='memuser',
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        fetched = await Group.find_one(
-            Group.name == 'memgroup', fetch_links=True,
-        )
-        assert any(m.name == 'memuser' for m in fetched.members)
+        assert 'memuser' in (await self._roster(group, site))['members']
 
         await RemoveGroupMember.run(
             beanie_client, None,
-            group_name='memgroup', user_name='memuser',
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        fetched = await Group.find_one(
-            Group.name == 'memgroup', fetch_links=True,
-        )
-        assert not any(m.name == 'memuser' for m in fetched.members)
+        assert 'memuser' not in (await self._roster(group, site))['members']
 
-    async def test_add_sponsor(self, beanie_client, setup):
-        user, group = setup
+    async def test_remove_last_role_deletes_edge(self, beanie_client, setup):
+        from cheeto.models.group_membership import GroupMembership
+        user, group, site = setup
+
+        await AddGroupMember.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        await RemoveGroupMember.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        edge = await GroupMembership.find_one(
+            GroupMembership.user.id == user.id,
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+        )
+        assert edge is None
+
+    async def test_multiple_roles_share_one_edge(self, beanie_client, setup):
+        from cheeto.models.group_membership import GroupMembership
+        user, group, site = setup
+
+        await AddGroupMember.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
         await AddGroupSponsor.run(
             beanie_client, None,
-            group_name='memgroup', user_name='memuser',
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        fetched = await Group.find_one(
-            Group.name == 'memgroup', fetch_links=True,
+        edges = await GroupMembership.find(
+            GroupMembership.user.id == user.id,
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+        ).to_list()
+        assert len(edges) == 1
+        assert edges[0].roles == ['member', 'sponsor']
+
+    async def test_add_sponsor(self, beanie_client, setup):
+        user, group, site = setup
+        await AddGroupSponsor.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        assert any(s.name == 'memuser' for s in fetched.sponsors)
+        assert 'memuser' in (await self._roster(group, site))['sponsors']
 
     async def test_add_sudoer(self, beanie_client, setup):
-        user, group = setup
+        user, group, site = setup
         await AddGroupSudoer.run(
             beanie_client, None,
-            group_name='memgroup', user_name='memuser',
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        fetched = await Group.find_one(
-            Group.name == 'memgroup', fetch_links=True,
-        )
-        assert any(s.name == 'memuser' for s in fetched.sudoers)
+        assert 'memuser' in (await self._roster(group, site))['sudoers']
 
     async def test_add_slurmer(self, beanie_client, setup):
-        user, group = setup
+        user, group, site = setup
         await AddGroupSlurmer.run(
             beanie_client, None,
-            group_name='memgroup', user_name='memuser',
+            group_name='memgroup', user_name='memuser', site_name='memsite',
         )
-        fetched = await Group.find_one(
-            Group.name == 'memgroup', fetch_links=True,
-        )
-        assert any(s.name == 'memuser' for s in fetched.slurmers)
+        assert 'memuser' in (await self._roster(group, site))['slurmers']
 
 
 class TestSlurmOps:
@@ -2095,8 +2168,11 @@ class TestEffectiveGroupMembers:
             status=await status_link('active'),
         ).insert()
 
-        group = Group(name='egm_grp', gid=52000, members=[u_member])
+        group = Group(name='egm_grp', gid=52000)
         await group.insert()
+        await GroupMembership(
+            user=u_member, group=group, site=site, roles=['member'],
+        ).insert()
 
         ids = await effective_group_members(group, site)
         assert ids == {u_member.id}
@@ -2128,8 +2204,11 @@ class TestEffectiveGroupMembers:
         ).insert()
         # u_direct has no USI at this site; only via direct membership.
 
-        group = Group(name='egmB_grp', gid=52001, members=[u_direct])
+        group = Group(name='egmB_grp', gid=52001)
         await group.insert()
+        await GroupMembership(
+            user=u_direct, group=group, site=site, roles=['member'],
+        ).insert()
 
         # Make group sticky on the site.
         site.group.sticky = [group]
@@ -2282,17 +2361,23 @@ class TestSiteToPuppetLegacy:
             access=await access_links(['login-ssh', 'sudo']),
         )
         await user.insert()
-        # Primary group: same name as user, gid == uid → excluded from
-        # both the user's `groups` list and the top-level `group:` map.
-        primary = Group(name='puppet_alice', gid=60001, members=[user])
-        await primary.insert()
-        # Regular group: should land in user.groups and in the group: map.
-        lab = Group(name='puppet_lab', gid=61000, members=[user])
-        await lab.insert()
-
         await UserSiteInfo(
             user=user, site=site,
             status=await status_link('active'),
+        ).insert()
+        # Primary group: same name as user, gid == uid → excluded from
+        # both the user's `groups` list and the top-level `group:` map,
+        # even when an explicit member edge points at it.
+        primary = Group(name='puppet_alice', gid=60001)
+        await primary.insert()
+        await GroupMembership(
+            user=user, group=primary, site=site, roles=['member'],
+        ).insert()
+        # Regular group: should land in user.groups and in the group: map.
+        lab = Group(name='puppet_lab', gid=61000)
+        await lab.insert()
+        await GroupMembership(
+            user=user, group=lab, site=site, roles=['member'],
         ).insert()
 
         result = await site_to_puppet_legacy(site)
@@ -2425,11 +2510,15 @@ class TestSiteToPuppetLegacy:
             status=await status_link('active'),
         ).insert()
 
-        lab = Group(
-            name='pl_lab', gid=61003,
-            members=[member], sponsors=[sponsor],
-        )
+        lab = Group(name='pl_lab', gid=61003)
         await lab.insert()
+        await GroupMembership(
+            user=member, group=lab, site=site, roles=['member'],
+        ).insert()
+        # Sponsor edge at this site even though the sponsor has no USI here.
+        await GroupMembership(
+            user=sponsor, group=lab, site=site, roles=['sponsor'],
+        ).insert()
 
         result = await site_to_puppet_legacy(site)
         assert 'pl_sponsor' not in result.user  # not at site
