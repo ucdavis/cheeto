@@ -52,6 +52,13 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 
 `cheeto/hippoapi/` and `cheeto/iamapi/` are generated httpx-based clients for the HiPPO and UC Davis IAM APIs. Do not hand-edit these.
 
+### Module-specific rules
+
+Scoped reference rules live in `.claude/rules/` (mirrored as Cursor `.mdc` rules in `.cursor/rules/`). Read the relevant one before editing the modules it covers:
+
+- **`.claude/rules/slurm.md`** — Slurm accounting / sacctmgr usage (the account→association→QOS model, TRES format, `.to_slurm()` renderers). Covers `cheeto/slurm.py`, `cheeto/models/slurm.py`, `cheeto/{operations,queries}/slurm.py`, `cheeto/cmds/slurm.py`, `cheeto/cmds/ng/slurm.py`, `cheeto/cmds/ng/_slurm_show.py`, and the Slurm dataclasses in `cheeto/puppet.py`.
+- **`.claude/rules/sh.md`** — running external commands with the `sh` library, including asyncio usage. Covers `cheeto/slurm.py`, `cheeto/git.py`, `cheeto/mail.py`, `cheeto/monitor.py`, `cheeto/cmds/slurm.py`.
+
 ### Domain concepts
 
 - **Sites**: HPC clusters. Users and groups have per-site records.
