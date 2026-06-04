@@ -50,7 +50,7 @@ from ..queries.access_status import (
     resolve_access_ldapnames,
     resolve_status_ldapname,
 )
-from ..queries.group import effective_group_members
+from ..queries.group import effective_group_members, effective_user_groups
 from ..queries.user import effective_access_links
 from .base import Operation
 
@@ -173,10 +173,19 @@ class SyncUserToLDAP(Operation):
     """Project one beanie User to LDAP.
 
     Upserts the user dn (delete-and-recreate when `force=True`) and
-    reconciles access/status special-group memberships against the targets
-    computed from `effective_access_links(user, usi)` plus `user.status`.
-    The membership patch uses per-group add/remove to avoid clobbering
-    memberships from other sites that share the same special group.
+    reconciles the user's group memberships at the site against the targets:
+      - access groups from `effective_access_links(user, usi)`,
+      - the user's status group,
+      - the per-site posix groups the user is a `member` of (plus any
+        sticky groups), from `effective_user_groups(user, site)`.
+
+    Both special (access/status) and posix groups live under the same
+    per-site groups OU, so `list_user_memberships` returns them together.
+    The posix groups MUST be included in the target set or the reconcile
+    would treat them as stale and strip the user out of every lab/sponsor
+    group on a single-user sync. The membership patch uses per-group
+    add/remove rather than a wholesale set, so it never clobbers a group's
+    other members.
 
     Outcomes: `created`, `updated`, `recreated`, `no_op`.
     """
@@ -227,6 +236,15 @@ class SyncUserToLDAP(Operation):
         status_ldapname = await resolve_status_ldapname(user.status)
         if status_ldapname is not None:
             target_groups.add(status_ldapname)
+
+        # Posix group memberships at this site share the per-site groups OU
+        # with the special groups above. Include them so the reconcile keeps
+        # the user in their lab/sponsor groups instead of stripping them.
+        # `effective_user_groups` returns member-role edges plus sticky
+        # groups — the same membership set SyncGroupToLDAP projects from the
+        # group side via `effective_group_members`.
+        posix_groups, _sticky_ids = await effective_user_groups(user, site)
+        target_groups.update(g.name for g in posix_groups)
 
         record = await _build_user_record(user)
         outcome = await self._upsert_user(record)

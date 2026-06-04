@@ -70,6 +70,7 @@ from ..operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    SyncUserToLDAP,
 )
 
 from .conftest import MONGODB_PORT, access_links, seed_access_status_groups, status_link
@@ -2523,3 +2524,96 @@ class TestSiteToPuppetLegacy:
         result = await site_to_puppet_legacy(site)
         assert 'pl_sponsor' not in result.user  # not at site
         assert result.group['pl_lab'].sponsors == ['pl_sponsor']
+
+
+class _FakeLDAPManager:
+    """Minimal stand-in for AsyncLDAPManager covering only what
+    SyncUserToLDAP touches. Records add/remove-group calls and serves a
+    seeded current-membership set so we can assert the reconcile decisions
+    without a live directory."""
+
+    def __init__(self, current_memberships: set[str]):
+        self._current = set(current_memberships)
+        self.added: list[str] = []
+        self.removed: list[str] = []
+
+    def user_dn(self, username: str) -> str:
+        return f'uid={username},ou=people'
+
+    async def delete_user(self, username: str) -> None:
+        pass
+
+    async def update_user(self, record) -> None:
+        # Pretend the user already exists → 'updated' path.
+        return None
+
+    async def add_user(self, record) -> None:
+        pass
+
+    async def list_user_memberships(self, username: str) -> set[str]:
+        return set(self._current)
+
+    async def add_users_to_group(self, group, usernames, verify_users=True):
+        self.added.append(group)
+
+    async def remove_users_from_group(self, group, usernames):
+        self.removed.append(group)
+
+
+class TestSyncUserToLDAPMembership:
+    """SyncUserToLDAP must keep the user in their per-site posix groups; a
+    single-user sync previously stripped them because only access/status
+    groups were in the target set."""
+
+    async def _seed_user_on_site(self):
+        user = User(
+            name='ldapu', email='l@x.test',
+            uid=70001, gid=70001, fullname='LDAP User',
+            home_directory='/home/ldapu',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        site = Site(name='ldapsite', fqdn='ldap.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+        lab = Group(name='labgrp', gid=71000)
+        await lab.insert()
+        await GroupMembership(
+            user=user, group=lab, site=site, roles=['member'],
+        ).insert()
+        return user, site, lab
+
+    async def test_posix_membership_preserved(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        # LDAP already has the user in their lab group and the login-ssh
+        # access group; the status group is missing.
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        # The lab group must NOT be stripped, and the missing status group
+        # gets added.
+        assert 'labgrp' not in result.extra['removed_groups']
+        assert ldap.removed == []
+        assert 'active-users' in result.extra['added_groups']
+
+    async def test_stale_group_still_removed(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        # LDAP has the user in a group they no longer belong to anywhere.
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users', 'oldgrp'},
+        )
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['removed_groups'] == ['oldgrp']
+        assert 'labgrp' not in result.extra['removed_groups']
