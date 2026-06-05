@@ -24,35 +24,50 @@ jobs:
           - "8888:3306"
         options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
     steps:
-      - uses: actions/checkout@v3
-      - uses: koesterlab/setup-slurm-action@v1
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Install apt dependencies
         run: |
           curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
           echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
           sudo apt update
-          sudo apt install -y libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev gnupg curl mongodb-org
+          sudo apt install -y libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev gnupg curl mongodb-org ansible
+      
+      - name: Setup Slurm
+        uses: koesterlab/setup-slurm-action@v1
+        with:
+          mysql-host: mysql
+          mysql-password: root
+
       - uses: actions/checkout@v2
+      
       - uses: actions/setup-python@v2
         with:
           python-version: 3.12
+      
       - name: cache poetry install
         uses: actions/cache@v4
         with:
           path: ~/.local
           key: poetry-2.0.1-0
+      
       - uses: snok/install-poetry@v1
         with:
           version: 2.0.1
           virtualenvs-create: true
           virtualenvs-in-project: true
+      
       - name: cache deps
         id: cache-deps
         uses: actions/cache@v4
         with:
           path: .venv
           key: pydeps-${{ hashFiles('**/poetry.lock') }}
+      
       - run: poetry install --no-interaction --no-root
         if: steps.cache-deps.outputs.cache-hit != 'true'
+      
       - run: poetry install --no-interaction
+      
       - run: poetry run pytest
