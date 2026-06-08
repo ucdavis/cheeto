@@ -61,7 +61,7 @@ jobs:
   # that exercises the live SyncSlurm apply path; the unit suite in `test`
   # covers everything else with DumpSAcctMgr.
   slurm-integration:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
       # Pinned for reproducibility; bump deliberately. The compose file lives
