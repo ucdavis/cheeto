@@ -74,6 +74,7 @@ from ..operations import (
     SetUserType,
     SetSiteDefaultSlurmAccount,
     ClearSiteDefaultSlurmAccount,
+    ExportRootSSHKeys,
     SyncSlurm,
     SyncUserToLDAP,
 )
@@ -2965,3 +2966,88 @@ class TestSlurmLive:
             beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
         )
         assert r2['plan'] == {}, r2['plan']
+
+
+class TestExportRootSSHKeys:
+    """`ExportRootSSHKeys` renders root authorized_keys for admins at a site
+    with root-ssh access, one `# user <email>` comment per user and each key
+    prefixed with environment="REMOTE_SSH_USER=<user>"."""
+
+    async def _admin(self, name, uid, *, access, site, keys):
+        user = User(
+            name=name, email=f'{name}@x.test', uid=uid, gid=uid,
+            fullname=name, home_directory=f'/home/{name}', type='admin',
+            status=await status_link('active'),
+            access=await access_links(access),
+        )
+        await user.insert()
+        if site is not None:
+            await UserSiteInfo(
+                user=user, site=site, status=await status_link('active'),
+            ).insert()
+        for k in keys:
+            await SshKey(key=k, user=user).insert()
+        return user
+
+    async def test_export_filters_and_format(self, beanie_client):
+        site = Site(name='rksite', fqdn='rk.test')
+        await site.insert()
+        other = Site(name='rkother', fqdn='rko.test')
+        await other.insert()
+
+        # included: two admins with root-ssh + keys (bob has two keys)
+        await self._admin(
+            'rk_alice', 80001, access=['login-ssh', 'root-ssh'], site=site,
+            keys=['ssh-ed25519 AAAAaaa alice@laptop'],
+        )
+        await self._admin(
+            'rk_bob', 80002, access=['root-ssh'], site=site,
+            keys=['ssh-ed25519 AAAAbbb bob@a', 'ssh-rsa AAAAbbb2 bob@b'],
+        )
+        # excluded: admin with root-ssh but no keys
+        await self._admin(
+            'rk_nokeys', 80003, access=['root-ssh'], site=site, keys=[],
+        )
+        # excluded: admin without root-ssh
+        await self._admin(
+            'rk_noroot', 80004, access=['login-ssh'], site=site,
+            keys=['ssh-ed25519 AAAAnoroot noroot@h'],
+        )
+        # excluded: non-admin with root-ssh
+        u = User(
+            name='rk_user', email='u@x.test', uid=80005, gid=80005,
+            fullname='U', home_directory='/home/u', type='user',
+            status=await status_link('active'),
+            access=await access_links(['root-ssh']),
+        )
+        await u.insert()
+        await UserSiteInfo(user=u, site=site, status=await status_link('active')).insert()
+        await SshKey(key='ssh-ed25519 AAAAuser user@h', user=u).insert()
+        # excluded: admin with root-ssh + key but NOT on this site
+        await self._admin(
+            'rk_offsite', 80006, access=['root-ssh'], site=other,
+            keys=['ssh-ed25519 AAAAoff off@h'],
+        )
+
+        text = await ExportRootSSHKeys.run(beanie_client, None, sitename='rksite')
+
+        assert text == (
+            '# rk_alice <rk_alice@x.test>\n'
+            'environment="REMOTE_SSH_USER=rk_alice" ssh-ed25519 AAAAaaa alice@laptop\n'
+            '# rk_bob <rk_bob@x.test>\n'
+            'environment="REMOTE_SSH_USER=rk_bob" ssh-ed25519 AAAAbbb bob@a\n'
+            'environment="REMOTE_SSH_USER=rk_bob" ssh-rsa AAAAbbb2 bob@b\n'
+        )
+        # none of the excluded users leak in
+        for name in ('rk_nokeys', 'rk_noroot', 'rk_user', 'rk_offsite'):
+            assert name not in text
+
+    async def test_export_empty_when_no_qualifying_admins(self, beanie_client):
+        site = Site(name='rkempty', fqdn='rke.test')
+        await site.insert()
+        text = await ExportRootSSHKeys.run(beanie_client, None, sitename='rkempty')
+        assert text == ''
+
+    async def test_export_unknown_site_errors(self, beanie_client):
+        with pytest.raises(ValueError):
+            await ExportRootSSHKeys.run(beanie_client, None, sitename='nope')

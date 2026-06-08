@@ -1,4 +1,5 @@
 import asyncio
+import sys
 from argparse import Namespace
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from ...operations import (
     AddStickySlurmAccount,
     ClearSiteDefaultSlurmAccount,
     CreateSite,
+    ExportRootSSHKeys,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
@@ -320,3 +322,32 @@ async def site_export_puppet_legacy(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--output', '-o', default=None,
                         help='Write YAML to this path (default: stdout)')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'export', 'root-keys',
+                   help="Export root authorized_keys for admins with "
+                        "root-ssh access at the site")
+async def site_export_root_keys(args: Namespace):
+    console = Console()
+    try:
+        text = await ExportRootSSHKeys.run(
+            args.db, args.author, sitename=args.site,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    if args.output:
+        Path(args.output).write_text(text)
+        console.print(f'Wrote root keys to [green]{args.output}[/]')
+    else:
+        # Raw to stdout so the key material is emitted verbatim (no Rich
+        # markup reformatting).
+        sys.stdout.write(text)
+
+
+@site_export_root_keys.args()
+def _(parser: ArgParser):
+    parser.add_argument('--output', '-o', default=None,
+                        help='Write authorized_keys to this path '
+                             '(default: stdout)')
