@@ -410,19 +410,40 @@ def parse_state(
 class AsyncSAcctMgr:
     """asyncio-friendly `sacctmgr` wrapper. Reads state and dispatches
     commands via `sh`'s `_async=True` so the controller round-trips don't
-    block the event loop. See the `sh` reference rule for `_async` usage."""
+    block the event loop. See the `sh` reference rule for `_async` usage.
+
+    `exec_prefix` runs `sacctmgr` through another command rather than on the
+    host — e.g. `exec_prefix=['docker', 'exec', 'slurmctld']` to drive a
+    containerized controller (used by the CI integration test). When set, the
+    host is not probed for a `sacctmgr` binary; `sacctmgr_path` (default
+    `'sacctmgr'`) is resolved inside the target instead.
+    """
 
     def __init__(
-        self, *, sudo: bool = False, sacctmgr_path: str | None = None,
+        self,
+        *,
+        sudo: bool = False,
+        sacctmgr_path: str | None = None,
+        exec_prefix: list[str] | None = None,
     ) -> None:
-        path = sacctmgr_path or str(sh.which('sacctmgr')).strip()
-        if not path or not os.path.exists(path):
-            raise RuntimeError(f'sacctmgr not found (resolved to {path!r})')
-        self.path = path
-        if sudo:
-            self._base = sh.sudo.bake(path, '-iQ')
+        self.exec_prefix = list(exec_prefix) if exec_prefix else None
+        if self.exec_prefix:
+            # sacctmgr lives inside the target (e.g. a container); don't
+            # resolve or stat it on the host.
+            self.path = sacctmgr_path or 'sacctmgr'
+            runner = sh.Command(self.exec_prefix[0])
+            self._base = runner.bake(
+                *self.exec_prefix[1:], self.path, '-iQ',
+            )
         else:
-            self._base = sh.Command(path).bake('-iQ')
+            path = sacctmgr_path or str(sh.which('sacctmgr')).strip()
+            if not path or not os.path.exists(path):
+                raise RuntimeError(f'sacctmgr not found (resolved to {path!r})')
+            self.path = path
+            if sudo:
+                self._base = sh.sudo.bake(path, '-iQ')
+            else:
+                self._base = sh.Command(path).bake('-iQ')
         self._show = self._base.bake('show', '-P')
 
     async def show_qos(self) -> str:

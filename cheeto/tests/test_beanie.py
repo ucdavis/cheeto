@@ -4,6 +4,8 @@ Requires the session-scoped start_mongodb fixture from conftest.py
 which starts an ephemeral mongod with replica set support.
 """
 
+import os
+
 import pytest
 import pytest_asyncio
 from pymongo import AsyncMongoClient
@@ -2622,11 +2624,13 @@ class TestSyncUserToLDAPMembership:
         assert 'labgrp' not in result.extra['removed_groups']
 
 
-async def _seed_slurm_site(with_default=False):
+async def _seed_slurm_site(with_default=False, partition_name='hi'):
     """Seed a site with one group, a slurm account, partition, QOS, and an
     association, plus a slurm-eligible member (alice) and an ineligible one
     (bob, no slurm access). When `with_default`, mark the account sticky and
-    set it as the site's default account. Returns the Site."""
+    set it as the site's default account. `partition_name` lets the live
+    integration test use a partition the controller actually has (e.g. 'cpu').
+    Returns the Site."""
     site = Site(name='slsite', fqdn='sl.test')
     await site.insert()
 
@@ -2653,7 +2657,7 @@ async def _seed_slurm_site(with_default=False):
 
     account = SlurmAccount(group=group, site=site)
     await account.insert()
-    partition = SlurmPartition(name='hi', site=site)
+    partition = SlurmPartition(name=partition_name, site=site)
     await partition.insert()
     alloc = SlurmAllocation(tres=SlurmTRES(cpus=8, mem='16G'))
     await alloc.insert()
@@ -2924,3 +2928,40 @@ class TestSiteDefaultSlurmAccountOps:
             await SetSiteDefaultSlurmAccount.run(
                 beanie_client, None, sitename='slsite', groupname='nope',
             )
+
+
+@pytest.mark.skipif(
+    os.environ.get('CHEETO_SLURM_LIVE') != '1',
+    reason='requires a live slurm-docker-cluster controller; '
+           'set CHEETO_SLURM_LIVE=1 (CI slurm-integration job)',
+)
+class TestSlurmLive:
+    """End-to-end against a real slurmctld (giovtorres/slurm-docker-cluster)
+    reached via `docker exec slurmctld sacctmgr`. Gated on CHEETO_SLURM_LIVE
+    so it only runs in the CI job that brings the cluster up.
+
+    Validates what offline tests can't: that the hand-written parsers accept
+    real `sacctmgr show -P` output and that rendered commands are accepted by
+    a real controller, end to end through SyncSlurm."""
+
+    async def test_apply_then_converge(self, beanie_client):
+        from cheeto.slurm_sync import AsyncSAcctMgr
+        # partition 'cpu' is the default partition in slurm-docker-cluster.
+        site = await _seed_slurm_site(with_default=True, partition_name='cpu')
+        mgr = AsyncSAcctMgr(exec_prefix=['docker', 'exec', 'slurmctld'])
+
+        # A freshly-registered cluster has only root/normal (both protected),
+        # so a full apply is adds-only. max_deletions=0 makes the op abort
+        # rather than destructively delete an unexpected baseline entity.
+        r1 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=0,
+        )
+        for label, tally in r1['tally'].items():
+            assert tally['failed'] == 0, (label, tally, r1['plan'])
+
+        # Re-running must converge: the controller now matches desired state.
+        r2 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert r2['plan'] == {}, r2['plan']

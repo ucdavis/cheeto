@@ -243,3 +243,22 @@ class TestDefaultAccounts:
     def test_default_batch_not_counted_as_deletion(self):
         desired = SlurmSyncState(default_accounts={'bob': 'labacct'})
         assert count_deletions(reconcile(desired, SlurmSyncState())) == 0
+
+
+class TestAsyncSAcctMgrExecPrefix:
+
+    def test_exec_prefix_skips_host_resolution_and_prepends(self):
+        # exec_prefix must NOT probe the host for a sacctmgr binary, and must
+        # prepend the prefix to every command. 'env' stands in for the real
+        # 'docker exec <container>' used in CI.
+        from ..slurm_sync import AsyncSAcctMgr, CommandSpec
+        mgr = AsyncSAcctMgr(exec_prefix=['env'])
+        assert mgr.exec_prefix == ['env']
+        rendered = str(mgr.render(CommandSpec(
+            'modify', 'user',
+            ('set', 'defaultaccount=lab', 'where', 'user=alice'),
+        )))
+        assert 'env sacctmgr -iQ ' in rendered
+        assert rendered.endswith(
+            'modify user set defaultaccount=lab where user=alice'
+        )
