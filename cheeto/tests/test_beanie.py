@@ -70,6 +70,9 @@ from ..operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    SetSiteDefaultSlurmAccount,
+    ClearSiteDefaultSlurmAccount,
+    SyncSlurm,
     SyncUserToLDAP,
 )
 
@@ -2617,3 +2620,307 @@ class TestSyncUserToLDAPMembership:
 
         assert result.extra['removed_groups'] == ['oldgrp']
         assert 'labgrp' not in result.extra['removed_groups']
+
+
+async def _seed_slurm_site(with_default=False):
+    """Seed a site with one group, a slurm account, partition, QOS, and an
+    association, plus a slurm-eligible member (alice) and an ineligible one
+    (bob, no slurm access). When `with_default`, mark the account sticky and
+    set it as the site's default account. Returns the Site."""
+    site = Site(name='slsite', fqdn='sl.test')
+    await site.insert()
+
+    group = Group(name='sllab', gid=72000)
+    await group.insert()
+
+    alice = User(
+        name='sl_alice', email='a@sl.test', uid=72001, gid=72001,
+        fullname='Alice', home_directory='/home/a',
+        status=await status_link('active'),
+        access=await access_links(['login-ssh', 'slurm']),
+    )
+    bob = User(
+        name='sl_bob', email='b@sl.test', uid=72002, gid=72002,
+        fullname='Bob', home_directory='/home/b',
+        status=await status_link('active'),
+        access=await access_links(['login-ssh']),  # no slurm
+    )
+    await alice.insert()
+    await bob.insert()
+    for u in (alice, bob):
+        await UserSiteInfo(user=u, site=site, status=await status_link('active')).insert()
+        await GroupMembership(user=u, group=group, site=site, roles=['member']).insert()
+
+    account = SlurmAccount(group=group, site=site)
+    await account.insert()
+    partition = SlurmPartition(name='hi', site=site)
+    await partition.insert()
+    alloc = SlurmAllocation(tres=SlurmTRES(cpus=8, mem='16G'))
+    await alloc.insert()
+    qos = SlurmQOS(
+        name='sllab-q', site=site, group_limits=[alloc],
+        priority=10, flags=['DenyOnLimit'],
+    )
+    await qos.insert()
+    await SlurmAssociation(
+        site=site, account=account, partition=partition, qos=qos,
+    ).insert()
+
+    if with_default:
+        site.slurm.sticky = [account]
+        site.slurm.default_account = account
+        await site.save()
+        site = await Site.find_one(Site.name == 'slsite')
+    return site
+
+
+class TestBuildDesiredSlurmState:
+
+    async def test_desired_state_excludes_ineligible_users(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+        from cheeto.slurm_sync import AccountState, TRESLimit
+
+        site = await _seed_slurm_site()
+        state = await build_desired_slurm_state(site)
+
+        assert set(state.qos) == {'sllab-q'}
+        q = state.qos['sllab-q']
+        assert q.group == TRESLimit(cpus=8, mem_megs=16384)
+        assert q.priority == 10
+        assert q.flags == frozenset({'DenyOnLimit'})
+
+        # only the group with an eligible member's association is kept
+        assert state.accounts == {'sllab': AccountState()}
+        # alice is slurm-eligible; bob is not
+        assert state.associations == {('sl_alice', 'sllab', 'hi'): 'sllab-q'}
+        # no site default configured → no default accounts
+        assert state.default_accounts == {}
+
+    async def test_default_accounts_for_at_site_users(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(with_default=True)
+        state = await build_desired_slurm_state(site)
+        # the default account resolves to its owning group name, set for
+        # every at-site eligible user (alice; bob has no association)
+        assert state.default_accounts == {'sl_alice': 'sllab'}
+
+
+class _FakeSAcctMgr:
+    """Stand-in for AsyncSAcctMgr: serves a fixed current state and records
+    dispatched command strings (optionally failing chosen ones)."""
+
+    def __init__(self, current, fail_on=()):
+        self._current = current
+        self.fail_on = set(fail_on)
+        self.dispatched: list[str] = []
+
+    async def read_current_state(self):
+        return self._current
+
+    async def dispatch(self, spec):
+        import sh
+        self.dispatched.append(str(spec))
+        if str(spec) in self.fail_on:
+            raise sh.ErrorReturnCode_1('sacctmgr', b'', b'boom')
+        return None
+
+
+class TestSyncSlurmOperation:
+
+    async def test_dry_run_plans_without_dispatching(self, beanie_client):
+        from cheeto.slurm_sync import SlurmSyncState
+        site = await _seed_slurm_site()
+        fake = _FakeSAcctMgr(SlurmSyncState())  # empty current → all adds
+
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake, apply=False,
+        )
+        assert result['apply'] is False
+        assert fake.dispatched == []  # dry-run never dispatches
+        assert result['plan']['Add QOS']
+        assert result['plan']['Add accounts']
+        assert result['plan']['Add user associations']
+
+    async def test_apply_dispatches_in_batch_order(self, beanie_client):
+        from cheeto.slurm_sync import SlurmSyncState
+        site = await _seed_slurm_site()
+        fake = _FakeSAcctMgr(SlurmSyncState())
+
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake, apply=True,
+        )
+        # QOS add dispatched before the user-association add (account before user).
+        joined = '\n'.join(fake.dispatched)
+        assert 'add qos sllab-q' in joined
+        assert 'add account sllab' in joined
+        assert 'add user user=sl_alice' in joined
+        qos_idx = next(i for i, c in enumerate(fake.dispatched) if 'add qos' in c)
+        user_idx = next(i for i, c in enumerate(fake.dispatched) if 'add user' in c)
+        assert qos_idx < user_idx
+        assert result['tally']['Add QOS']['ok'] == 1
+
+    async def test_failed_command_tallied_without_aborting(self, beanie_client):
+        from cheeto.slurm_sync import SlurmSyncState
+        site = await _seed_slurm_site()
+        # Fail the QOS add; the rest should still run.
+        fake = _FakeSAcctMgr(
+            SlurmSyncState(),
+            fail_on={'sacctmgr -iQ add qos sllab-q '
+                     'GrpTRES=cpu=8,mem=16384,gres/gpu=-1 '
+                     'MaxTRESPerUser=cpu=-1,mem=-1,gres/gpu=-1 '
+                     'MaxTRESPerJob=cpu=-1,mem=-1,gres/gpu=-1 '
+                     'Flags=DenyOnLimit Priority=10'},
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake, apply=True,
+        )
+        assert result['tally']['Add QOS'] == {'ok': 0, 'failed': 1, 'total': 1}
+        # the account add still happened despite the QOS failure
+        assert result['tally']['Add accounts']['ok'] == 1
+
+    async def test_max_deletions_cap_aborts(self, beanie_client):
+        from cheeto.slurm_sync import AccountState, QOSState, SlurmSyncState, SlurmSyncAborted
+        site = await _seed_slurm_site()
+        # Current has extra entities absent from desired → deletions.
+        current = SlurmSyncState(
+            qos={'stale-q': QOSState()},
+            accounts={'stalelab': AccountState()},
+            associations={('ghost', 'stalelab', 'hi'): 'stale-q'},
+        )
+        fake = _FakeSAcctMgr(current)
+        with pytest.raises(SlurmSyncAborted):
+            await SyncSlurm.run(
+                beanie_client, None, sitename=site.name, sacctmgr=fake,
+                apply=True, max_deletions=1,
+            )
+        assert fake.dispatched == []  # aborted before any mutation
+
+    async def test_dry_run_over_cap_does_not_abort(self, beanie_client):
+        """The cap only gates apply; a dry-run preview shows the full plan
+        including deletions even when it exceeds the cap."""
+        from cheeto.slurm_sync import AccountState, QOSState, SlurmSyncState
+        site = await _seed_slurm_site()
+        current = SlurmSyncState(
+            qos={'stale-q': QOSState()},
+            accounts={'stalelab': AccountState()},
+            associations={('ghost', 'stalelab', 'hi'): 'stale-q'},
+        )
+        fake = _FakeSAcctMgr(current)
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake,
+            apply=False, max_deletions=1,
+        )
+        assert fake.dispatched == []
+        assert result['plan']['Delete QOS'] == ['sacctmgr -iQ remove qos stale-q']
+
+    async def test_offline_dump_idempotent(self, beanie_client):
+        """A DumpSAcctMgr whose captured state matches the site's desired
+        state yields an empty plan — offline idempotency."""
+        from cheeto.slurm_sync import DumpSAcctMgr
+        site = await _seed_slurm_site()
+        qos_dump = (
+            'Name|Priority|GrpTRES|MaxTRES|MaxTRESPU|Flags\n'
+            'sllab-q|10|cpu=8,mem=16384,gres/gpu=-1|||DenyOnLimit\n'
+        )
+        assoc_dump = (
+            'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
+            'sllab||||-1|-1|-1|-1\n'
+            'sllab|sl_alice|hi|sllab-q||||\n'
+        )
+        mgr = DumpSAcctMgr(qos_text=qos_dump, associations_text=assoc_dump)
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert result['plan'] == {}  # already in sync
+
+    async def test_default_account_set_for_new_user_offline(self, beanie_client):
+        """With a site default configured and an empty controller, the plan
+        re-points the at-site user's default account."""
+        from cheeto.slurm_sync import DumpSAcctMgr
+        site = await _seed_slurm_site(with_default=True)
+        mgr = DumpSAcctMgr()  # empty controller
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert result['plan']['Set user default accounts'] == [
+            'sacctmgr -iQ modify user set defaultaccount=sllab where user=sl_alice'
+        ]
+
+    async def test_default_account_idempotent_offline(self, beanie_client):
+        """When the controller dump already has the user defaulting to the
+        site default (and qos/assoc/accounts match), the plan is empty."""
+        from cheeto.slurm_sync import DumpSAcctMgr
+        site = await _seed_slurm_site(with_default=True)
+        qos_dump = (
+            'Name|Priority|GrpTRES|MaxTRES|MaxTRESPU|Flags\n'
+            'sllab-q|10|cpu=8,mem=16384,gres/gpu=-1|||DenyOnLimit\n'
+        )
+        assoc_dump = (
+            'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
+            'sllab||||-1|-1|-1|-1\n'
+            'sllab|sl_alice|hi|sllab-q||||\n'
+        )
+        user_dump = 'User|Def Acct\nsl_alice|sllab\n'
+        mgr = DumpSAcctMgr(
+            qos_text=qos_dump, associations_text=assoc_dump, user_text=user_dump,
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert result['plan'] == {}  # already in sync, defaults included
+
+
+
+
+class TestSiteDefaultSlurmAccountOps:
+
+    async def test_set_default_adds_sticky_and_sets_default(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        # seed creates the SlurmAccount for group 'sllab' but no default/sticky
+        site = await _seed_slurm_site()
+        assert site.slurm.default_account is None
+        assert site.slurm.sticky == []
+
+        await SetSiteDefaultSlurmAccount.run(
+            beanie_client, None, sitename='slsite', groupname='sllab',
+        )
+        site = await Site.find_one(Site.name == 'slsite')
+        # default set, and the account auto-added to sticky to satisfy the
+        # @before_event validator
+        assert link_target_id(site.slurm.default_account) is not None
+        assert len(site.slurm.sticky) == 1
+        assert link_target_id(site.slurm.default_account) == \
+            link_target_id(site.slurm.sticky[0])
+        # resolves to the owning group name
+        from cheeto.queries import resolve_slurm_account_label
+        assert await resolve_slurm_account_label(site.slurm.default_account) == 'sllab'
+
+    async def test_clear_default_leaves_sticky(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        site = await _seed_slurm_site()
+        await SetSiteDefaultSlurmAccount.run(
+            beanie_client, None, sitename='slsite', groupname='sllab',
+        )
+        await ClearSiteDefaultSlurmAccount.run(
+            beanie_client, None, sitename='slsite',
+        )
+        site = await Site.find_one(Site.name == 'slsite')
+        assert site.slurm.default_account is None
+        assert len(site.slurm.sticky) == 1  # still sticky
+
+    async def test_clear_default_idempotent(self, beanie_client):
+        await _seed_slurm_site()
+        # no default set → clear is a no-op, no error
+        await ClearSiteDefaultSlurmAccount.run(
+            beanie_client, None, sitename='slsite',
+        )
+        site = await Site.find_one(Site.name == 'slsite')
+        assert site.slurm.default_account is None
+
+    async def test_set_default_unknown_group_errors(self, beanie_client):
+        await _seed_slurm_site()
+        with pytest.raises(ValueError):
+            await SetSiteDefaultSlurmAccount.run(
+                beanie_client, None, sitename='slsite', groupname='nope',
+            )

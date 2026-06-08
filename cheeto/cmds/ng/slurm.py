@@ -1,4 +1,5 @@
 from argparse import Namespace
+from pathlib import Path
 
 from beanie import PydanticObjectId
 from ponderosa import ArgParser
@@ -23,7 +24,9 @@ from ...operations import (
     RemoveSlurmAssociation,
     RemoveSlurmPartition,
     RemoveSlurmQOS,
+    SyncSlurm,
 )
+from ...slurm_sync import DumpSAcctMgr, SlurmSyncAborted
 from ...queries.slurm import (
     QOSAllocation,
     list_allocations_at_site,
@@ -838,3 +841,104 @@ def _(parser: ArgParser):
                         help='Restrict to a single limit list')
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'sync',
+                   help="Reconcile a site's Slurm state onto the controller "
+                        "via sacctmgr (dry-run unless --apply)")
+async def slurm_sync(args: Namespace):
+    console = Console()
+    max_deletions = (
+        None if args.max_deletions is not None and args.max_deletions < 0
+        else args.max_deletions
+    )
+
+    # Offline mode: diff the site's desired state against captured
+    # `sacctmgr show -P` dumps instead of a live controller. Preview only —
+    # there's no controller to apply against.
+    sacctmgr = None
+    offline = bool(
+        args.from_qos_dump or args.from_assoc_dump or args.from_user_dump
+    )
+    if offline:
+        if args.apply:
+            console.print(
+                '[red]--apply cannot be combined with --from-*-dump; dump '
+                'mode is a preview against captured output only.[/]'
+            )
+            return 1
+        sacctmgr = DumpSAcctMgr.from_files(
+            args.from_qos_dump, args.from_assoc_dump, args.from_user_dump,
+        )
+
+    try:
+        result = await SyncSlurm.run(
+            args.db, args.author,
+            sitename=args.site,
+            sacctmgr=sacctmgr,
+            sudo=args.sudo,
+            apply=args.apply,
+            concurrency=args.concurrency,
+            max_deletions=max_deletions,
+            dump_commands=args.dump_commands,
+        )
+    except SlurmSyncAborted as e:
+        console.print(f'[red]{e}[/]')
+        for cmd in e.would_delete:
+            console.print(f'  [yellow]{cmd}[/]')
+        return 1
+
+    plan = result['plan']
+    if not plan:
+        console.print(
+            f'[green]Slurm state for {args.site} already in sync; '
+            f'nothing to do.[/]'
+        )
+        return
+
+    if offline:
+        mode = 'DRY-RUN (offline; diffed against dump)'
+    elif result['apply']:
+        mode = 'APPLIED'
+    else:
+        mode = 'DRY-RUN (use --apply to execute)'
+    console.print(f'[bold]Slurm sync for {args.site}[/] — {mode}')
+    for label, cmds in plan.items():
+        tally = result['tally'].get(label)
+        suffix = (
+            f' [dim](ok={tally["ok"]} failed={tally["failed"]})[/]'
+            if tally else ''
+        )
+        console.print(f'\n[bold cyan]{label}[/] ({len(cmds)}){suffix}')
+        for c in cmds:
+            console.print(f'  {c}')
+    if args.dump_commands:
+        console.print(f'\nWrote commands to [green]{args.dump_commands}[/]')
+
+
+@slurm_sync.args()
+def _(parser: ArgParser):
+    parser.add_argument('--apply', action='store_true', default=False,
+                        help='Execute the reconciliation (default: dry-run preview)')
+    parser.add_argument('--sudo', action='store_true', default=False,
+                        help='Invoke sacctmgr via sudo')
+    parser.add_argument('--concurrency', type=int, default=8,
+                        help='Max concurrent sacctmgr commands per batch')
+    parser.add_argument('--max-deletions', type=int, default=50,
+                        help='Abort before applying if the plan would delete '
+                             'more than this many entities; -1 disables the cap')
+    parser.add_argument('--dump-commands', type=Path, default=None,
+                        help='Write the planned sacctmgr commands to this file')
+    parser.add_argument('--from-qos-dump', type=Path, default=None,
+                        help='Read current QOS state from a saved '
+                             '`sacctmgr show -P qos` dump instead of the '
+                             'controller (offline preview; implies dry-run)')
+    parser.add_argument('--from-assoc-dump', type=Path, default=None,
+                        help='Read current association state from a saved '
+                             '`sacctmgr show -P associations` dump instead of '
+                             'the controller (offline preview; implies dry-run)')
+    parser.add_argument('--from-user-dump', type=Path, default=None,
+                        help='Read current user default accounts from a saved '
+                             '`sacctmgr show -P user format=User,DefaultAccount` '
+                             'dump instead of the controller (offline preview)')

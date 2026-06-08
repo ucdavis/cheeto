@@ -22,6 +22,7 @@ from .site import find_site_by_name
 from .slurm import (
     GroupSlurm,
     UserGroupSlurm,
+    build_desired_slurm_state,
     group_slurm_at_site,
     resolve_slurm_account_label,
     resolve_slurm_account_labels,

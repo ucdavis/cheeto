@@ -12,9 +12,11 @@ from ...models.site import Site
 from ...operations import (
     AddStickyGroup,
     AddStickySlurmAccount,
+    ClearSiteDefaultSlurmAccount,
     CreateSite,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
+    SetSiteDefaultSlurmAccount,
 )
 from ...puppet import PuppetAccountMap
 from ...queries import (
@@ -234,6 +236,54 @@ def _(parser: ArgParser):
         '--clear-default', action='store_true', default=False,
         help='Clear site.slurm.default_account if it points at this account',
     )
+
+
+# ---------------------------------------------------------------------------
+# `ng site slurm` — per-site slurm defaults
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'site', 'slurm',
+                   help='Per-site Slurm settings')
+def site_slurm_cmd(args: Namespace):
+    pass
+
+
+@site_args.apply(required=True)
+@group_args.apply(required=True)
+@commands.register('ng', 'site', 'slurm', 'set-default',
+                   help="Set a group's SlurmAccount as the site's default "
+                        "account (also adds it to site.slurm.sticky if needed)")
+async def site_slurm_set_default(args: Namespace):
+    console = Console()
+    try:
+        await SetSiteDefaultSlurmAccount.run(
+            args.db, args.author,
+            sitename=args.site, groupname=args.group,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Set [green]{args.group}[/] as the default slurm account for '
+        f'[bold]{args.site}[/]'
+    )
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'slurm', 'clear-default',
+                   help="Clear the site's default slurm account "
+                        "(leaves it in site.slurm.sticky)")
+async def site_slurm_clear_default(args: Namespace):
+    console = Console()
+    try:
+        await ClearSiteDefaultSlurmAccount.run(
+            args.db, args.author, sitename=args.site,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(f'Cleared the default slurm account for [bold]{args.site}[/]')
 
 
 # ---------------------------------------------------------------------------

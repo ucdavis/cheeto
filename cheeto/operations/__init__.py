@@ -2,9 +2,11 @@ from .base import Operation
 from .site import (
     AddStickyGroup,
     AddStickySlurmAccount,
+    ClearSiteDefaultSlurmAccount,
     CreateSite,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
+    SetSiteDefaultSlurmAccount,
 )
 from .user import (
     AddUserAccess,
@@ -51,6 +53,7 @@ from .slurm import (
     RemoveSlurmAssociation,
     RemoveSlurmPartition,
     RemoveSlurmQOS,
+    SyncSlurm,
 )
 from .iam import (
     ReapOffboardedUsers,

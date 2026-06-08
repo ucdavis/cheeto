@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import sh
 from beanie import PydanticObjectId
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
@@ -19,6 +22,15 @@ from ..models.slurm import (
     SlurmTRES,
 )
 from ..models.user import User
+from ..queries.slurm import build_desired_slurm_state
+from ..slurm_sync import (
+    AsyncSAcctMgr,
+    CommandBatch,
+    DumpSAcctMgr,
+    SlurmSyncAborted,
+    count_deletions,
+    reconcile,
+)
 from .base import UNSET, Operation
 
 
@@ -691,4 +703,134 @@ class ProvisionSlurmAllocation(Operation):
             'partition': self.partition_name,
             'qos': self.qos_name,
             'created_qos': self.created_qos,
+        }
+
+
+class SyncSlurm(Operation):
+    """Reconcile a site's desired Slurm state (from beanie) onto a live
+    controller via `sacctmgr`.
+
+    Reads desired state with `build_desired_slurm_state`, reads current state
+    from `sacctmgr`, diffs them, and emits ordered command batches. Dry-run by
+    default (returns the planned command strings); `apply=True` dispatches each
+    ordered batch concurrently (bounded by `concurrency`), tolerating per-command
+    failures. A `max_deletions` cap aborts before any mutation if the plan would
+    delete more than the cap (pass None to disable).
+
+    Not transactional: the side effects are external `sacctmgr` calls that can't
+    be rolled back, and a full sync can outlast the Mongo transaction lifetime.
+    """
+
+    op_name = 'sync_slurm'
+    transactional = False
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        sacctmgr: AsyncSAcctMgr | DumpSAcctMgr | None = None,
+        sudo: bool = False,
+        apply: bool = False,
+        concurrency: int = 8,
+        max_deletions: int | None = 50,
+        dump_commands: Path | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.sacctmgr = sacctmgr
+        self.sudo = sudo
+        self.apply = apply
+        self.concurrency = max(1, concurrency)
+        self.max_deletions = max_deletions
+        self.dump_commands = dump_commands
+        self._plan: dict[str, list[str]] = {}
+        self._tally: dict[str, dict[str, int]] = {}
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, Any]:
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        sacctmgr = self.sacctmgr or AsyncSAcctMgr(sudo=self.sudo)
+
+        desired = await build_desired_slurm_state(site)
+        current = await sacctmgr.read_current_state()
+        batches = reconcile(desired, current)
+
+        self._plan = {
+            b.label: [str(spec) for spec in b.specs] for b in batches if b.specs
+        }
+
+        # Blast-radius guard. Only enforced on apply — a dry-run preview
+        # should always show the full plan (deletions included).
+        deletions = count_deletions(batches)
+        if (
+            self.apply
+            and self.max_deletions is not None
+            and deletions > self.max_deletions
+        ):
+            would_delete = [
+                str(spec) for b in batches if b.is_deletion for spec in b.specs
+            ]
+            raise SlurmSyncAborted(
+                f'Sync would delete {deletions} Slurm entities, exceeding the '
+                f'cap of {self.max_deletions}. Pass --max-deletions=-1 to '
+                f'disable the cap.',
+                would_delete=would_delete,
+            )
+
+        if self.dump_commands is not None:
+            with self.dump_commands.open('w') as fp:
+                for b in batches:
+                    for spec in b.specs:
+                        print(str(spec), file=fp)
+
+        if self.apply:
+            await self._apply(sacctmgr, batches)
+
+        return {
+            'site': self.sitename,
+            'apply': self.apply,
+            'plan': dict(self._plan),
+            'tally': dict(self._tally),
+        }
+
+    async def _apply(
+        self, sacctmgr: AsyncSAcctMgr, batches: list[CommandBatch],
+    ) -> None:
+        """Dispatch each batch in order; within a batch run all commands
+        concurrently (they're order-independent). One command failing never
+        aborts the batch."""
+        sem = asyncio.Semaphore(self.concurrency)
+
+        for batch in batches:
+            if not batch.specs:
+                continue
+            tally = {'ok': 0, 'failed': 0, 'total': len(batch.specs)}
+
+            async def _one(spec, tally=tally):
+                async with sem:
+                    try:
+                        await sacctmgr.dispatch(spec)
+                    except sh.ErrorReturnCode as e:
+                        self.logger.warning(
+                            'slurm sync command failed: %s\n%s', spec, e,
+                        )
+                        tally['failed'] += 1
+                    else:
+                        tally['ok'] += 1
+
+            await asyncio.gather(*(_one(s) for s in batch.specs))
+            self._tally[batch.label] = tally
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.sitename,
+            'apply': self.apply,
+            'sudo': self.sudo,
+            'concurrency': self.concurrency,
+            'planned': {label: len(cmds) for label, cmds in self._plan.items()},
+            'tally': dict(self._tally),
         }

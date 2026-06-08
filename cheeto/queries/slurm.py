@@ -29,7 +29,8 @@ from ..models.slurm import (
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
 from ..utils import size_to_megs
-from .group import user_groups_at_site
+from .group import group_members_at_site, user_groups_at_site
+from .user import find_users
 
 
 def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
@@ -447,3 +448,107 @@ async def list_allocations_at_site(
     for q in qoses:
         out.extend(explode_qos_allocations(q, field=field))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Desired-state extraction for `ng slurm sync`
+# ---------------------------------------------------------------------------
+
+
+def _tres_limit(tres: SlurmTRES):
+    """Collapse a SlurmTRES into a normalized TRESLimit (mem → megabytes)."""
+    from ..slurm_sync import TRESLimit
+    return TRESLimit(
+        cpus=tres.cpus,
+        gpus=tres.gpus,
+        mem_megs=size_to_megs(tres.mem) if tres.mem else None,
+    )
+
+
+async def build_desired_slurm_state(site: Site):
+    """Assemble the site's desired Slurm state (QOS, accounts, associations)
+    from beanie into a `SlurmSyncState` for reconciliation against a
+    controller. Associations are the cross product of each group's
+    SlurmAssociations with its slurm-eligible members/slurmers at the site
+    (users whose effective access at the site includes `slurm`). Only
+    accounts that end up with at least one association are included.
+    """
+    from ..slurm_sync import (
+        AccountState,
+        PROTECTED_QOS,
+        QOSState,
+        SlurmSyncState,
+    )
+
+    state = SlurmSyncState()
+
+    # QOS: collapse each limit list into a single normalized TRES.
+    for qos in await list_qos_at_site(site):
+        if qos.name in PROTECTED_QOS:
+            continue
+        state.qos[qos.name] = QOSState(
+            group=_tres_limit(total_tres(qos.group_limits)),
+            user=_tres_limit(total_tres(qos.user_limits)),
+            job=_tres_limit(total_tres(qos.job_limits)),
+            priority=qos.priority,
+            flags=frozenset(qos.flags),
+        )
+
+    # slurm-eligible users at the site (effective access includes 'slurm').
+    eligible = {u.name for u in await find_users(access='slurm', site=site.name)}
+
+    # All accounts at the site, keyed by owning group name.
+    accounts = await SlurmAccount.find(
+        SlurmAccount.site.id == site.id, fetch_links=True, nesting_depth=1,
+    ).to_list()
+    account_state_by_group: dict[str, AccountState] = {}
+    for acct in accounts:
+        account_state_by_group[acct.group.name] = AccountState(
+            max_user_jobs=acct.limits.max_user_jobs,
+            max_group_jobs=acct.limits.max_group_jobs,
+            max_submit_jobs=acct.limits.max_submit_jobs,
+            max_job_length=acct.limits.max_job_length,
+        )
+
+    # Associations: each (group, partition, qos) × eligible members/slurmers.
+    roster_cache: dict[PydanticObjectId, set[str]] = {}
+    used_groups: set[str] = set()
+    for assoc in await list_associations_at_site(site):
+        group = assoc.account.group          # resolved at nesting_depth=2
+        partition_name = assoc.partition.name
+        qos_name = assoc.qos.name
+        if group.id not in roster_cache:
+            roster = await group_members_at_site(group, site)
+            roster_cache[group.id] = (
+                set(roster['members']) | set(roster['slurmers'])
+            )
+        members = roster_cache[group.id] & eligible
+        if members:
+            used_groups.add(group.name)
+        for username in members:
+            state.associations[(username, group.name, partition_name)] = qos_name
+
+    state.accounts = {
+        gname: acct for gname, acct in account_state_by_group.items()
+        if gname in used_groups
+    }
+
+    # Per-user default account. Today every at-site user resolves to the
+    # site's configured default; `_desired_default_account` is the seam for a
+    # future per-user override. Only users with at least one association are
+    # eligible (the default account is sticky, so they're associated with it).
+    site_default = await resolve_slurm_account_label(site.slurm.default_account)
+    if site_default is not None:
+        for (username, _account, _partition) in state.associations:
+            state.default_accounts[username] = _desired_default_account(
+                username, site_default,
+            )
+
+    return state
+
+
+def _desired_default_account(username: str, site_default: str) -> str:
+    """The default account a user should have at the site. Returns the site
+    default for now; the signature leaves room for a future per-user
+    override (e.g. a UserSiteInfo-level setting)."""
+    return site_default

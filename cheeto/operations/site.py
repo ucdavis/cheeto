@@ -242,3 +242,66 @@ class RemoveStickySlurmAccount(Operation):
             'groupname': self.groupname,
             'clear_default': self.clear_default,
         }
+
+
+class SetSiteDefaultSlurmAccount(Operation):
+    """Set the SlurmAccount for `(groupname, sitename)` as the site's
+    `default_account`. The account is also ensured to be in `site.slurm.sticky`
+    (the @before_event validator requires the default to be a sticky account),
+    so this works whether or not the account was already sticky."""
+
+    op_name = 'set_site_default_slurm_account'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        groupname: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.groupname = groupname
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        site, group = await _load_site_and_group(self.sitename, self.groupname)
+        account = await _load_slurm_account_for(site, group)
+
+        sticky_ids = {link_target_id(link) for link in site.slurm.sticky}
+        if account.id not in sticky_ids:
+            site.slurm.sticky.append(account)
+        site.slurm.default_account = account
+        await site.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {'sitename': self.sitename, 'groupname': self.groupname}
+
+
+class ClearSiteDefaultSlurmAccount(Operation):
+    """Clear the site's `default_account` (leaving the account in
+    `site.slurm.sticky`). Idempotent."""
+
+    op_name = 'clear_site_default_slurm_account'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+        if site.slurm.default_account is None:
+            return  # idempotent
+        site.slurm.default_account = None
+        await site.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {'sitename': self.sitename}
