@@ -5,6 +5,8 @@ from .site import (
     ClearSiteDefaultSlurmAccount,
     CreateSite,
     ExportRootSSHKeys,
+    ExportSympaEmails,
+    RemoveSite,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,

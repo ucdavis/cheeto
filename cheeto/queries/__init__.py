@@ -18,7 +18,7 @@ from .group import (
     user_groups_at_site,
 )
 from .puppet_legacy import site_to_puppet_legacy
-from .site import find_site_by_name
+from .site import count_site_dependents, find_site_by_name
 from .slurm import (
     GroupSlurm,
     UserGroupSlurm,

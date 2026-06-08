@@ -16,12 +16,15 @@ from ...operations import (
     ClearSiteDefaultSlurmAccount,
     CreateSite,
     ExportRootSSHKeys,
+    ExportSympaEmails,
+    RemoveSite,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
 )
 from ...puppet import PuppetAccountMap
 from ...queries import (
+    count_site_dependents,
     find_site_by_name,
     resolve_group_names,
     resolve_slurm_account_label,
@@ -53,6 +56,88 @@ async def site_new(args: Namespace):
 @site_new.args()
 def _(parser: ArgParser):
     parser.add_argument('--fqdn', required=True)
+
+
+# ---------------------------------------------------------------------------
+# `ng site list` / `ng site remove`
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'site', 'list',
+                   help='List all sites')
+async def site_list(args: Namespace):
+    console = Console()
+    sites = await Site.find_all().sort('+name').to_list()
+    if args.yaml:
+        console.print(highlight_yaml(dumps_yaml(
+            [{'name': s.name, 'fqdn': s.fqdn} for s in sites],
+        )))
+        return
+    table = Table(title=f'Sites (count={len(sites)})')
+    table.add_column('name', style='green', no_wrap=True)
+    table.add_column('fqdn', style='cyan')
+    for s in sites:
+        table.add_row(s.name, s.fqdn)
+    console.print(table)
+
+
+@site_list.args()
+def _(parser: ArgParser):
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'remove', aliases=['rm'],
+                   help='Remove a site and all of its per-site records '
+                        '(cascade)')
+async def site_remove(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    counts = await count_site_dependents(site)
+    total = sum(counts.values())
+    table = Table(
+        title=f'Records linked to [bold]{args.site}[/] (will be deleted)',
+        show_header=False, box=None, pad_edge=False, padding=(0, 1),
+    )
+    table.add_column(style='cyan', no_wrap=True)
+    table.add_column(justify='right')
+    for label, n in counts.items():
+        table.add_row(label, str(n))
+    console.print(table)
+
+    if not args.force:
+        console.print(
+            f'[red]This permanently deletes site [bold]{args.site}[/] and '
+            f'the {total} record(s) above.[/]'
+        )
+        try:
+            answer = input(f'Remove site {args.site}? [y/N]: ').strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[red]Aborted.[/]')
+            return 1
+        if answer != 'y':
+            console.print('[red]Aborted.[/]')
+            return 1
+
+    result = await RemoveSite.run(
+        args.db, args.author, sitename=args.site,
+    )
+    deleted = sum(result.values())
+    console.print(
+        f'Removed site [green]{args.site}[/] and {deleted} associated '
+        f'record(s)'
+    )
+
+
+@site_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('--force', '-f', action='store_true', default=False,
+                        help='Skip the confirmation prompt')
 
 
 # ---------------------------------------------------------------------------
@@ -351,3 +436,31 @@ def _(parser: ArgParser):
     parser.add_argument('--output', '-o', default=None,
                         help='Write authorized_keys to this path '
                              '(default: stdout)')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'export', 'sympa',
+                   help="Export site member emails (user/admin, not inactive) "
+                        "in Sympa format, one per line")
+async def site_export_sympa(args: Namespace):
+    console = Console()
+    try:
+        text = await ExportSympaEmails.run(
+            args.db, args.author, sitename=args.site, ignore=args.ignore,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    if args.output:
+        Path(args.output).write_text(text)
+        console.print(f'Wrote Sympa emails to [green]{args.output}[/]')
+    else:
+        sys.stdout.write(text)
+
+
+@site_export_sympa.args()
+def _(parser: ArgParser):
+    parser.add_argument('--output', '-o', default=None,
+                        help='Write emails to this path (default: stdout)')
+    parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu'],
+                        help='Emails to exclude from the list')

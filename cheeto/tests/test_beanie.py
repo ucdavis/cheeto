@@ -75,6 +75,8 @@ from ..operations import (
     SetSiteDefaultSlurmAccount,
     ClearSiteDefaultSlurmAccount,
     ExportRootSSHKeys,
+    ExportSympaEmails,
+    RemoveSite,
     SyncSlurm,
     SyncUserToLDAP,
 )
@@ -3051,3 +3053,172 @@ class TestExportRootSSHKeys:
     async def test_export_unknown_site_errors(self, beanie_client):
         with pytest.raises(ValueError):
             await ExportRootSSHKeys.run(beanie_client, None, sitename='nope')
+
+
+class TestExportSympaEmails:
+    """`ExportSympaEmails` lists user/admin emails at a site whose effective
+    status is not inactive (disabled/offboarding included, per v1), minus an
+    ignore set; sorted, one per line."""
+
+    async def _u(self, name, uid, *, type, status, site, usi_status=None):
+        user = User(
+            name=name, email=f'{name}@x.test', uid=uid, gid=uid,
+            fullname=name, home_directory=f'/home/{name}', type=type,
+            status=await status_link(status),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        if site is not None:
+            await UserSiteInfo(
+                user=user, site=site,
+                status=(await status_link(usi_status)) if usi_status else None,
+            ).insert()
+        return user
+
+    async def test_filters_and_format(self, beanie_client):
+        site = Site(name='sysite', fqdn='sy.test')
+        await site.insert()
+        other = Site(name='syother', fqdn='syo.test')
+        await other.insert()
+
+        await self._u('sy_user', 90001, type='user', status='active', site=site)
+        await self._u('sy_admin', 90002, type='admin', status='active', site=site)
+        # global inactive but per-site override active → included
+        await self._u('sy_override', 90003, type='user', status='inactive',
+                      site=site, usi_status='active')
+        # disabled / offboarding → included (v1 policy)
+        await self._u('sy_disabled', 90004, type='user', status='disabled', site=site)
+        await self._u('sy_offb', 90005, type='user', status='offboarding', site=site)
+        # excluded: inactive
+        await self._u('sy_inactive', 90006, type='user', status='inactive', site=site)
+        # excluded: non-user/admin types
+        await self._u('sy_system', 90007, type='system', status='active', site=site)
+        await self._u('sy_class', 90008, type='class', status='active', site=site)
+        # excluded: active but not on this site
+        await self._u('sy_offsite', 90009, type='user', status='active', site=other)
+        # excluded: in the ignore set
+        await self._u('hpc-help', 90010, type='admin', status='active', site=site)
+
+        text = await ExportSympaEmails.run(
+            beanie_client, None, sitename='sysite',
+            ignore=['hpc-help@x.test'],
+        )
+
+        assert text == (
+            'sy_admin@x.test\n'
+            'sy_disabled@x.test\n'
+            'sy_offb@x.test\n'
+            'sy_override@x.test\n'
+            'sy_user@x.test\n'
+        )
+        for excluded in ('sy_inactive', 'sy_system', 'sy_class',
+                         'sy_offsite', 'hpc-help@x.test'):
+            assert excluded not in text
+
+    async def test_default_ignore_and_empty(self, beanie_client):
+        # default ignore is hpc-help@ucdavis.edu
+        site = Site(name='syempty', fqdn='sye.test')
+        await site.insert()
+        await self._u('sy_help', 90020, type='admin', status='active', site=site)
+        # give them the default-ignored address
+        u = await User.find_one(User.name == 'sy_help')
+        u.email = 'hpc-help@ucdavis.edu'
+        await u.save()
+
+        text = await ExportSympaEmails.run(beanie_client, None, sitename='syempty')
+        assert text == ''  # only user is the ignored help address
+
+    async def test_unknown_site_errors(self, beanie_client):
+        with pytest.raises(ValueError):
+            await ExportSympaEmails.run(beanie_client, None, sitename='nope')
+
+
+class TestRemoveSite:
+    """`RemoveSite` cascade-deletes every per-site record (beanie has no
+    reverse cascade) and the site, leaving other sites and global records
+    untouched."""
+
+    async def test_count_and_cascade(self, beanie_client):
+        from cheeto.queries import count_site_dependents
+        from cheeto.queries.site import SITE_LINKED_MODELS
+        from cheeto.models.storage import AutomountMap
+
+        # primary site with the full spread of per-site records
+        site = await _seed_slurm_site()  # 'slsite': 2 USIs, 2 memberships,
+        #   1 account/partition/qos(+1 alloc)/association
+        alice = await User.find_one(User.name == 'sl_alice')
+        group = await Group.find_one(Group.name == 'sllab')
+        await Storage(
+            name='st1', site=site, type='zfs', category='home',
+            owner=alice, group=group, host='nas01',
+        ).insert()
+        await AutomountMap(name='home', site=site, prefix='/home').insert()
+        await HippoEvent(
+            hippo_id=1, hippo_endpoint='https://h.test',
+            action='CreateAccount', site=site,
+        ).insert()
+
+        # an independent second site that must survive untouched
+        other = Site(name='other_site', fqdn='o.test')
+        await other.insert()
+        ouser = User(
+            name='o_user', email='o@x.test', uid=73001, gid=73001,
+            fullname='O', home_directory='/home/o',
+            status=await status_link('active'),
+            access=await access_links(['slurm']),
+        )
+        await ouser.insert()
+        await UserSiteInfo(
+            user=ouser, site=other, status=await status_link('active'),
+        ).insert()
+        oalloc = SlurmAllocation(tres=SlurmTRES(cpus=4))
+        await oalloc.insert()
+        await SlurmQOS(name='o-qos', site=other, group_limits=[oalloc]).insert()
+
+        counts = await count_site_dependents(site)
+        assert counts == {
+            'user_site_info': 2,
+            'group_membership': 2,
+            'slurm_associations': 1,
+            'slurm_qos': 1,
+            'slurm_partitions': 1,
+            'slurm_accounts': 1,
+            'storage': 1,
+            'automount_maps': 1,
+            'hippo_events': 1,
+            'slurm_allocations': 1,
+        }
+
+        result = await RemoveSite.run(beanie_client, None, sitename='slsite')
+        assert result['site'] == 1
+        assert result['user_site_info'] == 2
+        assert result['slurm_allocations'] == 1
+
+        # everything for slsite is gone
+        assert await Site.find_one(Site.name == 'slsite') is None
+        for _label, model in SITE_LINKED_MODELS:
+            assert await model.find(model.site.id == site.id).count() == 0
+        # the site's allocation is gone; only the other site's remains
+        assert await SlurmAllocation.find_all().count() == 1
+
+        # global records untouched
+        assert await User.find_one(User.name == 'sl_alice') is not None
+        assert await Group.find_one(Group.name == 'sllab') is not None
+
+        # the second site is fully intact (no over-deletion)
+        assert await Site.find_one(Site.name == 'other_site') is not None
+        assert await UserSiteInfo.find(
+            UserSiteInfo.site.id == other.id,
+        ).count() == 1
+        assert await SlurmQOS.find(SlurmQOS.site.id == other.id).count() == 1
+
+    async def test_count_bare_site_all_zero(self, beanie_client):
+        from cheeto.queries import count_site_dependents
+        site = Site(name='baresite', fqdn='bare.test')
+        await site.insert()
+        counts = await count_site_dependents(site)
+        assert set(counts.values()) == {0}
+
+    async def test_remove_unknown_site_errors(self, beanie_client):
+        with pytest.raises(ValueError):
+            await RemoveSite.run(beanie_client, None, sitename='nope')

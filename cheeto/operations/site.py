@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from typing import Any
 
+from beanie.operators import In
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.base import link_target_id
 from ..models.site import Site
-from ..models.slurm import SlurmAccount
+from ..models.slurm import SlurmAccount, SlurmAllocation
 from ..models.user import User
+from ..models.user_site_info import UserSiteInfo
 from .base import Operation
 
 
@@ -374,3 +376,151 @@ class ExportRootSSHKeys(Operation):
             'users': self._user_count,
             'keys': self._key_count,
         }
+
+
+# ---------------------------------------------------------------------------
+# Sympa mailing-list email export
+# ---------------------------------------------------------------------------
+
+
+_DEFAULT_SYMPA_IGNORE = {'hpc-help@ucdavis.edu'}
+
+
+class ExportSympaEmails(Operation):
+    """Render a site's Sympa mailing-list feed: the emails of every `user`/
+    `admin` at the site whose effective per-site status is not `inactive`
+    (`disabled`/`offboarding` are included, matching v1), minus an ignore set.
+    One sorted, de-duplicated email per line.
+
+    Read-only; recorded in History.
+    """
+
+    op_name = 'export_sympa_emails'
+    transactional = False
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        ignore: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.ignore = (
+            set(ignore) if ignore is not None else set(_DEFAULT_SYMPA_IGNORE)
+        )
+        self._count = 0
+
+    async def execute(self, session: AsyncClientSession) -> str:
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        usis = await UserSiteInfo.find(
+            UserSiteInfo.site.id == site.id,
+        ).to_list()
+        if not usis:
+            return ''
+        usi_by_user = {usi.user.ref.id: usi for usi in usis}
+        users = await User.find(In(User.id, list(usi_by_user))).to_list()
+
+        # Preload status-name lookup so effective status resolves without a
+        # query per user.
+        status_name_by_id = {
+            sg.id: sg.status_name
+            for sg in await StatusGroup.find_all().to_list()
+        }
+
+        def _status_name(link) -> str | None:
+            if link is None:
+                return None
+            return status_name_by_id.get(link_target_id(link))
+
+        emails: set[str] = set()
+        for user in users:
+            if user.type not in ('user', 'admin'):
+                continue
+            usi = usi_by_user[user.id]
+            # USI status overrides the global status when set.
+            status = _status_name(usi.status or user.status)
+            if status == 'inactive':
+                continue
+            if user.email in self.ignore:
+                continue
+            emails.add(user.email)
+
+        self._count = len(emails)
+        if not emails:
+            return ''
+        return '\n'.join(sorted(emails)) + '\n'
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'sitename': self.sitename,
+            'emails': self._count,
+            'ignored': len(self.ignore),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Site removal (cascade)
+# ---------------------------------------------------------------------------
+
+
+class RemoveSite(Operation):
+    """Remove a site and every per-site record that links to it.
+
+    Beanie has no reverse cascade, so each linking collection
+    (`SITE_LINKED_MODELS`) is deleted explicitly, plus the `SlurmAllocation`
+    records owned by the site's QOSes (they carry no `site` field). Global
+    records (users, groups) are untouched. Transactional: the whole cascade
+    commits atomically.
+    """
+
+    op_name = 'remove_site'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self._deleted: dict[str, int] = {}
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        from ..queries.site import SITE_LINKED_MODELS, site_alloc_ids
+
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        deleted: dict[str, int] = {}
+
+        # Allocations first: they're found via the site's QOSes, which are
+        # deleted in the loop below.
+        alloc_ids = list(set(await site_alloc_ids(site)))
+        if alloc_ids:
+            res = await SlurmAllocation.find(
+                In(SlurmAllocation.id, alloc_ids),
+            ).delete(session=session)
+            deleted['slurm_allocations'] = getattr(res, 'deleted_count', 0)
+
+        for label, model in SITE_LINKED_MODELS:
+            res = await model.find(
+                model.site.id == site.id,
+            ).delete(session=session)
+            deleted[label] = getattr(res, 'deleted_count', 0)
+
+        await site.delete(session=session)
+        deleted['site'] = 1
+
+        self._deleted = deleted
+        return deleted
+
+    def describe(self) -> dict[str, Any]:
+        return {'sitename': self.sitename, **self._deleted}
