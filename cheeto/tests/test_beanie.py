@@ -33,8 +33,12 @@ from ..models.storage import (
     AutomountMap,
     MountOverrides,
     NFSExportConfig,
+    QuobyteConfig,
+    StaticMount,
     Storage,
     StorageAllocation,
+    StorageVolume,
+    ZFSConfig,
 )
 from ..models.hippo import HippoEvent
 from ..models.user_site_info import UserSiteInfo
@@ -394,76 +398,325 @@ class TestUserSiteInfoModel:
         assert {a.access_name for a in fetched.access} == {'login-ssh', 'slurm'}
 
 
+async def _seed_storage_actors(prefix: str, uid: int):
+    """User + personal group + site for storage tests."""
+    user = User(
+        name=prefix, email=f'{prefix}@test.com',
+        uid=uid, gid=uid, fullname=prefix,
+        home_directory=f'/home/{prefix}',
+    )
+    await user.insert()
+    group = Group(name=prefix, gid=uid)
+    await group.insert()
+    site = Site(name=f'{prefix}site', fqdn=f'{prefix}.hpc.test')
+    await site.insert()
+    return user, group, site
+
+
+async def _seed_volume(site, name='nas01vol', host='nas01',
+                       host_path='/nas01/vol', backend='zfs', **kwargs):
+    volume = StorageVolume(
+        name=name, site=site, backend=backend,
+        host=host, host_path=host_path,
+        **({'zfs': ZFSConfig()} if backend == 'zfs'
+           else {'quobyte': QuobyteConfig()}),
+        **kwargs,
+    )
+    await volume.insert()
+    return volume
+
+
 class TestStorageModel:
 
-    async def test_storage_quota_sums_allocations(self, beanie_client):
-        user = User(
-            name='storuser', email='stor@test.com',
-            uid=20020, gid=20020, fullname='Stor User',
-            home_directory='/home/storuser',
-        )
-        await user.insert()
-        group = Group(name='storuser', gid=20020)
-        await group.insert()
-        site = Site(name='storsite', fqdn='stor.hpc.test')
-        await site.insert()
-
-        storage = Storage(
-            name='storuser', site=site, type='zfs', category='home',
-            owner=user, group=group, host='nas01',
-            allocations=[
+    async def test_volume_quota_sums_allocations(self, beanie_client):
+        _, _, site = await _seed_storage_actors('storuser', 20020)
+        await _seed_volume(
+            site, allocations=[
                 StorageAllocation(quota='100G', comment='initial'),
                 StorageAllocation(quota='50G', comment='expansion'),
             ],
         )
-        await storage.insert()
-
-        fetched = await Storage.find_one(Storage.name == 'storuser')
+        fetched = await StorageVolume.find_one(StorageVolume.name == 'nas01vol')
         assert fetched.quota == '150G'
 
-    async def test_storage_no_allocations(self, beanie_client):
-        user = User(
-            name='noalloc', email='na@test.com',
-            uid=20021, gid=20021, fullname='No Alloc',
-            home_directory='/home/noalloc',
+    async def test_root_vs_subpath_storage_quota(self, beanie_client):
+        user, group, site = await _seed_storage_actors('subq', 20021)
+        volume = await _seed_volume(
+            site, allocations=[StorageAllocation(quota='70T')],
         )
-        await user.insert()
-        group = Group(name='noalloc', gid=20021)
-        await group.insert()
-        site = Site(name='nasite', fqdn='na.hpc.test')
-        await site.insert()
+        root = Storage(
+            name='rootstor', site=site, category='group',
+            owner=user, group=group, volume=volume, subpath='',
+        )
+        sub = Storage(
+            name='substor', site=site, category='home',
+            owner=user, group=group, volume=volume, subpath='subq',
+        )
+        await root.insert()
+        await sub.insert()
 
+        # `volume` is the fetched document on the in-memory objects.
+        assert root.quota == '70T'
+        assert sub.quota is None
+        assert root.host_path == '/nas01/vol'
+        assert sub.host_path == '/nas01/vol/subq'
+        assert sub.host == 'nas01'
+
+    async def test_unmounted_quobyte_storage(self, beanie_client):
+        user, group, site = await _seed_storage_actors('qbuser', 20022)
+        volume = await _seed_volume(
+            site, name='qbvol', host='qb01', host_path='/qb/vol',
+            backend='quobyte',
+        )
         storage = Storage(
-            name='noalloc', site=site, type='quobyte', category='home',
-            owner=user, group=group, host='qb01',
+            name='qbuser', site=site, category='home',
+            owner=user, group=group, volume=volume,
         )
         await storage.insert()
+        assert volume.quota is None
+        assert storage.mount_path == ''
+        assert storage.mount_options == []
 
-        fetched = await Storage.find_one(Storage.name == 'noalloc')
-        assert fetched.quota is None
+    async def test_backend_config_exclusivity(self, beanie_client):
+        _, _, site = await _seed_storage_actors('bce', 20023)
+        with pytest.raises(ValueError, match='QuobyteConfig'):
+            StorageVolume(
+                name='bad', site=site, backend='zfs',
+                host='h', host_path='/p', quobyte=QuobyteConfig(),
+            )
+        with pytest.raises(ValueError, match='ZFSConfig'):
+            StorageVolume(
+                name='bad2', site=site, backend='quobyte',
+                host='h', host_path='/p', zfs=ZFSConfig(),
+            )
+        # in-place mutation caught at save via before_event
+        volume = await _seed_volume(site)
+        volume.quobyte = QuobyteConfig()
+        with pytest.raises(ValueError, match='QuobyteConfig'):
+            await volume.save()
 
-    async def test_storage_without_automount(self, beanie_client):
-        user = User(
-            name='qbuser', email='qb@test.com',
-            uid=20022, gid=20022, fullname='QB User',
-            home_directory='/home/qbuser',
+    async def test_mount_mechanism_exclusivity(self, beanie_client):
+        user, group, site = await _seed_storage_actors('mme', 20024)
+        volume = await _seed_volume(site)
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        smount = StaticMount(
+            name='home', site=site, fstype='nfs4',
+            volume=volume, mount_path='/home',
         )
-        await user.insert()
-        group = Group(name='qbuser', gid=20022)
-        await group.insert()
-        site = Site(name='qbsite', fqdn='qb.hpc.test')
-        await site.insert()
+        await smount.insert()
 
+        with pytest.raises(ValueError, match='not both'):
+            Storage(
+                name='bad', site=site, category='home',
+                owner=user, group=group, volume=volume,
+                automount_map=amap, static_mount=smount,
+            )
+        with pytest.raises(ValueError, match='mount_name'):
+            Storage(
+                name='bad2', site=site, category='home',
+                owner=user, group=group, volume=volume,
+                static_mount=smount, mount_name='nope',
+            )
+        # mutate-then-save hole
         storage = Storage(
-            name='qbuser', site=site, type='quobyte', category='home',
-            owner=user, group=group, host='qb01',
+            name='ok', site=site, category='home',
+            owner=user, group=group, volume=volume,
+            automount_map=amap, mount_name='ok',
         )
         await storage.insert()
+        storage.static_mount = smount
+        with pytest.raises(ValueError, match='not both'):
+            await storage.save()
 
-        fetched = await Storage.find_one(Storage.name == 'qbuser')
-        assert fetched.automount_map is None
-        assert fetched.mount_path == ''
-        assert fetched.mount_options == []
+    async def test_automount_mount_path_and_options(self, beanie_client):
+        user, group, site = await _seed_storage_actors('amnt', 20025)
+        volume = await _seed_volume(site)
+        amap = AutomountMap(
+            name='group', site=site, prefix='/group',
+            options=['fstype=nfs', 'vers=4.2'],
+        )
+        await amap.insert()
+
+        merged = Storage(
+            name='merged', site=site, category='group',
+            owner=user, group=group, volume=volume,
+            automount_map=amap, mount_name='mergedmnt',
+            mount_overrides=MountOverrides(
+                add_options=['actimeo=60'], remove_options=['fstype=nfs'],
+            ),
+        )
+        replaced = Storage(
+            name='replaced', site=site, category='share',
+            owner=user, group=group, volume=volume,
+            automount_map=amap,
+            mount_overrides=MountOverrides(options=['rw', 'nosuid']),
+        )
+        assert merged.mount_path == '/group/mergedmnt'
+        assert merged.mount_options == ['actimeo=60', 'vers=4.2']
+        assert replaced.mount_path == '/group/replaced'  # falls back to name
+        assert replaced.mount_options == ['rw', 'nosuid']
+
+    async def test_static_mount_path_math(self, beanie_client):
+        user, group, site = await _seed_storage_actors('smath', 20026)
+        central = await _seed_volume(
+            site, name='home', host='192.168.211.74',
+            host_path='/flash/export/home',
+        )
+        child = await _seed_volume(
+            site, name='home/smath', host='192.168.211.74',
+            host_path='/flash/export/home/smath',
+            parent=central,
+        )
+        smount = StaticMount(
+            name='home', site=site, fstype='nfs4',
+            volume=central, mount_path='/home',
+            options=['defaults', '_netdev', 'vers=4.2'],
+        )
+        await smount.insert()
+
+        child_storage = Storage(
+            name='smath', site=site, category='home',
+            owner=user, group=group, volume=child,
+            static_mount=smount,
+        )
+        assert child_storage.mount_path == '/home/smath'
+        assert child_storage.mount_options == ['defaults', '_netdev', 'vers=4.2']
+
+        # equal path → the mount path itself
+        root_storage = Storage(
+            name='homeroot', site=site, category='share',
+            owner=user, group=group, volume=central,
+            static_mount=smount,
+        )
+        assert root_storage.mount_path == '/home'
+
+        # not under the mount → error
+        elsewhere = await _seed_volume(
+            site, name='other', host='192.168.211.74',
+            host_path='/flash/export/scratch',
+        )
+        bad = Storage(
+            name='bad', site=site, category='share',
+            owner=user, group=group, volume=elsewhere,
+            static_mount=smount,
+        )
+        with pytest.raises(ValueError, match='not under'):
+            bad.mount_path
+
+        # spec-only static mount → error
+        cvmfs = StaticMount(
+            name='cvmfs', site=site, fstype='cvmfs',
+            spec='cvmfs-config.cern.ch',
+            mount_path='/cvmfs/cvmfs-config.cern.ch',
+        )
+        await cvmfs.insert()
+        specbad = Storage(
+            name='specbad', site=site, category='share',
+            owner=user, group=group, volume=central,
+            static_mount=cvmfs,
+        )
+        with pytest.raises(ValueError, match='spec-only'):
+            specbad.mount_path
+
+    async def test_static_mount_validators(self, beanie_client):
+        _, _, site = await _seed_storage_actors('smv', 20027)
+        volume = await _seed_volume(site)
+
+        with pytest.raises(ValueError, match='volume or spec'):
+            StaticMount(name='neither', site=site, fstype='nfs4',
+                        mount_path='/x')
+        with pytest.raises(ValueError, match='mutually exclusive'):
+            StaticMount(name='both', site=site, fstype='nfs4',
+                        volume=volume, spec='spec', mount_path='/x')
+        with pytest.raises(ValueError, match='requires volume'):
+            StaticMount(name='subnospec', site=site, fstype='cvmfs',
+                        spec='repo.cern.ch', subpath='sub', mount_path='/x')
+        with pytest.raises(ValueError, match='Invalid mount fstype'):
+            StaticMount(name='badfs', site=site, fstype='ext4',
+                        volume=volume, mount_path='/x')
+        # cvmfs spec mount is fine, and device_spec returns the raw spec
+        ok = StaticMount(
+            name='cvmfs', site=site, fstype='cvmfs',
+            spec='cvmfs-config.cern.ch',
+            mount_path='/cvmfs/cvmfs-config.cern.ch',
+        )
+        assert ok.device_spec == 'cvmfs-config.cern.ch'
+        assert ok.host_path == ''
+        # volume-backed device_spec
+        vm = StaticMount(
+            name='vmnt', site=site, fstype='nfs4',
+            volume=volume, subpath='share', mount_path='/share',
+        )
+        assert vm.device_spec == 'nas01:/nas01/vol/share'
+
+    async def test_require_fetched_raises_on_unfetched(self, beanie_client):
+        user, group, site = await _seed_storage_actors('unf', 20028)
+        volume = await _seed_volume(site)
+        storage = Storage(
+            name='unf', site=site, category='home',
+            owner=user, group=group, volume=volume,
+        )
+        await storage.insert()
+        # plain find (no fetch_links) leaves volume as a Link proxy
+        fetched = await Storage.find_one(Storage.name == 'unf')
+        with pytest.raises(RuntimeError, match='unfetched Link'):
+            fetched.host
+        # fetched query works
+        resolved = await Storage.find_one(
+            Storage.name == 'unf', fetch_links=True, nesting_depth=1,
+        )
+        assert resolved.host == 'nas01'
+
+    async def test_legacy_farm_round_trip(self, beanie_client):
+        """The acid test: one 70T group ZFS volume backing three storages —
+        its root, a subdir group mount, and a subdir legacy home."""
+        owner, group, site = await _seed_storage_actors('ajfinger', 20029)
+        volume = await _seed_volume(
+            site, name='ajfingergrp', host='nas-4-1',
+            host_path='/nas-4-1/ajfingergrp',
+            allocations=[StorageAllocation(quota='70T')],
+        )
+        group_map = AutomountMap(
+            name='group', site=site, prefix='/group',
+            options=['fstype=nfs', 'actimeo=60', 'vers=4.2'],
+        )
+        home_map = AutomountMap(
+            name='home', site=site, prefix='/home',
+            options=['fstype=nfs', 'vers=4.2', 'actimeo=60'],
+        )
+        await group_map.insert()
+        await home_map.insert()
+
+        root = Storage(
+            name='ajfingerroot', site=site, category='group',
+            owner=owner, group=group, volume=volume, subpath='',
+            automount_map=group_map, mount_name='ajfingerroot',
+        )
+        subdir = Storage(
+            name='ajfingergrp', site=site, category='group',
+            owner=owner, group=group, volume=volume, subpath='ajfingergrp',
+            automount_map=group_map, mount_name='ajfingergrp',
+        )
+        home = Storage(
+            name='maccamp', site=site, category='home',
+            owner=owner, group=group, volume=volume, subpath='maccamp',
+            automount_map=home_map, mount_name='maccamp',
+        )
+        for s in (root, subdir, home):
+            await s.insert()
+
+        assert root.quota == '70T'
+        assert root.host_path == '/nas-4-1/ajfingergrp'
+        assert root.mount_path == '/group/ajfingerroot'
+
+        assert subdir.quota is None
+        assert subdir.host_path == '/nas-4-1/ajfingergrp/ajfingergrp'
+        assert subdir.mount_path == '/group/ajfingergrp'
+
+        assert home.quota is None
+        assert home.host_path == '/nas-4-1/ajfingergrp/maccamp'
+        assert home.mount_path == '/home/maccamp'
 
 
 class TestSlurmModels:
@@ -3148,9 +3401,14 @@ class TestRemoveSite:
         #   1 account/partition/qos(+1 alloc)/association
         alice = await User.find_one(User.name == 'sl_alice')
         group = await Group.find_one(Group.name == 'sllab')
+        st_volume = await _seed_volume(site)
         await Storage(
-            name='st1', site=site, type='zfs', category='home',
-            owner=alice, group=group, host='nas01',
+            name='st1', site=site, category='home',
+            owner=alice, group=group, volume=st_volume,
+        ).insert()
+        await StaticMount(
+            name='stmnt', site=site, fstype='nfs4',
+            volume=st_volume, mount_path='/stmnt',
         ).insert()
         await AutomountMap(name='home', site=site, prefix='/home').insert()
         await HippoEvent(
@@ -3184,6 +3442,8 @@ class TestRemoveSite:
             'slurm_partitions': 1,
             'slurm_accounts': 1,
             'storage': 1,
+            'static_mounts': 1,
+            'storage_volumes': 1,
             'automount_maps': 1,
             'hippo_events': 1,
             'slurm_allocations': 1,
@@ -3222,3 +3482,1116 @@ class TestRemoveSite:
     async def test_remove_unknown_site_errors(self, beanie_client):
         with pytest.raises(ValueError):
             await RemoveSite.run(beanie_client, None, sitename='nope')
+
+
+class TestSiteStorageSettings:
+
+    async def test_mount_mechanisms_mutually_exclusive(self, beanie_client):
+        from cheeto.models.site import SiteStorageSettings
+        site = Site(name='ssset', fqdn='ssset.test')
+        await site.insert()
+        volume = await _seed_volume(site)
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        smount = StaticMount(
+            name='home', site=site, fstype='nfs4',
+            volume=volume, mount_path='/home',
+        )
+        await smount.insert()
+
+        with pytest.raises(ValueError, match='mutually exclusive'):
+            SiteStorageSettings(
+                home_automount_map=amap, home_static_mount=smount,
+            )
+
+        # mutate-then-save hole closed by Site's before_event
+        site.storage.home_automount_map = amap
+        await site.save()
+        site.storage.home_static_mount = smount
+        with pytest.raises(ValueError, match='mutually exclusive'):
+            await site.save()
+
+    async def test_quota_pattern_enforced(self, beanie_client):
+        from cheeto.models.site import SiteStorageSettings
+        with pytest.raises(ValueError):
+            SiteStorageSettings(default_home_quota='not-a-quota')
+        ok = SiteStorageSettings(default_home_quota='20G')
+        assert ok.default_home_quota == '20G'
+
+
+class TestCreateHomeStorageOp:
+
+    async def _seed_site_with_defaults(self, beanie_client, *, static=False):
+        """Site with a central home volume + defaults + a home mount
+        mechanism, plus a user 'hsuser' with personal group."""
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name='hs_site', fqdn='hs.test')
+        await site.insert()
+        central = await _seed_volume(
+            site, name='home', host='flash01',
+            host_path='/flash/export/home',
+        )
+        if static:
+            mount = StaticMount(
+                name='home', site=site, fstype='nfs4',
+                volume=central, mount_path='/home',
+                options=['defaults', 'vers=4.2'],
+            )
+            await mount.insert()
+            await SetSiteStorageDefaults.run(
+                beanie_client, None, sitename='hs_site',
+                home_volume='home', home_quota='20G',
+                home_static_mount='home',
+            )
+        else:
+            amap = AutomountMap(
+                name='home', site=site, prefix='/home',
+                options=['fstype=nfs', 'vers=4.2'],
+            )
+            await amap.insert()
+            await SetSiteStorageDefaults.run(
+                beanie_client, None, sitename='hs_site',
+                home_volume='home', home_quota='20G',
+                home_automount_map='home',
+            )
+
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='hsuser', email='hs@test.com', uid=74001,
+            fullname='HS User',
+        )
+        return await Site.find_one(Site.name == 'hs_site')
+
+    async def test_site_defaults_path(self, beanie_client):
+        await self._seed_site_with_defaults(beanie_client)
+        storage = await CreateHomeStorage.run(
+            beanie_client, None,
+            user_name='hsuser', site_name='hs_site',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'home/hsuser', fetch_links=True,
+            nesting_depth=1,
+        )
+        assert volume is not None
+        assert volume.host == 'flash01'
+        assert volume.host_path == '/flash/export/home/hsuser'
+        assert volume.quota == '20G'
+        assert volume.parent.name == 'home'
+
+        fetched = await Storage.find_one(
+            Storage.name == 'hsuser', fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.category == 'home'
+        assert fetched.subpath == ''
+        assert fetched.quota == '20G'
+        assert fetched.mount_path == '/home/hsuser'
+
+    async def test_static_mount_site(self, beanie_client):
+        await self._seed_site_with_defaults(beanie_client, static=True)
+        await CreateHomeStorage.run(
+            beanie_client, None,
+            user_name='hsuser', site_name='hs_site',
+        )
+        fetched = await Storage.find_one(
+            Storage.name == 'hsuser', fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.automount_map is None
+        assert fetched.static_mount is not None
+        assert fetched.mount_path == '/home/hsuser'
+        assert fetched.mount_options == ['defaults', 'vers=4.2']
+
+    async def test_host_escape_hatch(self, beanie_client):
+        site = Site(name='hs_site', fqdn='hs.test')
+        await site.insert()
+        await CreateUser.run(
+            beanie_client, None,
+            name='hsuser', email='hs@test.com', uid=74001,
+            fullname='HS User',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None,
+            user_name='hsuser', site_name='hs_site',
+            host='nas99', quota='50G',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'home/hsuser',
+        )
+        assert volume.host == 'nas99'
+        assert volume.host_path == '/home/hsuser'
+        assert volume.quota == '50G'
+        assert volume.parent is None
+
+    async def test_no_defaults_no_args_errors(self, beanie_client):
+        site = Site(name='hs_site', fqdn='hs.test')
+        await site.insert()
+        await CreateUser.run(
+            beanie_client, None,
+            name='hsuser', email='hs@test.com', uid=74001,
+            fullname='HS User',
+        )
+        with pytest.raises(ValueError, match='no default home volume'):
+            await CreateHomeStorage.run(
+                beanie_client, None,
+                user_name='hsuser', site_name='hs_site',
+            )
+
+    async def test_duplicate_home_errors(self, beanie_client):
+        await self._seed_site_with_defaults(beanie_client)
+        await CreateHomeStorage.run(
+            beanie_client, None,
+            user_name='hsuser', site_name='hs_site',
+        )
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateHomeStorage.run(
+                beanie_client, None,
+                user_name='hsuser', site_name='hs_site',
+            )
+
+
+class TestMigrateStorage:
+    """v1 storage (collections + NFS/ZFS sources + automounts) → v2
+    (StorageVolume + Storage + AutomountMap), incl. the Farm legacy acid
+    test: subdir NFS exports of group ZFS volumes become subpath storages
+    on a single covering volume."""
+
+    def _connect_v1(self, dbname: str):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+
+        disconnect()
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database=dbname,
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        connection.drop_database(dbname)
+        return connection, mongo_cfg
+
+    @staticmethod
+    def _v1_actors(sitename: str):
+        """v1 site + GlobalUsers/GlobalGroups needed by source refs."""
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.user import GlobalUser as OldGlobalUser
+        from cheeto.database.group import GlobalGroup as OldGlobalGroup
+
+        OldSite(sitename=sitename, fqdn=f'{sitename}.test').save()
+        actors = {}
+        for i, name in enumerate(('ajfinger', 'maccamp', 'maccamp2')):
+            u = OldGlobalUser(
+                username=name, email=f'{name}@test.com',
+                uid=920000 + i, gid=920000 + i, fullname=name,
+                shell='/bin/bash', home_directory=f'/home/{name}',
+                type='user', status='active', access=['login-ssh'],
+            )
+            u.save()
+            actors[name] = u
+        groups = {}
+        for i, name in enumerate(('ajfingergrp', 'maccamp', 'maccamp2')):
+            g = OldGlobalGroup(groupname=name, gid=930000 + i, type='group')
+            g.save()
+            groups[name] = g
+        return actors, groups
+
+    async def _v2_actors(self, sitename: str):
+        site = Site(name=sitename, fqdn=f'{sitename}.test')
+        await site.insert()
+        for i, name in enumerate(('ajfinger', 'maccamp', 'maccamp2')):
+            await User(
+                name=name, email=f'{name}@test.com',
+                uid=920000 + i, gid=920000 + i, fullname=name,
+                home_directory=f'/home/{name}',
+            ).insert()
+        for i, name in enumerate(('ajfingergrp', 'maccamp', 'maccamp2')):
+            await Group(name=name, gid=930000 + i).insert()
+        return site
+
+    def _seed_farm_v1(self, sitename: str):
+        """The full Farm scenario: home collection w/ defaults, legacy 70T
+        group ZFS volume, subdir NFS exports (group + legacy home), a
+        new-style collection-resolved home, and the automounts/storages."""
+        from cheeto.database.storage import (
+            Automount as OldAutomount,
+            AutomountMap as OldAutomountMap,
+            NFSMountSource as OldNFSMountSource,
+            Storage as OldStorage,
+            ZFSMountSource as OldZFSMountSource,
+            ZFSSourceCollection,
+        )
+
+        actors, groups = self._v1_actors(sitename)
+
+        home_col = ZFSSourceCollection(
+            sitename=sitename, name='home',
+            _host='nas-12', prefix='/export/home', _quota='20G',
+        )
+        home_col.save()
+        group_col = ZFSSourceCollection(sitename=sitename, name='group')
+        group_col.save()
+
+        home_map = OldAutomountMap(
+            sitename=sitename, tablename='home', prefix='/home',
+            _options=['fstype=nfs', 'vers=4.2', 'actimeo=60'],
+        )
+        home_map.save()
+        group_map = OldAutomountMap(
+            sitename=sitename, tablename='group', prefix='/group',
+            _options=['fstype=nfs', 'actimeo=60', 'vers=4.2'],
+        )
+        group_map.save()
+
+        # Legacy group ZFS volume (name is a path, as load_group_storages
+        # wrote them).
+        zfs_grp = OldZFSMountSource(
+            name='/nas-4-1/ajfingergrp', sitename=sitename,
+            _host='nas-4-1', _host_path='/nas-4-1/ajfingergrp',
+            _quota='70T', owner=actors['ajfinger'],
+            group=groups['ajfingergrp'], collection=group_col,
+        )
+        zfs_grp.save()
+        # Subdir NFS exports carved out of it.
+        nfs_grp = OldNFSMountSource(
+            name='ajfingergrp', sitename=sitename,
+            _host='nas-4-1', _host_path='/nas-4-1/ajfingergrp/ajfingergrp',
+            owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            collection=group_col,
+        )
+        nfs_grp.save()
+        nfs_home = OldNFSMountSource(
+            name='maccamp', sitename=sitename,
+            _host='nas-4-1', _host_path='/nas-4-1/ajfingergrp/maccamp',
+            owner=actors['maccamp'], group=groups['maccamp'],
+            collection=home_col,
+        )
+        nfs_home.save()
+        # New-style home: everything resolves through the collection.
+        zfs_home2 = OldZFSMountSource(
+            name='maccamp2', sitename=sitename,
+            owner=actors['maccamp2'], group=groups['maccamp2'],
+            collection=home_col,
+        )
+        zfs_home2.save()
+
+        mounts = {}
+        for name, mmap, opts in (
+            ('ajfingerroot', group_map, ['fstype=nfs', 'actimeo=60', 'vers=4.2']),
+            ('ajfingergrp', group_map, None),
+            ('maccamp', home_map, None),
+            ('maccamp2', home_map, None),
+        ):
+            m = OldAutomount(
+                sitename=sitename, name=name, map=mmap,
+                _options=opts or [],
+            )
+            m.save()
+            mounts[name] = m
+
+        OldStorage(name='ajfingerroot', source=zfs_grp,
+                   mount=mounts['ajfingerroot']).save()
+        OldStorage(name='ajfingergrp', source=nfs_grp,
+                   mount=mounts['ajfingergrp']).save()
+        OldStorage(name='maccamp', source=nfs_home,
+                   mount=mounts['maccamp']).save()
+        OldStorage(name='maccamp2', source=zfs_home2,
+                   mount=mounts['maccamp2'], globus=True).save()
+
+    async def test_farm_acid(self, beanie_client):
+        from cheeto.operations import (
+            MigrateAutomountMaps,
+            MigrateStorageVolumes,
+            MigrateStorages,
+        )
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_test')
+        try:
+            self._seed_farm_v1('migfarm')
+            site = await self._v2_actors('migfarm')
+
+            await MigrateAutomountMaps.run(beanie_client, None)
+            await MigrateStorageVolumes.run(beanie_client, None)
+            await MigrateStorages.run(beanie_client, None)
+
+            # --- maps ---
+            home_map = await AutomountMap.find_one(
+                AutomountMap.name == 'home', AutomountMap.site.id == site.id,
+            )
+            assert home_map.prefix == '/home'
+            assert home_map.options == ['fstype=nfs', 'vers=4.2', 'actimeo=60']
+
+            # --- volumes: home root, ajfingergrp (70T), home/maccamp2 ---
+            vols = await StorageVolume.find(
+                StorageVolume.site.id == site.id,
+                fetch_links=True, nesting_depth=1,
+            ).to_list()
+            by_name = {v.name: v for v in vols}
+            assert set(by_name) == {'home', 'ajfingergrp', 'home/maccamp2'}
+
+            home_root = by_name['home']
+            assert home_root.host == 'nas-12'
+            assert home_root.host_path == '/export/home'
+            assert home_root.quota is None
+
+            grp_vol = by_name['ajfingergrp']
+            assert grp_vol.host == 'nas-4-1'
+            assert grp_vol.host_path == '/nas-4-1/ajfingergrp'
+            assert grp_vol.quota == '70T'
+            assert grp_vol.parent is None
+
+            home2 = by_name['home/maccamp2']
+            assert home2.host == 'nas-12'
+            assert home2.host_path == '/export/home/maccamp2'
+            assert home2.quota == '20G'   # from collection fallback
+            assert home2.parent.name == 'home'
+
+            # --- site storage defaults seeded from the home collection ---
+            site = await Site.find_one(Site.name == 'migfarm')
+            from cheeto.models.base import link_target_id
+            assert link_target_id(site.storage.default_home_volume) == home_root.id
+            assert site.storage.default_home_quota == '20G'
+
+            # --- storages ---
+            async def _stor(name, category):
+                s = await Storage.find_one(
+                    Storage.name == name, Storage.site.id == site.id,
+                    Storage.category == category,
+                    fetch_links=True, nesting_depth=2,
+                )
+                assert s is not None, (name, category)
+                return s
+
+            root = await _stor('ajfingerroot', 'group')
+            assert root.volume.name == 'ajfingergrp'
+            assert root.subpath == ''
+            assert root.quota == '70T'
+            assert root.mount_path == '/group/ajfingerroot'
+            # explicit v1 _options land as replace-overrides
+            assert root.mount_overrides.options == [
+                'fstype=nfs', 'actimeo=60', 'vers=4.2',
+            ]
+
+            subdir = await _stor('ajfingergrp', 'group')
+            assert subdir.volume.name == 'ajfingergrp'
+            assert subdir.subpath == 'ajfingergrp'
+            assert subdir.quota is None
+            assert subdir.mount_path == '/group/ajfingergrp'
+
+            home_stor = await _stor('maccamp', 'home')
+            assert home_stor.volume.name == 'ajfingergrp'
+            assert home_stor.subpath == 'maccamp'
+            assert home_stor.quota is None
+            assert home_stor.mount_path == '/home/maccamp'
+
+            home2_stor = await _stor('maccamp2', 'home')
+            assert home2_stor.volume.name == 'home/maccamp2'
+            assert home2_stor.subpath == ''
+            assert home2_stor.quota == '20G'
+            assert home2_stor.mount_path == '/home/maccamp2'
+            assert home2_stor.globus is True
+
+            # --- idempotent re-run: nothing new, settings untouched ---
+            n_vols = await StorageVolume.find_all().count()
+            n_stor = await Storage.find_all().count()
+            n_maps = await AutomountMap.find_all().count()
+            await MigrateAutomountMaps.run(beanie_client, None)
+            await MigrateStorageVolumes.run(beanie_client, None)
+            await MigrateStorages.run(beanie_client, None)
+            assert await StorageVolume.find_all().count() == n_vols
+            assert await Storage.find_all().count() == n_stor
+            assert await AutomountMap.find_all().count() == n_maps
+            site = await Site.find_one(Site.name == 'migfarm')
+            assert link_target_id(site.storage.default_home_volume) == home_root.id
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_unmatched_and_equal_path_nfs(self, beanie_client):
+        """An NFS source with no covering ZFS volume becomes a bare
+        unquota'd volume; one whose path equals a ZFS dataset root matches
+        it (subpath '')."""
+        from cheeto.database.storage import (
+            NFSMountSource as OldNFSMountSource,
+            ZFSMountSource as OldZFSMountSource,
+        )
+        from cheeto.operations import MigrateStorageVolumes
+
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_test2')
+        try:
+            actors, groups = self._v1_actors('mignfs')
+            await self._v2_actors('mignfs')
+
+            OldZFSMountSource(
+                name='dataset', sitename='mignfs',
+                _host='nasX', _host_path='/tank/dataset', _quota='1T',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            ).save()
+            # equal-path export of the dataset root → matched, no new volume
+            OldNFSMountSource(
+                name='dataset-export', sitename='mignfs',
+                _host='nasX', _host_path='/tank/dataset',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            ).save()
+            # uncovered export → bare volume
+            OldNFSMountSource(
+                name='loose', sitename='mignfs',
+                _host='nasX', _host_path='/tank/loose',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            ).save()
+
+            op = MigrateStorageVolumes(beanie_client, None)
+            await op._run()
+            assert op.zfs_volumes == 1
+            assert op.nfs_matched == 1
+            assert op.nfs_bare_volumes == 1
+
+            site = await Site.find_one(Site.name == 'mignfs')
+            vols = await StorageVolume.find(
+                StorageVolume.site.id == site.id,
+            ).to_list()
+            assert {v.name for v in vols} == {'dataset', 'loose'}
+            loose = next(v for v in vols if v.name == 'loose')
+            assert loose.quota is None
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_missing_owner_skips_storage_not_volume(self, beanie_client):
+        from cheeto.database.storage import (
+            Automount as OldAutomount,
+            AutomountMap as OldAutomountMap,
+            Storage as OldStorage,
+            ZFSMountSource as OldZFSMountSource,
+        )
+        from cheeto.operations import (
+            MigrateAutomountMaps,
+            MigrateStorageVolumes,
+            MigrateStorages,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_test3')
+        try:
+            actors, groups = self._v1_actors('migowner')
+            site = Site(name='migowner', fqdn='migowner.test')
+            await site.insert()
+            # v2 has NO users/groups → owner resolution must fail
+
+            src = OldZFSMountSource(
+                name='orphangrp', sitename='migowner',
+                _host='nasY', _host_path='/tank/orphangrp', _quota='5T',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            )
+            src.save()
+            gmap = OldAutomountMap(
+                sitename='migowner', tablename='group', prefix='/group',
+            )
+            gmap.save()
+            mount = OldAutomount(sitename='migowner', name='orphangrp', map=gmap)
+            mount.save()
+            OldStorage(name='orphangrp', source=src, mount=mount).save()
+
+            await MigrateAutomountMaps.run(beanie_client, None)
+            await MigrateStorageVolumes.run(beanie_client, None)
+            op = MigrateStorages(beanie_client, None)
+            await op._run()
+
+            assert op.owners_missing == 1
+            assert op.migrated == 0
+            # the volume still exists (it's a real dataset)
+            assert await StorageVolume.find(
+                StorageVolume.site.id == site.id,
+            ).count() == 1
+            assert await Storage.find(
+                Storage.site.id == site.id,
+            ).count() == 0
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_cross_site_source(self, beanie_client):
+        """v1 mount_source_site shape: source on site A, mount on site B →
+        v2 Storage on B, volume on A."""
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.storage import (
+            Automount as OldAutomount,
+            AutomountMap as OldAutomountMap,
+            Storage as OldStorage,
+            ZFSMountSource as OldZFSMountSource,
+        )
+        from cheeto.operations import (
+            MigrateAutomountMaps,
+            MigrateStorageVolumes,
+            MigrateStorages,
+        )
+        from cheeto.models.base import link_target_id
+
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_test4')
+        try:
+            actors, groups = self._v1_actors('migsrca')
+            OldSite(sitename='migmntb', fqdn='migmntb.test').save()
+            site_a = await self._v2_actors('migsrca')
+            site_b = Site(name='migmntb', fqdn='migmntb.test')
+            await site_b.insert()
+
+            src = OldZFSMountSource(
+                name='shared', sitename='migsrca',
+                _host='nasZ', _host_path='/tank/shared', _quota='10T',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+            )
+            src.save()
+            bmap = OldAutomountMap(
+                sitename='migmntb', tablename='group', prefix='/group',
+            )
+            bmap.save()
+            mount = OldAutomount(sitename='migmntb', name='shared', map=bmap)
+            mount.save()
+            OldStorage(name='shared', source=src, mount=mount).save()
+
+            await MigrateAutomountMaps.run(beanie_client, None)
+            await MigrateStorageVolumes.run(beanie_client, None)
+            op = MigrateStorages(beanie_client, None)
+            await op._run()
+
+            assert op.cross_site == 1
+            assert op.migrated == 1
+            storage = await Storage.find_one(Storage.name == 'shared')
+            assert link_target_id(storage.site) == site_b.id
+            volume = await StorageVolume.find_one(
+                StorageVolume.name == 'shared',
+            )
+            assert link_target_id(volume.site) == site_a.id
+        finally:
+            connection.drop_database(cfg.database)
+
+
+class TestMigrateSitesFilter:
+    """`--sites` restricts migration to the named v1 sites: deprecated
+    sites' records (site doc, USIs, membership edges, slurm, storage) are
+    never created in v2, and a deprecated site's per-site access is NOT
+    folded into the migrated global user access."""
+
+    def _connect_v1(self, dbname: str):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+
+        disconnect()
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database=dbname,
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        connection.drop_database(dbname)
+        return connection, mongo_cfg
+
+    def _seed_two_sites_v1(self):
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.user import GlobalUser as OldGlobalUser
+        from cheeto.database.user import SiteUser as OldSiteUser
+        from cheeto.database.group import (
+            GlobalGroup as OldGlobalGroup,
+            SiteGroup as OldSiteGroup,
+        )
+        from cheeto.database.slurm import SiteSlurmPartition
+        from cheeto.database.storage import (
+            Automount as OldAutomount,
+            AutomountMap as OldAutomountMap,
+            Storage as OldStorage,
+            ZFSMountSource as OldZFSMountSource,
+        )
+
+        OldSite(sitename='keepsite', fqdn='keep.test').save()
+        OldSite(sitename='depsite', fqdn='dep.test').save()
+
+        user = OldGlobalUser(
+            username='filtuser', email='filt@test.com',
+            uid=940001, gid=940001, fullname='Filt User',
+            shell='/bin/bash', home_directory='/home/filtuser',
+            type='user', status='active', access=['login-ssh'],
+        )
+        user.save()
+        su_keep = OldSiteUser(
+            username='filtuser', sitename='keepsite', parent=user,
+            _status='active',
+        )
+        su_keep.save()
+        # The deprecated site grants root-ssh — this must NOT fold into
+        # the migrated global access list.
+        su_dep = OldSiteUser(
+            username='filtuser', sitename='depsite', parent=user,
+            _status='active', _access=['root-ssh'],
+        )
+        su_dep.save()
+
+        grp = OldGlobalGroup(groupname='filtgrp', gid=950001, type='group')
+        grp.save()
+        OldSiteGroup(
+            groupname='filtgrp', sitename='keepsite', parent=grp,
+            _members=[su_keep],
+        ).save()
+        OldSiteGroup(
+            groupname='filtgrp', sitename='depsite', parent=grp,
+            _members=[su_dep],
+        ).save()
+
+        for sitename in ('keepsite', 'depsite'):
+            SiteSlurmPartition(
+                sitename=sitename, partitionname='low',
+            ).save()
+            amap = OldAutomountMap(
+                sitename=sitename, tablename='group', prefix='/group',
+                _options=['fstype=nfs'],
+            )
+            amap.save()
+            src = OldZFSMountSource(
+                name='filtgrp', sitename=sitename,
+                _host='nas-1', _host_path=f'/nas-1/{sitename}/filtgrp',
+                _quota='10T', owner=user, group=grp,
+            )
+            src.save()
+            mount = OldAutomount(
+                sitename=sitename, name='filtgrp', map=amap,
+            )
+            mount.save()
+            OldStorage(name='filtgrp', source=src, mount=mount).save()
+
+    async def test_filter_excludes_deprecated_site(self, beanie_client):
+        from cheeto.models.storage import StorageVolume
+        from cheeto.operations import (
+            MigrateAutomountMaps,
+            MigrateGroups,
+            MigrateSites,
+            MigrateSlurmPartitions,
+            MigrateStorageVolumes,
+            MigrateStorages,
+            MigrateUsers,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_filter_test')
+        try:
+            self._seed_two_sites_v1()
+            keep = ['keepsite']
+
+            # Instantiate directly so the filtered tally is inspectable.
+            sites_op = MigrateSites(beanie_client, None, sitenames=keep)
+            await sites_op._run()
+            assert sites_op.filtered == 1
+
+            await MigrateUsers.run(beanie_client, None, sitenames=keep)
+            await MigrateGroups.run(beanie_client, None, sitenames=keep)
+            await MigrateSlurmPartitions.run(beanie_client, None, sitenames=keep)
+            await MigrateAutomountMaps.run(beanie_client, None, sitenames=keep)
+            await MigrateStorageVolumes.run(beanie_client, None, sitenames=keep)
+            await MigrateStorages.run(beanie_client, None, sitenames=keep)
+
+            # Only the kept site exists in v2.
+            sites = await Site.find_all().to_list()
+            assert [s.name for s in sites] == ['keepsite']
+
+            # The user migrated, but the deprecated site's root-ssh access
+            # was NOT folded into the global list, and only the kept site's
+            # USI exists.
+            user = await User.find_one(User.name == 'filtuser')
+            assert user is not None
+            access = await access_links_to_names(user.access)
+            assert set(access) == {'login-ssh'}
+            usis = await UserSiteInfo.find(
+                UserSiteInfo.user.id == user.id, fetch_links=True,
+                nesting_depth=1,
+            ).to_list()
+            assert [usi.site.name for usi in usis] == ['keepsite']
+
+            # Membership edges only on the kept site.
+            edges = await GroupMembership.find_all().to_list()
+            assert len(edges) == 1
+
+            # Slurm + storage records only for the kept site.
+            assert await SlurmPartition.find_all().count() == 1
+            assert await AutomountMap.find_all().count() == 1
+            assert await StorageVolume.find_all().count() == 1
+            assert await Storage.find_all().count() == 1
+            vol = await StorageVolume.find_one({})
+            assert vol.host_path == '/nas-1/keepsite/filtgrp'
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_validate_sites_filter_typo_guard(self, beanie_client):
+        from cheeto.database.site import Site as OldSite
+        from cheeto.cmds.ng.migrate import _validate_sites_filter
+        from cheeto.log import Console
+
+        connection, cfg = self._connect_v1('cheeto_migrate_filter_typo')
+        try:
+            OldSite(sitename='realsite', fqdn='real.test').save()
+            console = Console()
+            assert _validate_sites_filter(console, None) is True
+            assert _validate_sites_filter(console, ['realsite']) is True
+            assert _validate_sites_filter(console, ['realsite', 'nope']) is False
+        finally:
+            connection.drop_database(cfg.database)
+
+
+class TestMigrateStorageDanglingRefs:
+    """Real v1 data contains dangling DBRefs (sources/collections whose
+    targets were deleted). The storage migration must quarantine those
+    records and keep going instead of aborting mid-batch with
+    mongoengine DoesNotExist."""
+
+    def _connect_v1(self, dbname: str):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+
+        disconnect()
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database=dbname,
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        connection.drop_database(dbname)
+        return connection, mongo_cfg
+
+    async def test_dangling_refs_quarantined(self, beanie_client):
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.user import GlobalUser as OldGlobalUser
+        from cheeto.database.group import GlobalGroup as OldGlobalGroup
+        from cheeto.database.storage import (
+            Automount as OldAutomount,
+            AutomountMap as OldAutomountMap,
+            Storage as OldStorage,
+            ZFSMountSource as OldZFSMountSource,
+            ZFSSourceCollection,
+        )
+        from cheeto.models.storage import StorageVolume
+        from cheeto.operations import (
+            MigrateAutomountMaps,
+            MigrateStorageVolumes,
+            MigrateStorages,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_dangle')
+        try:
+            OldSite(sitename='danglefarm', fqdn='dangle.test').save()
+            owner = OldGlobalUser(
+                username='dangler', email='d@test.com',
+                uid=960001, gid=960001, fullname='Dangler',
+                shell='/bin/bash', home_directory='/home/dangler',
+                type='user', status='active', access=['login-ssh'],
+            )
+            owner.save()
+            grp = OldGlobalGroup(groupname='danglegrp', gid=970001, type='group')
+            grp.save()
+
+            await Site(name='danglefarm', fqdn='dangle.test').insert()
+            await User(
+                name='dangler', email='d@test.com', uid=960001, gid=960001,
+                fullname='Dangler', home_directory='/home/dangler',
+            ).insert()
+            await Group(name='danglegrp', gid=970001).insert()
+
+            group_map = OldAutomountMap(
+                sitename='danglefarm', tablename='group', prefix='/group',
+            )
+            group_map.save()
+
+            # Good storage: fully intact.
+            good_src = OldZFSMountSource(
+                name='/nas-9/goodgrp', sitename='danglefarm',
+                _host='nas-9', _host_path='/nas-9/goodgrp', _quota='1T',
+                owner=owner, group=grp,
+            )
+            good_src.save()
+            good_mount = OldAutomount(
+                sitename='danglefarm', name='goodgrp', map=group_map,
+            )
+            good_mount.save()
+            OldStorage(name='goodgrp', source=good_src,
+                       mount=good_mount).save()
+
+            # Broken storage: its source is deleted after the Storage was
+            # saved, leaving a dangling DBRef (the production crash).
+            bad_src = OldZFSMountSource(
+                name='/nas-9/badgrp', sitename='danglefarm',
+                _host='nas-9', _host_path='/nas-9/badgrp', _quota='1T',
+                owner=owner, group=grp,
+            )
+            bad_src.save()
+            bad_mount = OldAutomount(
+                sitename='danglefarm', name='badgrp', map=group_map,
+            )
+            bad_mount.save()
+            OldStorage(name='badgrp', source=bad_src, mount=bad_mount).save()
+            bad_src.delete()
+
+            # Source whose COLLECTION dangles: resolves host/path through
+            # the (deleted) collection → must land in `unresolvable`.
+            dangle_col = ZFSSourceCollection(
+                sitename='danglefarm', name='home',
+                _host='nas-9', prefix='/nas-9/home', _quota='20G',
+            )
+            dangle_col.save()
+            col_src = OldZFSMountSource(
+                name='colhome', sitename='danglefarm',
+                owner=owner, group=grp, collection=dangle_col,
+            )
+            col_src.save()
+            dangle_col.delete()
+
+            await MigrateAutomountMaps.run(beanie_client, None)
+
+            vols_op = MigrateStorageVolumes(beanie_client, None)
+            await vols_op._run()
+            assert vols_op.unresolvable == 1   # col_src
+            # only the intact good_src became a volume (bad_src was deleted)
+            assert await StorageVolume.find_all().count() == 1
+
+            st_op = MigrateStorages(beanie_client, None)
+            await st_op._run()
+            assert st_op.dangling_refs == 1    # badgrp quarantined
+            assert st_op.migrated == 1         # goodgrp still migrated
+            assert await Storage.find_one(Storage.name == 'goodgrp') is not None
+            assert await Storage.find_one(Storage.name == 'badgrp') is None
+        finally:
+            connection.drop_database(cfg.database)
+
+
+class TestMigrateSiteGlobalsRerun:
+    """Re-running MigrateSiteGlobals against already-populated sticky lists
+    must be idempotent. Regression: beanie stores the embedded sticky links
+    as inline snapshots, so a reloaded site rehydrates them as full
+    Group/SlurmAccount documents (no .ref) — the dedup sets crashed with
+    AttributeError on the second run."""
+
+    def _connect_v1(self, dbname: str):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+
+        disconnect()
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database=dbname,
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        connection.drop_database(dbname)
+        return connection, mongo_cfg
+
+    async def test_rerun_with_populated_sticky(self, beanie_client):
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.group import (
+            GlobalGroup as OldGlobalGroup,
+            SiteGroup as OldSiteGroup,
+        )
+        from cheeto.operations import MigrateSiteGlobals
+
+        connection, cfg = self._connect_v1('cheeto_migrate_globals_rerun')
+        try:
+            grp_v1 = OldGlobalGroup(
+                groupname='globgrp', gid=980001, type='group',
+            )
+            grp_v1.save()
+            sg = OldSiteGroup(
+                groupname='globgrp', sitename='globsite', parent=grp_v1,
+            )
+            sg.save()
+            OldSite(
+                sitename='globsite', fqdn='glob.test',
+                global_groups=[sg], global_slurmers=[sg],
+            ).save()
+
+            site = Site(name='globsite', fqdn='glob.test')
+            await site.insert()
+            group = Group(name='globgrp', gid=980001)
+            await group.insert()
+            await SlurmAccount(group=group, site=site).insert()
+
+            op1 = MigrateSiteGlobals(beanie_client, None)
+            await op1._run()
+            assert op1.groups_added == 1
+            assert op1.slurmers_added == 1
+
+            # Second run: the site reloads with rehydrated sticky snapshots.
+            # Must dedup cleanly, adding nothing.
+            op2 = MigrateSiteGlobals(beanie_client, None)
+            await op2._run()
+            assert op2.groups_added == 0
+            assert op2.slurmers_added == 0
+            assert op2.sites_updated == 0
+
+            site = await Site.find_one(Site.name == 'globsite')
+            assert len(site.group.sticky) == 1
+            assert len(site.slurm.sticky) == 1
+        finally:
+            connection.drop_database(cfg.database)
+
+
+class TestNoLinksInEmbeddedModels:
+    """Tripwire: `Link`/`BackLink` may only be declared on Document classes.
+    Beanie discovers link fields by walking each Document's own top-level
+    model_fields at init — a Link nested inside an embedded BaseModel is
+    invisible to it and silently stores the linked document as an INLINE
+    SNAPSHOT (rehydrating as a full document with no .ref). Embedded models
+    must use `DocRef` (models/base.py) instead. This test makes the mine
+    impossible to re-plant."""
+
+    def test_no_links_in_embedded_models(self):
+        import typing
+
+        from beanie import Document, Link, BackLink
+        from pydantic import BaseModel as PydanticBaseModel
+
+        from cheeto.models import ALL_MODELS
+
+        def _contains_link(annotation) -> bool:
+            origin = typing.get_origin(annotation)
+            if origin in (Link, BackLink):
+                return True
+            return any(
+                _contains_link(arg) for arg in typing.get_args(annotation)
+            )
+
+        def _embedded_models(annotation, seen):
+            """Non-Document pydantic models reachable from an annotation."""
+            if (
+                isinstance(annotation, type)
+                and issubclass(annotation, PydanticBaseModel)
+                and not issubclass(annotation, Document)
+                and annotation not in seen
+            ):
+                seen.add(annotation)
+                yield annotation
+                for f in annotation.model_fields.values():
+                    yield from _embedded_models(f.annotation, seen)
+                return
+            for arg in typing.get_args(annotation):
+                yield from _embedded_models(arg, seen)
+
+        offenders = []
+        seen: set[type] = set()
+        for doc_model in ALL_MODELS:
+            for doc_field in doc_model.model_fields.values():
+                for embedded in _embedded_models(doc_field.annotation, seen):
+                    for name, f in embedded.model_fields.items():
+                        if _contains_link(f.annotation):
+                            offenders.append(
+                                f'{embedded.__name__}.{name}: {f.annotation}'
+                            )
+
+        assert not offenders, (
+            'Link/BackLink declared inside embedded (non-Document) models — '
+            'beanie cannot track these and will silently store inline '
+            'document snapshots. Use DocRef (cheeto/models/base.py) '
+            f'instead: {offenders}'
+        )
+
+    def test_no_underscore_named_event_hooks(self):
+        """Beanie's init_actions iterates dir(cls) and SILENTLY SKIPS any
+        attribute starting with '_' — an underscore-named @before_event/
+        @after_event hook is never registered and never fires. (Discovered
+        the hard way: `_normalize_settings`/`_revalidate` were dead letters
+        that only appeared to work because validate_self_before re-runs
+        pydantic validation on save/replace.)"""
+        from cheeto.models import ALL_MODELS
+
+        offenders = []
+        for doc_model in ALL_MODELS:
+            for attr in dir(doc_model):
+                f = getattr(doc_model, attr, None)
+                if (
+                    callable(f)
+                    and hasattr(f, 'has_action')
+                    and attr.startswith('_')
+                ):
+                    offenders.append(f'{doc_model.__name__}.{attr}')
+
+        assert not offenders, (
+            'Event hooks named with a leading underscore are silently '
+            'skipped by beanie init_actions and never fire — rename them '
+            f'to public names: {offenders}'
+        )
+
+
+class TestEmbeddedRefStorage:
+    """The Site*Settings DocRef fields must store bare ObjectIds in mongo —
+    never inline document snapshots — and must self-heal legacy snapshot
+    rows on read."""
+
+    async def _seed(self, sitename='refsite'):
+        site = Site(name=sitename, fqdn=f'{sitename}.test')
+        await site.insert()
+        group = Group(name=f'{sitename}grp', gid=991001)
+        await group.insert()
+        account = SlurmAccount(group=group, site=site)
+        await account.insert()
+        return site, group, account
+
+    @staticmethod
+    async def _raw_site(name):
+        return await Site.get_pymongo_collection().find_one({'name': name})
+
+    async def test_sticky_ops_store_bare_object_ids(self, beanie_client):
+        from bson import ObjectId
+        from cheeto.operations import AddStickySlurmAccount, AddStickyGroup
+
+        site, group, account = await self._seed('refops')
+        await AddStickySlurmAccount.run(
+            beanie_client, None, sitename='refops',
+            groupname='refopsgrp', default=True,
+        )
+        await AddStickyGroup.run(
+            beanie_client, None, sitename='refops', groupname='refopsgrp',
+        )
+
+        raw = await self._raw_site('refops')
+        assert raw['slurm']['sticky'] == [account.id]
+        assert type(raw['slurm']['sticky'][0]) is ObjectId
+        assert raw['slurm']['default_account'] == account.id
+        assert raw['group']['sticky'] == [group.id]
+
+    async def test_legacy_snapshot_self_heals(self, beanie_client):
+        """A stored inline snapshot (the damaged production shape) reads
+        back as a bare id, and the next save persists pure ObjectIds."""
+        from bson import ObjectId
+
+        site, group, account = await self._seed('refheal')
+        # Damage the row the way the old Link-in-embedded model did:
+        # a full inline copy of the account document.
+        snapshot = {
+            '_id': account.id,
+            'created_at': account.created_at,
+            'group': {'_id': group.id},
+            'site': {'_id': site.id},
+        }
+        await Site.get_pymongo_collection().update_one(
+            {'name': 'refheal'},
+            {'$set': {
+                'slurm.sticky': [snapshot],
+                'slurm.default_account': snapshot,
+            }},
+        )
+
+        loaded = await Site.find_one(Site.name == 'refheal')
+        assert loaded.slurm.sticky == [account.id]       # coerced on read
+        assert loaded.slurm.default_account == account.id
+
+        await loaded.save()
+        raw = await self._raw_site('refheal')
+        assert raw['slurm']['sticky'] == [account.id]
+        assert type(raw['slurm']['sticky'][0]) is ObjectId
+        assert type(raw['slurm']['default_account']) is ObjectId
+
+    async def test_inplace_document_append_normalized_at_save(
+        self, beanie_client,
+    ):
+        """Safety net: appending a full Document in place (bypassing
+        validation) still serializes as a bare id — the before_event
+        normalize-and-reassign coerces it."""
+        from bson import ObjectId
+
+        site, group, account = await self._seed('refappend')
+        site.slurm.sticky.append(account)        # full document, not an id
+        site.slurm.default_account = account     # ditto
+        await site.save()
+
+        raw = await self._raw_site('refappend')
+        assert raw['slurm']['sticky'] == [account.id]
+        assert type(raw['slurm']['sticky'][0]) is ObjectId
+        assert raw['slurm']['default_account'] == account.id

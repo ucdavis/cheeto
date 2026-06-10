@@ -21,6 +21,7 @@ from ...operations import (
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
+    SetSiteStorageDefaults,
 )
 from ...puppet import PuppetAccountMap
 from ...queries import (
@@ -371,6 +372,60 @@ async def site_slurm_clear_default(args: Namespace):
         console.print(f'[red]{e}[/]')
         return 1
     console.print(f'Cleared the default slurm account for [bold]{args.site}[/]')
+
+
+# ---------------------------------------------------------------------------
+# `ng site storage` — per-site storage defaults
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'site', 'storage',
+                   help='Per-site storage settings')
+def site_storage_cmd(args: Namespace):
+    pass
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'storage', 'set-defaults',
+                   help="Set the site's home-provisioning defaults "
+                        "(parent volume, quota, mount mechanism)")
+async def site_storage_set_defaults(args: Namespace):
+    console = Console()
+    if not any((args.home_volume, args.home_quota,
+                args.home_automount_map, args.home_static_mount)):
+        console.print('[red]Nothing to set; pass at least one option[/]')
+        return 1
+    if args.home_automount_map and args.home_static_mount:
+        console.print(
+            '[red]--home-automount-map and --home-static-mount are '
+            'mutually exclusive[/]'
+        )
+        return 1
+    try:
+        await SetSiteStorageDefaults.run(
+            args.db, args.author,
+            sitename=args.site,
+            home_volume=args.home_volume,
+            home_quota=args.home_quota,
+            home_automount_map=args.home_automount_map,
+            home_static_mount=args.home_static_mount,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(f'Updated storage defaults for [bold]{args.site}[/]')
+
+
+@site_storage_set_defaults.args()
+def _(parser: ArgParser):
+    parser.add_argument('--home-volume', default=None,
+                        help='Parent volume new homes are provisioned under')
+    parser.add_argument('--home-quota', default=None,
+                        help='Default quota for new homes (e.g. 20G)')
+    parser.add_argument('--home-automount-map', default=None,
+                        help='Automount map used for new homes')
+    parser.add_argument('--home-static-mount', default=None,
+                        help='Static mount used for new homes')
 
 
 # ---------------------------------------------------------------------------

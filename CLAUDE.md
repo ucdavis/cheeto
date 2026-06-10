@@ -76,6 +76,10 @@ Remember that `beanie` extends `pydantic` for its models: https://pydantic.dev/d
 
 Prefer defining Indexes via the `Settings` subclass rather than using the `Indexed` class. Prefer the `Annotated` pattern for field metadata.
 
+Two beanie traps with CI tripwires (`TestNoLinksInEmbeddedModels` in `cheeto/tests/test_beanie.py`):
+- `Link`/`BackLink` may only be declared on `Document` classes. Beanie never walks embedded `BaseModel`s, so a nested Link silently stores an inline document snapshot. Embedded models reference documents with `DocRef` (`cheeto/models/base.py`) — a bare ObjectId with a coercing validator.
+- `@before_event`/`@after_event` hook methods must NOT be underscore-prefixed — beanie's `init_actions` silently skips private attributes and the hook never fires.
+
 ## Jira scoping
 
 This repo's Jira work lives in a single project. Scope all Atlassian MCP tool calls to these values:

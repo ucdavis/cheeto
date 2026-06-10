@@ -88,7 +88,7 @@ ACCESS_TYPES : Final = (
 
 EMAIL_REGEX = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
-STORAGE_TYPES : Final = (
+STORAGE_BACKENDS : Final = (
     'zfs',
     'quobyte',
 )
@@ -97,6 +97,12 @@ STORAGE_CATEGORIES : Final = (
     'home',
     'group',
     'share',
+)
+
+MOUNT_FSTYPES : Final = (
+    'nfs',
+    'nfs4',
+    'cvmfs',
 )
 
 SLURM_QOS_VALID_FLAGS : Final = (

@@ -94,10 +94,9 @@ class AddStickyGroup(Operation):
                 f'Group {self.groupname!r} is an access/status group; not '
                 f'eligible for site.group.sticky'
             )
-        sticky_ids = {link_target_id(link) for link in site.group.sticky}
-        if group.id in sticky_ids:
+        if group.id in set(site.group.sticky):
             return  # idempotent
-        site.group.sticky.append(group)
+        site.group.sticky.append(group.id)
         await site.save(session=session)
 
     def describe(self) -> dict[str, Any]:
@@ -125,8 +124,7 @@ class RemoveStickyGroup(Operation):
         site, group = await _load_site_and_group(self.sitename, self.groupname)
         before = len(site.group.sticky)
         site.group.sticky = [
-            link for link in site.group.sticky
-            if link_target_id(link) != group.id
+            ref for ref in site.group.sticky if ref != group.id
         ]
         if len(site.group.sticky) == before:
             return  # nothing to remove
@@ -176,11 +174,10 @@ class AddStickySlurmAccount(Operation):
         site, group = await _load_site_and_group(self.sitename, self.groupname)
         account = await _load_slurm_account_for(site, group)
 
-        sticky_ids = {link_target_id(link) for link in site.slurm.sticky}
-        if account.id not in sticky_ids:
-            site.slurm.sticky.append(account)
+        if account.id not in set(site.slurm.sticky):
+            site.slurm.sticky.append(account.id)
         if self.default:
-            site.slurm.default_account = account
+            site.slurm.default_account = account.id
         await site.save(session=session)
 
     def describe(self) -> dict[str, Any]:
@@ -220,7 +217,7 @@ class RemoveStickySlurmAccount(Operation):
         site, group = await _load_site_and_group(self.sitename, self.groupname)
         account = await _load_slurm_account_for(site, group)
 
-        if link_target_id(site.slurm.default_account) == account.id:
+        if site.slurm.default_account == account.id:
             if not self.clear_default:
                 raise ValueError(
                     f'SlurmAccount for {self.groupname!r} is set as '
@@ -231,8 +228,7 @@ class RemoveStickySlurmAccount(Operation):
 
         before = len(site.slurm.sticky)
         site.slurm.sticky = [
-            link for link in site.slurm.sticky
-            if link_target_id(link) != account.id
+            ref for ref in site.slurm.sticky if ref != account.id
         ]
         if len(site.slurm.sticky) == before and site.slurm.default_account is not None:
             return  # nothing changed
@@ -270,10 +266,9 @@ class SetSiteDefaultSlurmAccount(Operation):
         site, group = await _load_site_and_group(self.sitename, self.groupname)
         account = await _load_slurm_account_for(site, group)
 
-        sticky_ids = {link_target_id(link) for link in site.slurm.sticky}
-        if account.id not in sticky_ids:
-            site.slurm.sticky.append(account)
-        site.slurm.default_account = account
+        if account.id not in set(site.slurm.sticky):
+            site.slurm.sticky.append(account.id)
+        site.slurm.default_account = account.id
         await site.save(session=session)
 
     def describe(self) -> dict[str, Any]:
@@ -307,6 +302,93 @@ class ClearSiteDefaultSlurmAccount(Operation):
 
     def describe(self) -> dict[str, Any]:
         return {'sitename': self.sitename}
+
+
+class SetSiteStorageDefaults(Operation):
+    """Set the site's storage defaults (`SiteStorageSettings`): the parent
+    volume new homes are provisioned under, the default home quota, and the
+    home mount mechanism. Only the kwargs passed are changed; the embedded
+    validator enforces automount/static exclusivity (clear one by setting
+    the other)."""
+
+    op_name = 'set_site_storage_defaults'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        home_volume: str | None = None,
+        home_quota: str | None = None,
+        home_automount_map: str | None = None,
+        home_static_mount: str | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.home_volume = home_volume
+        self.home_quota = home_quota
+        self.home_automount_map = home_automount_map
+        self.home_static_mount = home_static_mount
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        from ..models.storage import AutomountMap, StaticMount, StorageVolume
+
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        if self.home_volume is not None:
+            volume = await StorageVolume.find_one(
+                StorageVolume.name == self.home_volume,
+                StorageVolume.site.id == site.id,
+            )
+            if volume is None:
+                raise ValueError(
+                    f'Volume {self.home_volume!r} does not exist on '
+                    f'{self.sitename!r}'
+                )
+            site.storage.default_home_volume = volume.id
+
+        if self.home_quota is not None:
+            site.storage.default_home_quota = self.home_quota
+
+        if self.home_automount_map is not None:
+            amap = await AutomountMap.find_one(
+                AutomountMap.name == self.home_automount_map,
+                AutomountMap.site.id == site.id,
+            )
+            if amap is None:
+                raise ValueError(
+                    f'AutomountMap {self.home_automount_map!r} does not '
+                    f'exist on {self.sitename!r}'
+                )
+            site.storage.home_automount_map = amap.id
+            site.storage.home_static_mount = None
+
+        if self.home_static_mount is not None:
+            smount = await StaticMount.find_one(
+                StaticMount.name == self.home_static_mount,
+                StaticMount.site.id == site.id,
+            )
+            if smount is None:
+                raise ValueError(
+                    f'StaticMount {self.home_static_mount!r} does not '
+                    f'exist on {self.sitename!r}'
+                )
+            site.storage.home_static_mount = smount.id
+            site.storage.home_automount_map = None
+
+        await site.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'sitename': self.sitename,
+            'home_volume': self.home_volume,
+            'home_quota': self.home_quota,
+            'home_automount_map': self.home_automount_map,
+            'home_static_mount': self.home_static_mount,
+        }
 
 
 # ---------------------------------------------------------------------------

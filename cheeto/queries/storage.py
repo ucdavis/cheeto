@@ -1,13 +1,19 @@
 """Storage-related read-only query helpers.
 
-Pure read functions used by the LDAP sync operations to find Storage rows
-that need to be projected as automount entries.
+Pure read functions used by the LDAP sync operations and the storage CLI.
+
+Depth guide: `nesting_depth=1` resolves `Storage.volume` and
+`Storage.automount_map` — enough for host/host_path/quota/mount_options and
+automount mount_path (volume host/host_path are concrete, never resolved
+through `parent`). Static-mount `mount_path` additionally needs
+`static_mount.volume` fetched, i.e. `nesting_depth=2` — only `get_storage`
+and the CLI listing use that.
 """
 
 from __future__ import annotations
 
 from ..models.site import Site
-from ..models.storage import Storage
+from ..models.storage import StaticMount, Storage, StorageVolume
 
 
 async def list_automap_storages(site: Site, category: str) -> list[Storage]:
@@ -15,7 +21,8 @@ async def list_automap_storages(site: Site, category: str) -> list[Storage]:
     automount_map (i.e. are intended to be projected into LDAP autofs).
 
     `category` is one of 'home' / 'group' (matching v1's
-    `query_automap_storages` semantics)."""
+    `query_automap_storages` semantics). Depth 1 resolves `volume` and
+    `automount_map`, which is all the LDAP projection needs."""
     return await Storage.find(
         Storage.site.id == site.id,
         Storage.category == category,
@@ -23,6 +30,71 @@ async def list_automap_storages(site: Site, category: str) -> list[Storage]:
         fetch_links=True,
         nesting_depth=1,
     ).to_list()
+
+
+async def find_volume(site: Site, name: str) -> StorageVolume | None:
+    return await StorageVolume.find_one(
+        StorageVolume.name == name,
+        StorageVolume.site.id == site.id,
+    )
+
+
+async def list_site_volumes(site: Site) -> list[StorageVolume]:
+    return await StorageVolume.find(
+        StorageVolume.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    ).sort('+name').to_list()
+
+
+async def find_static_mount(site: Site, name: str) -> StaticMount | None:
+    return await StaticMount.find_one(
+        StaticMount.name == name,
+        StaticMount.site.id == site.id,
+    )
+
+
+async def list_site_static_mounts(site: Site) -> list[StaticMount]:
+    """Depth 1 resolves `.volume`, enabling `device_spec`/`host_path`."""
+    return await StaticMount.find(
+        StaticMount.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    ).sort('+mount_path').to_list()
+
+
+async def get_storage(
+    site: Site, name: str, category: str | None = None,
+) -> Storage | None:
+    """Fetch one Storage with everything its derived properties need —
+    including static-mount `mount_path` (depth 2 resolves
+    `static_mount.volume`)."""
+    filters = [
+        Storage.name == name,
+        Storage.site.id == site.id,
+    ]
+    if category is not None:
+        filters.append(Storage.category == category)
+    return await Storage.find_one(
+        *filters,
+        fetch_links=True,
+        nesting_depth=2,
+    )
+
+
+async def list_site_storages(
+    site: Site, category: str | None = None,
+) -> list[Storage]:
+    """All Storage records at a site, fully resolved (depth 2) so
+    mount_path works for both automount and static mounts."""
+    filters = [Storage.site.id == site.id]
+    if category is not None:
+        filters.append(Storage.category == category)
+    return await Storage.find(
+        *filters,
+        fetch_links=True,
+        nesting_depth=2,
+    ).sort('+name').to_list()
 
 
 async def list_admin_root_ssh_keys(site: Site) -> list[str]:

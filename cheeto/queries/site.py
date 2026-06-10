@@ -22,8 +22,13 @@ def _build_site_linked_models() -> list[tuple[str, type]]:
     """(label, model) for every collection holding a `site: Link[Site]` — the
     single source of truth for both `count_site_dependents` and the cascade
     delete in `RemoveSite`, so the two never drift. Beanie has no reverse
-    cascade, so removing a site must delete each of these explicitly."""
-    from ..models.storage import AutomountMap, Storage
+    cascade, so removing a site must delete each of these explicitly.
+
+    Order is delete-safe: referencing collections come before the ones they
+    reference (storage → static_mounts → storage_volumes). StorageVolume's
+    `parent` self-link is fine — parents and children die in the same bulk
+    delete."""
+    from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
     from ..models.user_site_info import UserSiteInfo
     from ..models.group_membership import GroupMembership
     from ..models.hippo import HippoEvent
@@ -35,6 +40,8 @@ def _build_site_linked_models() -> list[tuple[str, type]]:
         ('slurm_partitions', SlurmPartition),
         ('slurm_accounts', SlurmAccount),
         ('storage', Storage),
+        ('static_mounts', StaticMount),
+        ('storage_volumes', StorageVolume),
         ('automount_maps', AutomountMap),
         ('hippo_events', HippoEvent),
     ]

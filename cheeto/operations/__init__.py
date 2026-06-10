@@ -10,6 +10,7 @@ from .site import (
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
+    SetSiteStorageDefaults,
 )
 from .user import (
     AddUserAccess,
@@ -74,9 +75,14 @@ from .ldap import (
     SyncSiteLDAP,
     SyncUserToLDAP,
 )
-from .storage import CreateHomeStorage
+from .storage import (
+    CreateHomeStorage,
+    CreateStaticMount,
+    CreateStorageVolume,
+)
 from .migrate import (
     MigrateAccessStatusGroups,
+    MigrateAutomountMaps,
     MigrateGroups,
     MigrateSiteGlobals,
     MigrateSites,
@@ -84,6 +90,8 @@ from .migrate import (
     MigrateSlurmAssociations,
     MigrateSlurmPartitions,
     MigrateSlurmQOSes,
+    MigrateStorageVolumes,
+    MigrateStorages,
     MigrateUser,
     MigrateUsers,
 )

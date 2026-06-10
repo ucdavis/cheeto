@@ -11,9 +11,12 @@ must be initialized (for writes).
 from __future__ import annotations
 
 import logging
+from pathlib import PurePosixPath
 from typing import Any
 
+from beanie import PydanticObjectId
 from beanie.operators import In
+from mongoengine import DoesNotExist
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
@@ -24,8 +27,17 @@ from ..database.slurm import (
     SiteSlurmPartition,
     SiteSlurmQOS,
 )
-from ..constants import MIN_SPECIAL_GID
+from ..database.storage import (
+    Automount as OldAutomount,
+    AutomountMap as OldAutomountMap,
+    NFSMountSource as OldNFSMountSource,
+    NFSSourceCollection as OldNFSSourceCollection,
+    Storage as OldStorage,
+    ZFSMountSource as OldZFSMountSource,
+)
+from ..constants import MIN_SPECIAL_GID, STORAGE_CATEGORIES
 from ..database.user import GlobalUser, SiteUser
+from ..models.base import link_target_id
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
 from ..models.site import Site
@@ -39,6 +51,15 @@ from ..models.slurm import (
     SlurmTRES,
 )
 from ..models.group import AccessGroup, StatusGroup
+from ..models.storage import (
+    AutomountMap,
+    MountOverrides,
+    NFSExportConfig,
+    Storage,
+    StorageAllocation,
+    StorageVolume,
+    ZFSConfig,
+)
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from .base import Operation
@@ -300,10 +321,14 @@ class MigrateSites(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
+        self.filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> list[Site]:
         total = OldSite.objects.count()
@@ -312,6 +337,12 @@ class MigrateSites(Operation):
         )
         sites = []
         for old_site in OldSite.objects():
+            if (
+                self.sitenames is not None
+                and old_site.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             existing = await Site.find_one(Site.name == old_site.sitename)
             if existing is not None:
                 self.logger.info(
@@ -330,8 +361,8 @@ class MigrateSites(Operation):
             self.logger.info('Migrated site %s', old_site.sitename)
 
         self.logger.info(
-            'MigrateSites done: migrated=%d skipped=%d',
-            self.migrated, self.skipped,
+            'MigrateSites done: migrated=%d skipped=%d filtered=%d',
+            self.migrated, self.skipped, self.filtered,
         )
         return sites
 
@@ -339,6 +370,8 @@ class MigrateSites(Operation):
         return {
             'migrated': self.migrated,
             'skipped': self.skipped,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -356,13 +389,17 @@ class MigrateSiteGlobals(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.sites_updated = 0
         self.groups_added = 0
         self.slurmers_added = 0
         self.groups_missing = 0
         self.accounts_missing = 0
+        self.filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> int:
         from ..models.slurm import SlurmAccount
@@ -379,11 +416,17 @@ class MigrateSiteGlobals(Operation):
             for g in await Group.find_all(with_children=True).to_list()
         }
         accounts_by_pair: dict[tuple, SlurmAccount] = {
-            (a.group.ref.id, a.site.ref.id): a
+            (link_target_id(a.group), link_target_id(a.site)): a
             for a in await SlurmAccount.find_all().to_list()
         }
 
         for old_site in OldSite.objects():
+            if (
+                self.sitenames is not None
+                and old_site.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             new_site = await Site.find_one(Site.name == old_site.sitename)
             if new_site is None:
                 self.logger.warning(
@@ -392,12 +435,9 @@ class MigrateSiteGlobals(Operation):
                 )
                 continue
 
-            existing_group_ids = {
-                link.ref.id for link in new_site.group.sticky
-            }
-            existing_account_ids = {
-                link.ref.id for link in new_site.slurm.sticky
-            }
+            # Sticky lists hold bare DocRef ids (models/base.py::DocRef).
+            existing_group_ids = set(new_site.group.sticky)
+            existing_account_ids = set(new_site.slurm.sticky)
             changed = False
 
             for old_sg in old_site.global_groups or []:
@@ -411,7 +451,7 @@ class MigrateSiteGlobals(Operation):
                     continue
                 if grp.id in existing_group_ids:
                     continue
-                new_site.group.sticky.append(grp)
+                new_site.group.sticky.append(grp.id)
                 existing_group_ids.add(grp.id)
                 self.groups_added += 1
                 changed = True
@@ -435,7 +475,7 @@ class MigrateSiteGlobals(Operation):
                     continue
                 if account.id in existing_account_ids:
                     continue
-                new_site.slurm.sticky.append(account)
+                new_site.slurm.sticky.append(account.id)
                 existing_account_ids.add(account.id)
                 self.slurmers_added += 1
                 changed = True
@@ -462,6 +502,8 @@ class MigrateSiteGlobals(Operation):
             'slurmers_added': self.slurmers_added,
             'groups_missing': self.groups_missing,
             'accounts_missing': self.accounts_missing,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -477,10 +519,13 @@ class MigrateUser(Operation):
         *,
         username: str,
         sites_by_name: dict[str, Site] | None = None,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
         self.username = username
+        self.sitenames = set(sitenames) if sitenames else None
         self.site_infos_created = 0
+        self.filtered = 0
         self._sites_by_name = sites_by_name
 
     async def _resolve_site(self, sitename: str) -> Site | None:
@@ -502,7 +547,16 @@ class MigrateUser(Operation):
         # every v1 per-site access list into the new v2 `user.access`.
         # v2 per-site `UserSiteInfo.access` uses override semantics and
         # stays empty here — operators can add explicit overrides later.
+        # Filter BEFORE folding: a deprecated site's per-site access must
+        # not shape the migrated global access list.
         old_site_users = list(SiteUser.objects(username=self.username))
+        if self.sitenames is not None:
+            before_filter = len(old_site_users)
+            old_site_users = [
+                osu for osu in old_site_users
+                if osu.sitename in self.sitenames
+            ]
+            self.filtered = before_filter - len(old_site_users)
         access_shorthands: set[str] = set(old_user.access or ['login-ssh'])
         sites_with_extras = 0
         for osu in old_site_users:
@@ -588,6 +642,8 @@ class MigrateUser(Operation):
         return {
             'username': self.username,
             'site_infos_created': self.site_infos_created,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -600,11 +656,15 @@ class MigrateUsers(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = list(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
         self.total_site_infos = 0
+        self.total_filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> list[User]:
         total = GlobalUser.objects.count()
@@ -628,9 +688,11 @@ class MigrateUsers(Operation):
                 self.client, self.author,
                 username=old_user.username,
                 sites_by_name=sites_by_name,
+                sitenames=self.sitenames,
             )
             user = await op.execute(session)
             self.total_site_infos += op.site_infos_created
+            self.total_filtered += op.filtered
             users.append(user)
             self.migrated += 1
 
@@ -645,6 +707,8 @@ class MigrateUsers(Operation):
             'users_migrated': self.migrated,
             'users_skipped': self.skipped,
             'site_infos_created': self.total_site_infos,
+            'site_infos_filtered': self.total_filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -655,11 +719,15 @@ class MigrateGroups(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.upgraded = 0
         self.skipped = 0
+        self.filtered = 0
 
     async def _load_users(self, names: set[str]) -> dict[str, User]:
         if not names:
@@ -760,7 +828,16 @@ class MigrateGroups(Operation):
             # One GroupMembership edge per (user, site) for this group,
             # with `roles` reflecting which v1 buckets the user appeared in.
             # Resolve all usernames across every SiteGroup bucket in one query.
+            # Excluded-site buckets are filtered up front so their members
+            # are never loaded and produce no edges.
             site_groups = list(SiteGroup.objects(parent=old_group))
+            if self.sitenames is not None:
+                before_filter = len(site_groups)
+                site_groups = [
+                    sg for sg in site_groups
+                    if sg.sitename in self.sitenames
+                ]
+                self.filtered += before_filter - len(site_groups)
             all_names: set[str] = set()
             for sg in site_groups:
                 for bucket in (sg._members, sg._sponsors, sg._sudoers, sg._slurmers):
@@ -813,6 +890,8 @@ class MigrateGroups(Operation):
             'migrated': self.migrated,
             'upgraded': self.upgraded,
             'skipped': self.skipped,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -841,10 +920,14 @@ class MigrateSlurmPartitions(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
+        self.filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> list[SlurmPartition]:
         total = SiteSlurmPartition.objects.count()
@@ -854,6 +937,12 @@ class MigrateSlurmPartitions(Operation):
         )
         partitions = []
         for old_part in SiteSlurmPartition.objects.order_by('sitename', 'partitionname'):
+            if (
+                self.sitenames is not None
+                and old_part.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             site = await Site.find_one(Site.name == old_part.sitename)
             if site is None:
                 self.logger.warning(
@@ -884,13 +973,18 @@ class MigrateSlurmPartitions(Operation):
             )
 
         self.logger.info(
-            'MigrateSlurmPartitions done: migrated=%d skipped=%d',
-            self.migrated, self.skipped,
+            'MigrateSlurmPartitions done: migrated=%d skipped=%d filtered=%d',
+            self.migrated, self.skipped, self.filtered,
         )
         return partitions
 
     def describe(self) -> dict[str, Any]:
-        return {'migrated': self.migrated, 'skipped': self.skipped}
+        return {
+            'migrated': self.migrated,
+            'skipped': self.skipped,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
 
 
 class MigrateSlurmQOSes(Operation):
@@ -900,11 +994,15 @@ class MigrateSlurmQOSes(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
         self.allocations_created = 0
+        self.filtered = 0
 
     async def _build_alloc_list(
         self,
@@ -929,6 +1027,12 @@ class MigrateSlurmQOSes(Operation):
         )
         qoses = []
         for old_qos in SiteSlurmQOS.objects.order_by('sitename', 'qosname'):
+            if (
+                self.sitenames is not None
+                and old_qos.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             site = await Site.find_one(Site.name == old_qos.sitename)
             if site is None:
                 self.logger.warning(
@@ -983,6 +1087,8 @@ class MigrateSlurmQOSes(Operation):
             'migrated': self.migrated,
             'skipped': self.skipped,
             'allocations_created': self.allocations_created,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
 
@@ -1004,10 +1110,14 @@ class MigrateSlurmAccounts(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
+        self.filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> list[SlurmAccount]:
         total = SiteGroup.objects.count()
@@ -1017,6 +1127,12 @@ class MigrateSlurmAccounts(Operation):
         )
         accounts = []
         for site_group in SiteGroup.objects.order_by('sitename', 'groupname'):
+            if (
+                self.sitenames is not None
+                and site_group.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             has_assoc = SiteSlurmAssociation.objects(group=site_group).count() > 0
             has_limits = not _old_limits_are_default(site_group.slurm)
             if not (has_assoc or has_limits):
@@ -1072,13 +1188,18 @@ class MigrateSlurmAccounts(Operation):
             )
 
         self.logger.info(
-            'MigrateSlurmAccounts done: migrated=%d skipped=%d',
-            self.migrated, self.skipped,
+            'MigrateSlurmAccounts done: migrated=%d skipped=%d filtered=%d',
+            self.migrated, self.skipped, self.filtered,
         )
         return accounts
 
     def describe(self) -> dict[str, Any]:
-        return {'migrated': self.migrated, 'skipped': self.skipped}
+        return {
+            'migrated': self.migrated,
+            'skipped': self.skipped,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
 
 
 class MigrateSlurmAssociations(Operation):
@@ -1088,10 +1209,14 @@ class MigrateSlurmAssociations(Operation):
         self,
         client: AsyncMongoClient,
         author: User | None,
+        *,
+        sitenames: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
         self.migrated = 0
         self.skipped = 0
+        self.filtered = 0
 
     async def execute(self, session: AsyncClientSession) -> list[SlurmAssociation]:
         total = SiteSlurmAssociation.objects.count()
@@ -1101,6 +1226,12 @@ class MigrateSlurmAssociations(Operation):
         )
         assocs = []
         for old_assoc in SiteSlurmAssociation.objects.order_by('sitename'):
+            if (
+                self.sitenames is not None
+                and old_assoc.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
             site = await Site.find_one(Site.name == old_assoc.sitename)
             if site is None:
                 self.logger.warning(
@@ -1187,10 +1318,723 @@ class MigrateSlurmAssociations(Operation):
             )
 
         self.logger.info(
-            'MigrateSlurmAssociations done: migrated=%d skipped=%d',
-            self.migrated, self.skipped,
+            'MigrateSlurmAssociations done: migrated=%d skipped=%d filtered=%d',
+            self.migrated, self.skipped, self.filtered,
         )
         return assocs
 
     def describe(self) -> dict[str, Any]:
-        return {'migrated': self.migrated, 'skipped': self.skipped}
+        return {
+            'migrated': self.migrated,
+            'skipped': self.skipped,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Storage migration
+# ---------------------------------------------------------------------------
+#
+# v1 split storage across SourceCollections (per-site defaults containers),
+# NFS/ZFS MountSources (with fallback-to-collection host/path/quota), and
+# Automounts. v2 separates the provisionable backing entity (StorageVolume,
+# identified physically by (site, host, host_path)) from the user-facing
+# Storage record (volume + subpath + mount mechanism). Plain NFS exports of
+# subdirectories (Farm legacy homes) become Storage.subpath on the covering
+# ZFS volume rather than volumes of their own.
+
+# Index of volumes per (site_id, host): list of (PurePosixPath, volume).
+VolIndex = dict[tuple[PydanticObjectId, str], list[tuple[PurePosixPath, StorageVolume]]]
+
+
+def _match_covering_volume(
+    vol_index: VolIndex,
+    site_id: PydanticObjectId,
+    host: str,
+    path: PurePosixPath,
+    *,
+    allow_equal: bool,
+) -> tuple[StorageVolume, str] | None:
+    """Longest-prefix covering volume on (site, host) for `path`.
+
+    A volume V covers P iff P == V.path (only when `allow_equal`) or V.path
+    is a proper ancestor of P. Among covers, the deepest (most specific)
+    wins. Returns (volume, subpath) where subpath == '' when P == V.path.
+    """
+    candidates = []
+    for vpath, vol in vol_index.get((site_id, host), ()):
+        if path == vpath:
+            if allow_equal:
+                candidates.append((vpath, vol))
+        elif vpath in path.parents:
+            candidates.append((vpath, vol))
+    if not candidates:
+        return None
+    vpath, vol = max(candidates, key=lambda c: len(c[0].parts))
+    sub = '' if vpath == path else str(path.relative_to(vpath))
+    return vol, sub
+
+
+def _resolve_v1_source(src) -> tuple[str, str]:
+    """Concrete (host, host_path) for a v1 mount source via its
+    collection-fallback properties. Raises ValueError when unresolvable
+    (the v1 properties raise ValueError on missing values, AttributeError
+    when collection is None, and mongoengine DoesNotExist when the
+    collection DBRef dangles)."""
+    try:
+        return src.host, str(src.host_path)
+    except (ValueError, AttributeError, DoesNotExist) as e:
+        raise ValueError(
+            f'v1 source {src.sitename}/{src.name} unresolvable: {e}'
+        )
+
+
+def _v1_source_quota(src) -> str | None:
+    try:
+        return src.quota
+    except (ValueError, AttributeError, DoesNotExist):
+        return None
+
+
+def _v1_source_export(src) -> NFSExportConfig | None:
+    try:
+        opts = src.export_options
+    except (ValueError, AttributeError, DoesNotExist):
+        opts = ''
+    try:
+        ranges = list(src.export_ranges)
+    except (ValueError, AttributeError, DoesNotExist):
+        ranges = []
+    if opts or ranges:
+        return NFSExportConfig(export_options=opts, export_ranges=ranges)
+    return None
+
+
+class MigrateAutomountMaps(Operation):
+    """Migrate v1 AutomountMaps to v2 (tablename → name)."""
+
+    op_name = 'migrate_automount_maps'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitenames: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
+        self.migrated = 0
+        self.skipped = 0
+        self.sites_missing = 0
+        self.collisions = 0
+        self.filtered = 0
+
+    async def execute(self, session: AsyncClientSession) -> int:
+        sites_by_name = {
+            s.name: s for s in await Site.find_all().to_list()
+        }
+
+        # Multiple v1 maps may share (sitename, tablename) with different
+        # prefixes; v2 maps are unique on (name, site), so suffix the name.
+        from collections import Counter
+        tablename_counts = Counter(
+            (m.sitename, m.tablename) for m in OldAutomountMap.objects()
+        )
+
+        for old_map in OldAutomountMap.objects().order_by('sitename', 'tablename'):
+            if (
+                self.sitenames is not None
+                and old_map.sitename not in self.sitenames
+            ):
+                self.filtered += 1
+                continue
+            site = sites_by_name.get(old_map.sitename)
+            if site is None:
+                self.logger.warning(
+                    'AutomountMap %s/%s references missing site, skipping',
+                    old_map.sitename, old_map.tablename,
+                )
+                self.sites_missing += 1
+                continue
+
+            name = old_map.tablename
+            if tablename_counts[(old_map.sitename, old_map.tablename)] > 1:
+                name = f"{name}-{old_map.prefix.strip('/').replace('/', '-')}"
+                self.collisions += 1
+                self.logger.warning(
+                    'Multiple v1 maps for tablename %s on %s; migrating '
+                    'prefix=%s as %r — requires operator review',
+                    old_map.tablename, old_map.sitename, old_map.prefix, name,
+                )
+
+            existing = await AutomountMap.find_one(
+                AutomountMap.name == name,
+                AutomountMap.site.id == site.id,
+            )
+            if existing is not None:
+                self.skipped += 1
+                continue
+
+            if old_map._add_options or old_map._remove_options:
+                self.logger.warning(
+                    'AutomountMap %s/%s has _add/_remove options — dead v1 '
+                    'fields (never consulted); not migrated',
+                    old_map.sitename, old_map.tablename,
+                )
+
+            await AutomountMap(
+                name=name,
+                site=site,
+                prefix=old_map.prefix,
+                options=list(old_map._options or []),
+            ).insert(session=session)
+            self.migrated += 1
+            self.logger.info(
+                'Migrated automount map %s on %s (prefix=%s)',
+                name, old_map.sitename, old_map.prefix,
+            )
+
+        self.logger.info(
+            'MigrateAutomountMaps done: migrated=%d skipped=%d',
+            self.migrated, self.skipped,
+        )
+        return self.migrated
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'migrated': self.migrated,
+            'skipped': self.skipped,
+            'sites_missing': self.sites_missing,
+            'collisions': self.collisions,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
+
+
+class MigrateStorageVolumes(Operation):
+    """Create v2 StorageVolumes from v1 collections + mount sources.
+
+    Three passes (shallow paths first so nesting parents correctly):
+      A. SourceCollections with host+prefix → root volumes; the 'home'
+         collection also seeds Site.storage defaults.
+      B. ZFSMountSources → quota'd volumes (collection fallbacks resolved
+         into concrete values; parent = deepest strictly-covering volume).
+      C. Plain NFSMountSources → matched against existing volumes (no doc
+         written — the Storage step re-derives subpaths) or, when no
+         covering volume exists, a bare unquota'd volume.
+
+    Volume identity (idempotency key) is (site, host, host_path).
+    """
+
+    op_name = 'migrate_storage_volumes'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitenames: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
+        self.collection_roots = 0
+        self.collections_defaults_only = 0
+        self.zfs_volumes = 0
+        self.nfs_matched = 0
+        self.nfs_bare_volumes = 0
+        self.skipped_existing = 0
+        self.unresolvable = 0
+        self.parents_linked = 0
+        self.name_conflicts = 0
+        self.home_settings_set = 0
+        self.filtered = 0
+
+    def _filtered_out(self, sitename: str) -> bool:
+        if self.sitenames is not None and sitename not in self.sitenames:
+            self.filtered += 1
+            return True
+        return False
+
+    @staticmethod
+    async def _build_vol_index() -> tuple[VolIndex, dict[PydanticObjectId, set[str]]]:
+        vol_index: VolIndex = {}
+        names_by_site: dict[PydanticObjectId, set[str]] = {}
+        for vol in await StorageVolume.find_all().to_list():
+            site_id = link_target_id(vol.site)
+            vol_index.setdefault((site_id, vol.host), []).append(
+                (PurePosixPath(vol.host_path), vol)
+            )
+            names_by_site.setdefault(site_id, set()).add(vol.name)
+        return vol_index, names_by_site
+
+    def _pick_name(
+        self,
+        base: str,
+        parent: StorageVolume | None,
+        host_path: str,
+        site_names: set[str],
+    ) -> str:
+        if base.startswith('/'):
+            base = PurePosixPath(base).name
+        name = f'{parent.name}/{base}' if parent is not None else base
+        if name in site_names:
+            name = host_path.lstrip('/').replace('/', '-')
+            self.name_conflicts += 1
+            self.logger.warning(
+                'Volume name collision for %r; using path slug %r',
+                base, name,
+            )
+        site_names.add(name)
+        return name
+
+    async def _insert_volume(
+        self,
+        session: AsyncClientSession,
+        vol_index: VolIndex,
+        *,
+        name: str,
+        site: Site,
+        host: str,
+        host_path: str,
+        parent: StorageVolume | None = None,
+        allocations: list[StorageAllocation] | None = None,
+        nfs_export: NFSExportConfig | None = None,
+    ) -> StorageVolume:
+        volume = StorageVolume(
+            name=name,
+            site=site,
+            backend='zfs',
+            zfs=ZFSConfig(),
+            host=host,
+            host_path=host_path,
+            parent=parent,
+            allocations=allocations or [],
+            nfs_export=nfs_export,
+        )
+        await volume.insert(session=session)
+        vol_index.setdefault((site.id, host), []).append(
+            (PurePosixPath(host_path), volume)
+        )
+        return volume
+
+    async def execute(self, session: AsyncClientSession) -> int:
+        sites_by_name = {
+            s.name: s for s in await Site.find_all().to_list()
+        }
+        vol_index, names_by_site = await self._build_vol_index()
+
+        # --- Pass A: collection roots + Site storage defaults ---
+        for col in OldNFSSourceCollection.objects():
+            if self._filtered_out(col.sitename):
+                continue
+            site = sites_by_name.get(col.sitename)
+            if site is None:
+                self.logger.warning(
+                    'Collection %s/%s references missing site, skipping',
+                    col.sitename, col.name,
+                )
+                continue
+            if not (col._host and col.prefix):
+                self.logger.info(
+                    'Collection %s/%s is defaults-only (no host/prefix); '
+                    'no root volume', col.sitename, col.name,
+                )
+                self.collections_defaults_only += 1
+                continue
+
+            key_path = PurePosixPath(col.prefix)
+            existing = _match_covering_volume(
+                vol_index, site.id, col._host, key_path, allow_equal=True,
+            )
+            if existing is not None and existing[1] == '':
+                volume = existing[0]
+                self.skipped_existing += 1
+            else:
+                site_names = names_by_site.setdefault(site.id, set())
+                name = self._pick_name(col.name, None, col.prefix, site_names)
+                volume = await self._insert_volume(
+                    session, vol_index,
+                    name=name, site=site, host=col._host,
+                    host_path=col.prefix,
+                )
+                self.collection_roots += 1
+
+            if col.name == 'home':
+                if site.storage.default_home_volume is None:
+                    site.storage.default_home_volume = volume.id
+                    site.storage.default_home_quota = getattr(col, '_quota', None)
+                    await site.save(session=session)
+                    self.home_settings_set += 1
+                    self.logger.info(
+                        'Set %s default home volume=%s quota=%s',
+                        site.name, volume.name,
+                        site.storage.default_home_quota,
+                    )
+
+        # --- Pass B: ZFS sources → quota'd volumes ---
+        zfs_sources = list(OldZFSMountSource.objects())
+
+        def _depth(src) -> int:
+            try:
+                return len(PurePosixPath(str(src.host_path)).parts)
+            except (ValueError, AttributeError, DoesNotExist):
+                return 0
+
+        for src in sorted(zfs_sources, key=_depth):
+            if self._filtered_out(src.sitename):
+                continue
+            site = sites_by_name.get(src.sitename)
+            if site is None:
+                self.logger.warning(
+                    'ZFS source %s/%s references missing site, skipping',
+                    src.sitename, src.name,
+                )
+                continue
+            try:
+                host, host_path = _resolve_v1_source(src)
+            except ValueError as e:
+                self.logger.warning('%s', e)
+                self.unresolvable += 1
+                continue
+
+            path = PurePosixPath(host_path)
+            hit = _match_covering_volume(
+                vol_index, site.id, host, path, allow_equal=True,
+            )
+            if hit is not None and hit[1] == '':
+                # Exact-path volume already exists (idempotent re-run).
+                self.skipped_existing += 1
+                continue
+
+            parent_hit = _match_covering_volume(
+                vol_index, site.id, host, path, allow_equal=False,
+            )
+            parent = parent_hit[0] if parent_hit is not None else None
+
+            quota = _v1_source_quota(src)
+            site_names = names_by_site.setdefault(site.id, set())
+            name = self._pick_name(src.name, parent, host_path, site_names)
+            await self._insert_volume(
+                session, vol_index,
+                name=name, site=site, host=host, host_path=host_path,
+                parent=parent,
+                allocations=(
+                    [StorageAllocation(quota=quota, comment='migrated from v1')]
+                    if quota else []
+                ),
+                nfs_export=_v1_source_export(src),
+            )
+            self.zfs_volumes += 1
+            if parent is not None:
+                self.parents_linked += 1
+
+        # --- Pass C: plain NFS sources → match-or-create ---
+        nfs_sources = list(OldNFSMountSource.objects(
+            _cls='StorageMountSource.NFSMountSource',
+        ))
+        for src in sorted(nfs_sources, key=_depth):
+            if self._filtered_out(src.sitename):
+                continue
+            site = sites_by_name.get(src.sitename)
+            if site is None:
+                self.logger.warning(
+                    'NFS source %s/%s references missing site, skipping',
+                    src.sitename, src.name,
+                )
+                continue
+            try:
+                host, host_path = _resolve_v1_source(src)
+            except ValueError as e:
+                self.logger.warning('%s', e)
+                self.unresolvable += 1
+                continue
+
+            path = PurePosixPath(host_path)
+            hit = _match_covering_volume(
+                vol_index, site.id, host, path, allow_equal=True,
+            )
+            if hit is not None:
+                # Covered by an existing volume — the Storage step derives
+                # (volume, subpath); subdir export config lands on Storage.
+                self.nfs_matched += 1
+                continue
+
+            parent_hit = _match_covering_volume(
+                vol_index, site.id, host, path, allow_equal=False,
+            )
+            parent = parent_hit[0] if parent_hit is not None else None
+            site_names = names_by_site.setdefault(site.id, set())
+            name = self._pick_name(src.name, parent, host_path, site_names)
+            await self._insert_volume(
+                session, vol_index,
+                name=name, site=site, host=host, host_path=host_path,
+                parent=parent,
+                nfs_export=_v1_source_export(src),
+            )
+            self.nfs_bare_volumes += 1
+
+        self.logger.info(
+            'MigrateStorageVolumes done: roots=%d zfs=%d nfs_matched=%d '
+            'nfs_bare=%d skipped=%d unresolvable=%d',
+            self.collection_roots, self.zfs_volumes, self.nfs_matched,
+            self.nfs_bare_volumes, self.skipped_existing, self.unresolvable,
+        )
+        return self.collection_roots + self.zfs_volumes + self.nfs_bare_volumes
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'collection_roots': self.collection_roots,
+            'collections_defaults_only': self.collections_defaults_only,
+            'zfs_volumes': self.zfs_volumes,
+            'nfs_matched': self.nfs_matched,
+            'nfs_bare_volumes': self.nfs_bare_volumes,
+            'skipped_existing': self.skipped_existing,
+            'unresolvable': self.unresolvable,
+            'parents_linked': self.parents_linked,
+            'name_conflicts': self.name_conflicts,
+            'home_settings_set': self.home_settings_set,
+            'filtered': self.filtered,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
+
+
+class MigrateStorages(Operation):
+    """Migrate v1 Storage records (source + Automount) to v2 Storages
+    referencing the volumes created by MigrateStorageVolumes.
+
+    The v2 Storage lands on the MOUNT's site (v1's `mount_source_site`
+    pattern binds a site-B Automount to a site-A source; v1
+    `Storage.sitename` reports the source site, which is wrong for the
+    user-facing record). The volume stays on the source's site.
+    """
+
+    op_name = 'migrate_storages'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitenames: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitenames = set(sitenames) if sitenames else None
+        self.migrated = 0
+        self.skipped_existing = 0
+        self.owners_missing = 0
+        self.groups_missing = 0
+        self.maps_missing = 0
+        self.volumes_missing = 0
+        self.unresolvable = 0
+        self.cross_site = 0
+        self.mounts_unsupported = 0
+        self.filtered = 0
+        self.dangling_refs = 0
+
+    async def execute(self, session: AsyncClientSession) -> int:
+        sites_by_name = {
+            s.name: s for s in await Site.find_all().to_list()
+        }
+        maps_by_key: dict[tuple[PydanticObjectId, str], AutomountMap] = {}
+        for amap in await AutomountMap.find_all().to_list():
+            maps_by_key[(link_target_id(amap.site), amap.name)] = amap
+        vol_index, _ = await MigrateStorageVolumes._build_vol_index()
+
+        # Defensive pre-pass: force every lazy DBRef deref (source, mount,
+        # owner, group, and the automount's map) per storage and quarantine
+        # records with dangling references — real v1 data contains DBRefs
+        # whose targets were deleted, and mongoengine raises DoesNotExist
+        # at attribute-access time, which would otherwise abort the whole
+        # migration mid-batch.
+        old_storages = []
+        owner_names: set[str] = set()
+        group_names: set[str] = set()
+        for s in OldStorage.objects():
+            try:
+                source, mount = s.source, s.mount
+                owner_names.add(source.owner.username)
+                group_names.add(source.group.groupname)
+                if isinstance(mount, OldAutomount):
+                    mount.map.sitename  # noqa: B018 — force map deref
+            except DoesNotExist as e:
+                self.logger.warning(
+                    'Storage %s has a dangling v1 reference (%s), skipping',
+                    s.name, e,
+                )
+                self.dangling_refs += 1
+                continue
+            old_storages.append(s)
+
+        users_by_name = {
+            u.name: u
+            for u in await User.find(In(User.name, list(owner_names))).to_list()
+        }
+        groups_by_name = {
+            g.name: g
+            for g in await Group.find(In(Group.name, list(group_names))).to_list()
+        }
+
+        for old in sorted(old_storages, key=lambda s: s.name):
+            mount = old.mount
+            if not isinstance(mount, OldAutomount):
+                self.logger.warning(
+                    'Storage %s has unsupported mount type %s, skipping',
+                    old.name, type(mount).__name__,
+                )
+                self.mounts_unsupported += 1
+                continue
+
+            # The filter keys on the MOUNT's site — the site the user-facing
+            # record lands on. A storage on an allowed site whose source
+            # lives on an excluded site will fail volume resolution below
+            # (the excluded site's volumes were never migrated) and be
+            # tallied under volumes_missing.
+            sitename = mount.map.sitename
+            if self.sitenames is not None and sitename not in self.sitenames:
+                self.filtered += 1
+                continue
+            site = sites_by_name.get(sitename)
+            if site is None:
+                self.logger.warning(
+                    'Storage %s references missing site %s, skipping',
+                    old.name, sitename,
+                )
+                continue
+            category = mount.map.tablename
+            if category not in STORAGE_CATEGORIES:
+                self.logger.warning(
+                    'Storage %s has non-category tablename %r, skipping',
+                    old.name, category,
+                )
+                continue
+
+            existing = await Storage.find_one(
+                Storage.name == old.name,
+                Storage.site.id == site.id,
+                Storage.category == category,
+            )
+            if existing is not None:
+                self.skipped_existing += 1
+                continue
+
+            src = old.source
+            src_site = sites_by_name.get(src.sitename)
+            if src_site is None:
+                self.logger.warning(
+                    'Storage %s source references missing site %s, skipping',
+                    old.name, src.sitename,
+                )
+                continue
+            if src.sitename != sitename:
+                self.cross_site += 1
+                self.logger.info(
+                    'Storage %s: mount on %s, source on %s (cross-site)',
+                    old.name, sitename, src.sitename,
+                )
+
+            try:
+                host, host_path = _resolve_v1_source(src)
+            except ValueError as e:
+                self.logger.warning('%s', e)
+                self.unresolvable += 1
+                continue
+
+            hit = _match_covering_volume(
+                vol_index, src_site.id, host, PurePosixPath(host_path),
+                allow_equal=True,
+            )
+            if hit is None:
+                self.logger.warning(
+                    'Storage %s: no covering volume for %s:%s (run '
+                    '`ng migrate storage volumes` first?), skipping',
+                    old.name, host, host_path,
+                )
+                self.volumes_missing += 1
+                continue
+            volume, subpath = hit
+
+            owner = users_by_name.get(src.owner.username)
+            if owner is None:
+                self.logger.warning(
+                    'Storage %s owner %s not in v2, skipping',
+                    old.name, src.owner.username,
+                )
+                self.owners_missing += 1
+                continue
+            group = groups_by_name.get(src.group.groupname)
+            if group is None:
+                self.logger.warning(
+                    'Storage %s group %s not in v2, skipping',
+                    old.name, src.group.groupname,
+                )
+                self.groups_missing += 1
+                continue
+
+            amap = maps_by_key.get((site.id, category))
+            if amap is None:
+                self.logger.warning(
+                    'Storage %s: no v2 automount map %r on %s, skipping',
+                    old.name, category, sitename,
+                )
+                self.maps_missing += 1
+                continue
+
+            # Subdir exports keep their own source-level export config on
+            # the Storage record (the volume carries the dataset-level one).
+            nfs_export = None
+            if subpath and not isinstance(src, OldZFSMountSource):
+                if src._export_options or src._export_ranges:
+                    nfs_export = NFSExportConfig(
+                        export_options=src._export_options or '',
+                        export_ranges=list(src._export_ranges or []),
+                    )
+
+            await Storage(
+                name=old.name,
+                site=site,
+                category=category,
+                owner=owner,
+                group=group,
+                volume=volume,
+                subpath=subpath,
+                nfs_export=nfs_export,
+                automount_map=amap,
+                mount_name=mount.name,
+                mount_overrides=MountOverrides(
+                    options=list(mount._options or []),
+                    add_options=list(mount._add_options or []),
+                    remove_options=list(mount._remove_options or []),
+                ),
+                globus=bool(old.globus),
+            ).insert(session=session)
+            self.migrated += 1
+            self.logger.info(
+                'Migrated storage %s on %s (volume=%s subpath=%r)',
+                old.name, sitename, volume.name, subpath,
+            )
+
+        self.logger.info(
+            'MigrateStorages done: migrated=%d skipped=%d volumes_missing=%d '
+            'dangling_refs=%d',
+            self.migrated, self.skipped_existing, self.volumes_missing,
+            self.dangling_refs,
+        )
+        return self.migrated
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'migrated': self.migrated,
+            'skipped_existing': self.skipped_existing,
+            'owners_missing': self.owners_missing,
+            'groups_missing': self.groups_missing,
+            'maps_missing': self.maps_missing,
+            'volumes_missing': self.volumes_missing,
+            'unresolvable': self.unresolvable,
+            'cross_site': self.cross_site,
+            'mounts_unsupported': self.mounts_unsupported,
+            'filtered': self.filtered,
+            'dangling_refs': self.dangling_refs,
+            'sites_filter': sorted(self.sitenames) if self.sitenames else None,
+        }
