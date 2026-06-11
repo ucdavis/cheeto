@@ -419,3 +419,106 @@ class CreateHomeStorage(Operation):
             'host': self.host,
             'mechanism': self._mechanism,
         }
+
+
+# ---------------------------------------------------------------------------
+# Puppet storage export
+# ---------------------------------------------------------------------------
+
+
+_PUPPET_BUCKETS = {
+    # category -> (output key, zfs dataset permissions)
+    'home': ('user', '0770'),
+    'group': ('group', '2770'),
+    'share': ('share', '2775'),
+}
+
+
+class ExportPuppetStorage(Operation):
+    """Render a site's storage in the legacy puppet structure (v1's
+    `_storage_to_puppet`): `{zfs|nfs: {user|group|share: {host: [entry]}}}`,
+    with the `home` category mapped to the `user` key.
+
+    Classification: a storage backed by a whole managed ZFS dataset
+    (`subpath == ''` and the volume carries a `ZFSConfig`) is a `zfs` entry
+    — puppet provisions the dataset (quota, permissions) plus its export.
+    Anything else NFS-visible — subdirectory exports (Farm legacy homes)
+    and unmanaged export roots (v1 plain-NFS bare volumes, `zfs=None`) —
+    is an `nfs` entry: an exports line only. QuoByte-backed volumes don't
+    participate (no NFS export; quotas live in QuoByte).
+
+    Read-only; recorded in History.
+    """
+
+    op_name = 'export_puppet_storage'
+    transactional = False
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self._zfs_count = 0
+        self._nfs_count = 0
+        self._skipped = 0
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, Any]:
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        # Depth 1 resolves volume/owner/group — everything an entry needs.
+        storages = await Storage.find(
+            Storage.site.id == site.id,
+            fetch_links=True,
+            nesting_depth=1,
+        ).sort('+name').to_list()
+
+        zfs: dict[str, dict] = {key: {} for key, _ in _PUPPET_BUCKETS.values()}
+        nfs: dict[str, dict] = {key: {} for key, _ in _PUPPET_BUCKETS.values()}
+
+        for storage in storages:
+            key, perms = _PUPPET_BUCKETS[storage.category]
+            volume = storage.volume
+            if volume.backend != 'zfs':
+                self._skipped += 1
+                continue
+            export = storage.nfs_export or volume.nfs_export
+            entry = {
+                'name': storage.name,
+                'owner': storage.owner.name,
+                'group': storage.group.name,
+                'path': storage.host_path,
+                'export_options': export.export_options if export else '',
+                'export_ranges': (
+                    list(export.export_ranges) if export else []
+                ),
+            }
+            if not storage.subpath and volume.zfs is not None:
+                entry['quota'] = volume.quota
+                entry['permissions'] = perms
+                zfs[key].setdefault(volume.host, []).append(entry)
+                self._zfs_count += 1
+            else:
+                nfs[key].setdefault(volume.host, []).append(entry)
+                self._nfs_count += 1
+
+        def _sort_hosts(buckets: dict[str, dict]) -> dict[str, dict]:
+            return {
+                key: {host: hosts[host] for host in sorted(hosts)}
+                for key, hosts in buckets.items()
+            }
+
+        return {'zfs': _sort_hosts(zfs), 'nfs': _sort_hosts(nfs)}
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'sitename': self.sitename,
+            'zfs': self._zfs_count,
+            'nfs': self._nfs_count,
+            'skipped': self._skipped,
+        }

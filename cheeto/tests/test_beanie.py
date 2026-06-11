@@ -78,6 +78,7 @@ from ..operations import (
     SetUserType,
     SetSiteDefaultSlurmAccount,
     ClearSiteDefaultSlurmAccount,
+    ExportPuppetStorage,
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
@@ -438,6 +439,15 @@ class TestStorageModel:
         )
         fetched = await StorageVolume.find_one(StorageVolume.name == 'nas01vol')
         assert fetched.quota == '150G'
+
+    async def test_volume_quota_fractional_roundtrip(self, beanie_client):
+        """Fractional quotas must render exactly: the float/int megs round
+        trip turned 45.8T into 45.79999924T."""
+        _, _, site = await _seed_storage_actors('fracq', 20026)
+        volume = await _seed_volume(
+            site, allocations=[StorageAllocation(quota='45.8T')],
+        )
+        assert volume.quota == '45.8T'
 
     async def test_root_vs_subpath_storage_quota(self, beanie_client):
         user, group, site = await _seed_storage_actors('subq', 20021)
@@ -1346,6 +1356,16 @@ class TestSlurmOps:
         assert partial.cpus == 160
         assert partial.gpus == 8           # only from a1
         assert partial.mem == '1T'         # only from a1
+
+        # Fractional sizes round-trip exactly (float arithmetic rendered
+        # 45.8T as 45.79999924T)
+        frac = total_tres([SlurmAllocation(tres=SlurmTRES(mem='45.8T'))])
+        assert frac.mem == '45.8T'
+        frac_sum = total_tres([
+            SlurmAllocation(tres=SlurmTRES(mem='45.8T')),
+            SlurmAllocation(tres=SlurmTRES(mem='204.8G')),
+        ])
+        assert frac_sum.mem == '46T'
 
     async def test_edit_slurm_qos_updates_priority_and_flags(self, beanie_client, site):
         await CreateSlurmQOS.run(
@@ -3386,6 +3406,134 @@ class TestExportSympaEmails:
             await ExportSympaEmails.run(beanie_client, None, sitename='nope')
 
 
+class TestExportPuppetStorage:
+    """`ExportPuppetStorage` renders v1's `_storage_to_puppet` structure:
+    zfs/nfs buckets, each user/group/share (category 'home' -> key 'user'),
+    keyed by host. Whole managed datasets (subpath '', ZFSConfig present)
+    are zfs entries with quota+permissions; subdirectory exports and
+    unmanaged export roots (zfs=None) are options/ranges-only nfs entries;
+    quobyte volumes are excluded entirely."""
+
+    EXPORT = NFSExportConfig(
+        export_options='rw,no_root_squash,sync',
+        export_ranges=['10.19.0.0/16'],
+    )
+
+    async def _seed(self):
+        user, group, site = await _seed_storage_actors('pups', 21000)
+        grpvol = await _seed_volume(
+            site, name='pupsgrp', host='nas-1', host_path='/nas-1/pupsgrp',
+            allocations=[StorageAllocation(quota='70T')],
+            nfs_export=self.EXPORT,
+        )
+        homevol = await _seed_volume(
+            site, name='home/pups', host='nas-2', host_path='/home/pups',
+            allocations=[StorageAllocation(quota='20G')],
+            nfs_export=self.EXPORT,
+        )
+        # unmanaged export root (v1 plain-NFS bare volume): zfs=None
+        barevol = StorageVolume(
+            name='loose', site=site, backend='zfs', zfs=None,
+            host='nas-1', host_path='/nas-1/loose',
+            nfs_export=self.EXPORT,
+        )
+        await barevol.insert()
+        qbvol = await _seed_volume(
+            site, name='qb', host='qb01', host_path='/qb/pups',
+            backend='quobyte',
+        )
+
+        def _storage(name, category, volume, subpath='', nfs_export=None):
+            return Storage(
+                name=name, site=site, category=category,
+                owner=user, group=group, volume=volume,
+                subpath=subpath, nfs_export=nfs_export,
+            )
+
+        # whole managed datasets → zfs bucket
+        await _storage('pupsgrp', 'group', grpvol).insert()
+        await _storage('pups', 'home', homevol).insert()
+        # subdirectory export (Farm legacy home) → nfs bucket, own export
+        await _storage(
+            'pupssub', 'home', grpvol, subpath='pupssub',
+            nfs_export=NFSExportConfig(
+                export_options='rw,sync', export_ranges=['172.16.0.0/16'],
+            ),
+        ).insert()
+        # whole-volume storage on an UNMANAGED root → nfs bucket
+        await _storage('loose', 'share', barevol).insert()
+        # quobyte-backed → excluded
+        await _storage('qbstor', 'group', qbvol).insert()
+        return site
+
+    async def test_structure_and_classification(self, beanie_client):
+        await self._seed()
+        data = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='pupssite',
+        )
+
+        assert set(data) == {'zfs', 'nfs'}
+        for bucket in ('zfs', 'nfs'):
+            assert set(data[bucket]) == {'user', 'group', 'share'}
+
+        assert data['zfs']['group'] == {'nas-1': [{
+            'name': 'pupsgrp',
+            'owner': 'pups',
+            'group': 'pups',
+            'path': '/nas-1/pupsgrp',
+            'export_options': 'rw,no_root_squash,sync',
+            'export_ranges': ['10.19.0.0/16'],
+            'quota': '70T',
+            'permissions': '2770',
+        }]}
+        assert data['zfs']['user'] == {'nas-2': [{
+            'name': 'pups',
+            'owner': 'pups',
+            'group': 'pups',
+            'path': '/home/pups',
+            'export_options': 'rw,no_root_squash,sync',
+            'export_ranges': ['10.19.0.0/16'],
+            'quota': '20G',
+            'permissions': '0770',
+        }]}
+        # subdir export: storage-level export config wins; no quota/perms
+        assert data['nfs']['user'] == {'nas-1': [{
+            'name': 'pupssub',
+            'owner': 'pups',
+            'group': 'pups',
+            'path': '/nas-1/pupsgrp/pupssub',
+            'export_options': 'rw,sync',
+            'export_ranges': ['172.16.0.0/16'],
+        }]}
+        # unmanaged root: nfs bucket even with subpath ''
+        assert data['nfs']['share'] == {'nas-1': [{
+            'name': 'loose',
+            'owner': 'pups',
+            'group': 'pups',
+            'path': '/nas-1/loose',
+            'export_options': 'rw,no_root_squash,sync',
+            'export_ranges': ['10.19.0.0/16'],
+        }]}
+        # quobyte storage appears nowhere
+        assert data['zfs']['share'] == {}
+        assert data['nfs']['group'] == {}
+
+    async def test_empty_site(self, beanie_client):
+        site = Site(name='pupempty', fqdn='pe.test')
+        await site.insert()
+        data = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='pupempty',
+        )
+        assert data == {
+            'zfs': {'user': {}, 'group': {}, 'share': {}},
+            'nfs': {'user': {}, 'group': {}, 'share': {}},
+        }
+
+    async def test_unknown_site_errors(self, beanie_client):
+        with pytest.raises(ValueError):
+            await ExportPuppetStorage.run(beanie_client, None, sitename='nope')
+
+
 class TestRemoveSite:
     """`RemoveSite` cascade-deletes every per-site record (beanie has no
     reverse cascade) and the site, leaving other sites and global records
@@ -3949,6 +4097,74 @@ class TestMigrateStorage:
             assert {v.name for v in vols} == {'dataset', 'loose'}
             loose = next(v for v in vols if v.name == 'loose')
             assert loose.quota is None
+            # bare-NFS volumes are unmanaged export roots, not datasets we
+            # provision: no ZFSConfig (the puppet export's nfs/zfs marker)
+            assert loose.zfs is None
+            dataset = next(v for v in vols if v.name == 'dataset')
+            assert dataset.zfs is not None
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_collection_root_enriched_by_equal_zfs_source(
+        self, beanie_client,
+    ):
+        """The Farm nas-4-1 'home' regression: Pass A creates the collection
+        root volume bare from a trailing-slash prefix; the equal-path ZFS
+        source must ENRICH it (quota, export config inherited from the
+        collection, managed marker) rather than being skipped — and the
+        stored host_path must be normalized."""
+        from cheeto.database.storage import (
+            ZFSMountSource as OldZFSMountSource,
+            ZFSSourceCollection,
+        )
+        from cheeto.operations import MigrateStorageVolumes
+
+        connection, cfg = self._connect_v1('cheeto_migrate_storage_test5')
+        try:
+            actors, groups = self._v1_actors('migenrich')
+            await self._v2_actors('migenrich')
+
+            share_col = ZFSSourceCollection(
+                sitename='migenrich', name='share',
+                _host='nas-4-1', prefix='/nas-4-1/home/',  # trailing slash
+                _export_options='rw,no_root_squash,sync',
+                _export_ranges=['10.17.0.0/16', '127.0.1.1'],
+            )
+            share_col.save()
+            # equal-path ZFS source: quota of its own, export via collection
+            OldZFSMountSource(
+                name='home', sitename='migenrich',
+                _host='nas-4-1', _host_path='/nas-4-1/home', _quota='25T',
+                owner=actors['ajfinger'], group=groups['ajfingergrp'],
+                collection=share_col,
+            ).save()
+
+            op = MigrateStorageVolumes(beanie_client, None)
+            await op._run()
+            assert op.collection_roots == 1
+            assert op.enriched == 1
+            assert op.zfs_volumes == 0
+
+            site = await Site.find_one(Site.name == 'migenrich')
+            vols = await StorageVolume.find(
+                StorageVolume.site.id == site.id,
+            ).to_list()
+            assert len(vols) == 1
+            vol = vols[0]
+            assert vol.host_path == '/nas-4-1/home'  # normalized
+            assert vol.quota == '25T'
+            assert vol.zfs is not None
+            assert vol.nfs_export is not None
+            assert vol.nfs_export.export_options == 'rw,no_root_squash,sync'
+            assert vol.nfs_export.export_ranges == [
+                '10.17.0.0/16', '127.0.1.1',
+            ]
+
+            # idempotent re-run: nothing left to enrich
+            op2 = MigrateStorageVolumes(beanie_client, None)
+            await op2._run()
+            assert op2.enriched == 0
+            assert op2.skipped_existing >= 1
         finally:
             connection.drop_database(cfg.database)
 

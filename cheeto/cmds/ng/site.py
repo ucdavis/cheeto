@@ -15,6 +15,7 @@ from ...operations import (
     AddStickySlurmAccount,
     ClearSiteDefaultSlurmAccount,
     CreateSite,
+    ExportPuppetStorage,
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
@@ -519,3 +520,30 @@ def _(parser: ArgParser):
                         help='Write emails to this path (default: stdout)')
     parser.add_argument('--ignore', nargs='+', default=['hpc-help@ucdavis.edu'],
                         help='Emails to exclude from the list')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'export', 'storage',
+                   help="Export site storage as legacy puppet zfs/nfs YAML "
+                        "(v1 `db site to-puppet` storage format)")
+async def site_export_storage(args: Namespace):
+    console = Console()
+    try:
+        data = await ExportPuppetStorage.run(
+            args.db, args.author, sitename=args.site,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    yaml_text = dumps_yaml(data)
+    if args.output:
+        Path(args.output).write_text(yaml_text)
+        console.print(f'Wrote puppet storage YAML to [green]{args.output}[/]')
+    else:
+        sys.stdout.write(yaml_text)
+
+
+@site_export_storage.args()
+def _(parser: ArgParser):
+    parser.add_argument('--output', '-o', default=None,
+                        help='Write YAML to this path (default: stdout)')

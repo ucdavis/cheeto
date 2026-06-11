@@ -1544,6 +1544,7 @@ class MigrateStorageVolumes(Operation):
         self.zfs_volumes = 0
         self.nfs_matched = 0
         self.nfs_bare_volumes = 0
+        self.enriched = 0
         self.skipped_existing = 0
         self.unresolvable = 0
         self.parents_linked = 0
@@ -1601,12 +1602,16 @@ class MigrateStorageVolumes(Operation):
         parent: StorageVolume | None = None,
         allocations: list[StorageAllocation] | None = None,
         nfs_export: NFSExportConfig | None = None,
+        managed: bool = True,
     ) -> StorageVolume:
+        # `managed=False` (v1 plain-NFS bare volumes) leaves zfs=None: the
+        # volume is an export root we don't provision as a ZFS dataset.
+        # ZFSConfig presence is the marker the puppet export classifies on.
         volume = StorageVolume(
             name=name,
             site=site,
             backend='zfs',
-            zfs=ZFSConfig(),
+            zfs=ZFSConfig() if managed else None,
             host=host,
             host_path=host_path,
             parent=parent,
@@ -1704,8 +1709,33 @@ class MigrateStorageVolumes(Operation):
                 vol_index, site.id, host, path, allow_equal=True,
             )
             if hit is not None and hit[1] == '':
-                # Exact-path volume already exists (idempotent re-run).
-                self.skipped_existing += 1
+                # Exact-path volume already exists — either a Pass A
+                # collection root (created bare: no quota, no export) or an
+                # idempotent re-run. The ZFS source describes the same real
+                # dataset, so merge its attributes instead of dropping them
+                # (Farm's 'home' share: collection root /nas-4-1/home/ +
+                # equal-path ZFS source carrying the 25T quota + exports).
+                volume = hit[0]
+                updated = False
+                quota = _v1_source_quota(src)
+                if not volume.allocations and quota:
+                    volume.allocations = [StorageAllocation(
+                        quota=quota, comment='migrated from v1',
+                    )]
+                    updated = True
+                export = _v1_source_export(src)
+                if volume.nfs_export is None and export is not None:
+                    volume.nfs_export = export
+                    updated = True
+                if volume.zfs is None:
+                    # a ZFS source proves this is a managed dataset
+                    volume.zfs = ZFSConfig()
+                    updated = True
+                if updated:
+                    await volume.save(session=session)
+                    self.enriched += 1
+                else:
+                    self.skipped_existing += 1
                 continue
 
             parent_hit = _match_covering_volume(
@@ -1772,14 +1802,16 @@ class MigrateStorageVolumes(Operation):
                 name=name, site=site, host=host, host_path=host_path,
                 parent=parent,
                 nfs_export=_v1_source_export(src),
+                managed=False,
             )
             self.nfs_bare_volumes += 1
 
         self.logger.info(
             'MigrateStorageVolumes done: roots=%d zfs=%d nfs_matched=%d '
-            'nfs_bare=%d skipped=%d unresolvable=%d',
+            'nfs_bare=%d enriched=%d skipped=%d unresolvable=%d',
             self.collection_roots, self.zfs_volumes, self.nfs_matched,
-            self.nfs_bare_volumes, self.skipped_existing, self.unresolvable,
+            self.nfs_bare_volumes, self.enriched, self.skipped_existing,
+            self.unresolvable,
         )
         return self.collection_roots + self.zfs_volumes + self.nfs_bare_volumes
 
@@ -1790,6 +1822,7 @@ class MigrateStorageVolumes(Operation):
             'zfs_volumes': self.zfs_volumes,
             'nfs_matched': self.nfs_matched,
             'nfs_bare_volumes': self.nfs_bare_volumes,
+            'enriched': self.enriched,
             'skipped_existing': self.skipped_existing,
             'unresolvable': self.unresolvable,
             'parents_linked': self.parents_linked,

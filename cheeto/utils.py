@@ -9,6 +9,7 @@
 
 from dataclasses import is_dataclass
 from datetime import datetime
+from decimal import Decimal
 import inspect
 from pathlib import Path
 import re
@@ -95,16 +96,46 @@ def link_relative(link_dir: Path, target_filename: Path):
     link_dir.joinpath(target_filename.name).symlink_to(target_filename)
 
 
-def size_to_megs(size: str) -> int:
+_SIZE_UNIT_MEGS = {
+    'M': Decimal(1),
+    'G': Decimal(1024),
+    'T': Decimal(1024 ** 2),
+    'P': Decimal(1024 ** 3),
+}
+
+
+def size_to_megs_exact(size: str) -> Decimal:
+    """Exact decimal megabytes for a size string: '45.8T' -> 48024780.8.
+
+    Use this (with `megs_to_size`) wherever sizes are summed and rendered
+    back to human units — float arithmetic turns 45.8T into 45.79999924T."""
     size = size.strip()
-    if size[-1] in 'Mm':
-        return int(float(size[:-1]))
-    if size[-1] in 'Gg':
-        return int(float(size[:-1]) * 1024)
-    if size[-1] in 'Tt':
-        return int(float(size[:-1]) * 1024 * 1024)
-    else:
+    unit = size[-1].upper()
+    if unit not in _SIZE_UNIT_MEGS:
         raise ValueError(f'{size} is not an allowed value.')
+    return Decimal(size[:-1]) * _SIZE_UNIT_MEGS[unit]
+
+
+def size_to_megs(size: str) -> int:
+    """Whole megabytes, truncated — what sacctmgr TRES values expect.
+    (Truncation, not rounding, preserves what v1 wrote into slurm.)"""
+    return int(size_to_megs_exact(size))
+
+
+def megs_to_size(megs: Decimal | int) -> str:
+    """Most compact M/G/T size string for a megabyte count, using exact
+    decimal arithmetic (inverse of `size_to_megs_exact`)."""
+    if not isinstance(megs, Decimal):
+        megs = Decimal(str(megs))
+    if megs >= _SIZE_UNIT_MEGS['T']:
+        value, unit = megs / _SIZE_UNIT_MEGS['T'], 'T'
+    elif megs >= _SIZE_UNIT_MEGS['G']:
+        value, unit = megs / _SIZE_UNIT_MEGS['G'], 'G'
+    else:
+        value, unit = megs, 'M'
+    # format(..., 'f') keeps normalize()'s stripped-zero form out of
+    # scientific notation (Decimal('100').normalize() is 1E+2).
+    return f'{format(value.normalize(), "f")}{unit}'
 
 
 

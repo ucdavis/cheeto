@@ -79,6 +79,7 @@ from .storage import (
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
+    ExportPuppetStorage,
 )
 from .migrate import (
     MigrateAccessStatusGroups,

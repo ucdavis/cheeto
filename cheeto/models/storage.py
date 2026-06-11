@@ -22,6 +22,7 @@ creation time, never resolved through the `parent` link.
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal
 
@@ -31,7 +32,7 @@ from pymongo import IndexModel
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..constants import DATA_QUOTA_REGEX, MOUNT_FSTYPES, STORAGE_CATEGORIES
-from ..utils import size_to_megs
+from ..utils import megs_to_size, size_to_megs_exact
 from .base import BaseDocument, Expirable
 from .site import Site
 from .user import User
@@ -63,12 +64,12 @@ def _join_host_path(base: str, sub: str) -> str:
 def _format_quota(allocations: list['StorageAllocation']) -> str | None:
     if not allocations:
         return None
-    total_megs = sum(size_to_megs(a.quota) for a in allocations)
-    if total_megs >= 1024 * 1024:
-        return f'{total_megs / (1024 * 1024):.10g}T'
-    if total_megs >= 1024:
-        return f'{total_megs / 1024:.10g}G'
-    return f'{total_megs}M'
+    # Exact decimal arithmetic: float/int round-tripping renders a 45.8T
+    # allocation as 45.79999924T.
+    total_megs = sum(
+        (size_to_megs_exact(a.quota) for a in allocations), Decimal(0),
+    )
+    return megs_to_size(total_megs)
 
 
 class StorageAllocation(BaseModel):
@@ -141,6 +142,14 @@ class StorageVolume(BaseDocument, Expirable):
     host_path: Annotated[str, Field(min_length=1)]
 
     parent: Link['StorageVolume'] | None = None
+
+    @field_validator('host_path')
+    @classmethod
+    def _normalize_host_path(cls, v):
+        # v1 data carries trailing slashes (e.g. collection prefixes like
+        # '/nas-4-1/home/'); normalize so path equality and derived
+        # Storage.host_path strings are canonical.
+        return str(PurePosixPath(v))
 
     allocations: list[StorageAllocation] = Field(default_factory=list)
     nfs_export: NFSExportConfig | None = None

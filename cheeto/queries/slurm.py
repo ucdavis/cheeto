@@ -7,6 +7,7 @@ Rich/YAML display happens in the caller (e.g. cheeto/cmds/ng/_slurm_show.py).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Literal
 
 from beanie import PydanticObjectId
@@ -28,7 +29,7 @@ from ..models.slurm import (
 )
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
-from ..utils import size_to_megs
+from ..utils import megs_to_size, size_to_megs, size_to_megs_exact
 from .group import group_members_at_site, user_groups_at_site
 from .user import find_users
 
@@ -42,7 +43,7 @@ def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
     """
     cpus: int | None = None
     gpus: int | None = None
-    mem_megs: int | None = None
+    mem_megs: Decimal | None = None
 
     for alloc in allocations:
         t = alloc.tres
@@ -51,17 +52,14 @@ def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
         if t.gpus is not None:
             gpus = (0 if gpus is None else gpus) + t.gpus
         if t.mem is not None:
-            mem_megs = (0 if mem_megs is None else mem_megs) + size_to_megs(t.mem)
+            # Exact decimal arithmetic — the float/int round trip renders a
+            # 45.8T allocation as 45.79999924T (see utils.megs_to_size).
+            mem_megs = (
+                (Decimal(0) if mem_megs is None else mem_megs)
+                + size_to_megs_exact(t.mem)
+            )
 
-    mem_str: str | None = None
-    if mem_megs is not None:
-        if mem_megs >= 1024 * 1024:
-            mem_str = f'{mem_megs / (1024 * 1024):.10g}T'
-        elif mem_megs >= 1024:
-            mem_str = f'{mem_megs / 1024:.10g}G'
-        else:
-            mem_str = f'{mem_megs}M'
-
+    mem_str = megs_to_size(mem_megs) if mem_megs is not None else None
     return SlurmTRES(cpus=cpus, gpus=gpus, mem=mem_str)
 
 
