@@ -11,6 +11,7 @@ import sys
 
 from . import (commands,
                config,
+               daemon,
                database,
                hippo,
                monitor,

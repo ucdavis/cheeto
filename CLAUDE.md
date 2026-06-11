@@ -46,7 +46,8 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 - **`cheeto/hippo.py`**: Event-driven provisioning — pulls pending events from HiPPO API, dispatches handlers for CreateAccount, AddAccountToGroup, UpdateSshKey, RemoveAccountFromGroup, CreateGroup.
 - **`cheeto/database/ldap.py`**: Syncs database state to LDAP directories.
 - **`cheeto/puppet.py`**: Puppet YAML schema and validation with deep-merge support (`puppet_merge` in `cheeto/yaml.py`).
-- **`cheeto/config.py`**: YAML config loaded from `~/.config/cheeto/config.yaml` with profile support. Sections: `ldap`, `mongo`, `hippo`, `ucdiam`.
+- **`cheeto/config.py`**: YAML config loaded from `~/.config/cheeto/config.yaml` with profile support. Sections: `ldap`, `mongo`, `hippo`, `ucdiam`, plus optional profiled `daemon` and `api`.
+- **`cheeto/daemon/`**: Persistent services (`cheeto daemon worker|beat|api`). Celery periodic tasks (RabbitMQ broker, mongodb result backend) run the syncs on schedules from `daemon.tasks` config; `slurm_sync` is routed to per-site `slurm.<site>` queues consumed by cluster head-node workers (`--site`). Task bodies are plain coroutines bridged via `run_op` (fresh event loop + fresh `connect_beanie` per run — AsyncMongoClient is loop-bound). `daemon/api.py` is the FastAPI app (`/puppet/root-keys/{site}`, optional X-API-Key auth).
 
 ### Generated API clients
 

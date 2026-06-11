@@ -23,3 +23,27 @@ mongo:
     user: ''
     password: ''
     database: hpccf
+daemon:
+  default:
+    broker_url: amqp://guest:guest@127.0.0.1:5672//
+    author: cheeto-daemon
+    sites:
+    - test-site
+    tasks:
+      hippo:
+        schedule: 300
+      iam_sync:
+        schedule: 0 2 * * *
+        concurrency: 2
+      slurm_sync:
+        schedule: 600
+        max_deletions: 10
+      sympa:
+        schedule: 3600
+        output_dir: /tmp/cheeto-test-sympa
+      # ldap_sync and reap intentionally absent: disabled
+api:
+  default:
+    host: 127.0.0.1
+    port: 8810
+    api_key: test-api-key

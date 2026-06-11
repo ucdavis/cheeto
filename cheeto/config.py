@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 11.10.2024
 
+from dataclasses import field
 import logging
 import pathlib
 from typing import List, Optional, Union, Mapping
@@ -82,6 +83,98 @@ class SlurmConfig(BaseModel):
     qos_attrs: Mapping[str, str]
 
 
+# A task schedule: int/float seconds interval, a 5-field crontab string, or
+# None/absent to disable the task. int must precede str in the Union so
+# numeric YAML values don't deserialize as strings.
+ScheduleT = Optional[Union[int, str]]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class HippoTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    post_back: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class IAMSyncTaskConfig(BaseModel):
+    # grace_days / expiry_offset_days come from IAMConfig
+    schedule: ScheduleT = None
+    concurrency: int = 1
+    types: Optional[List[str]] = None
+    max_users: Optional[int] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class LDAPSyncTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    concurrency: int = 1
+    max_deletions: int = 50
+    prune: bool = True
+    force: bool = False
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmSyncTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    apply: bool = True
+    sudo: bool = False
+    concurrency: int = 8
+    max_deletions: int = 50
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class ReapTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SympaTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    output_dir: str = '/var/lib/cheeto/sympa'
+    sites: Optional[List[str]] = None
+    ignore: Optional[List[str]] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class DaemonTasksConfig(BaseModel):
+    hippo: Optional[HippoTaskConfig] = None
+    iam_sync: Optional[IAMSyncTaskConfig] = None
+    ldap_sync: Optional[LDAPSyncTaskConfig] = None
+    slurm_sync: Optional[SlurmSyncTaskConfig] = None
+    reap: Optional[ReapTaskConfig] = None
+    sympa: Optional[SympaTaskConfig] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class DaemonConfig(BaseModel):
+    broker_url: str
+    sites: List[str]
+    author: str = 'cheeto-daemon'
+    timezone: str = 'America/Los_Angeles'
+    beat_schedule_filename: str = '/var/lib/cheeto/celerybeat-schedule'
+    task_time_limit: int = 3600
+    tasks: DaemonTasksConfig = field(default_factory=DaemonTasksConfig)
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class ApiConfig(BaseModel):
+    host: str = '127.0.0.1'
+    port: int = 8000
+    api_key: Optional[str] = None
+    root_path: str = ''
+
+
 @require_kwargs
 @dataclass(frozen=True)
 class _Config(BaseModel):
@@ -89,6 +182,8 @@ class _Config(BaseModel):
     hippo: HippoConfig
     ucdiam: IAMConfig
     mongo: Mapping[str, MongoConfig]
+    daemon: Optional[Mapping[str, DaemonConfig]] = None
+    api: Optional[Mapping[str, ApiConfig]] = None
 
 
 @require_kwargs
@@ -98,6 +193,16 @@ class Config(BaseModel):
     hippo: HippoConfig
     ucdiam: IAMConfig
     mongo: MongoConfig
+    daemon: Optional[DaemonConfig] = None
+    api: Optional[ApiConfig] = None
+
+
+def _profiled(section: Optional[Mapping], profile: str):
+    """Resolve a profiled config section, falling back to 'default'; None if
+    the section is absent from the config file."""
+    if not section:
+        return None
+    return section.get(profile, section.get('default'))
 
 
 def get_config(config_path: Optional[pathlib.Path] = None,
@@ -119,5 +224,7 @@ def get_config(config_path: Optional[pathlib.Path] = None,
             ldap = config.ldap.get(profile, config.ldap['default']),
             mongo = config.mongo.get(profile, config.mongo['default']),
             hippo = config.hippo,
-            ucdiam = config.ucdiam
+            ucdiam = config.ucdiam,
+            daemon = _profiled(config.daemon, profile),
+            api = _profiled(config.api, profile)
         )
