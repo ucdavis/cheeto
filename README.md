@@ -1,90 +1,259 @@
-# cheeto: UCD HPC Management Utilities 
+# cheeto: UCD HPC Management Utilities
 
 ![Tests](https://github.com/ucdavis/cheeto/actions/workflows/test.yaml/badge.svg) ![Static Badge](https://img.shields.io/badge/Platforms-Linux-blue)
 
+`cheeto` manages account and resource provisioning for the UC Davis HPC
+Core Facility clusters. It owns the canonical user/group/storage/Slurm
+state in MongoDB and syncs it outward: LDAP directories, Slurm accounting
+databases, UC Davis IAM, the HiPPO provisioning API, Sympa mailing lists,
+and puppet-consumed YAML. It also validates puppet YAML and renders
+cloud-init (nocloud) installer templates.
 
-`cheeto` provides a library and schemas for validating our puppet
-YAML files, merging account data, and converting from the HiPPO
-YAML format to the puppet format.
+## Architecture
 
-### Converting: `cheeto hippo-convert`
+### Layers
 
-Validates a generated HiPPO YAML and converts it to our puppet format.
-Optionally extracts the public key and writes it to `[USER].pub` in the
-specified directory.
+```
+cheeto/cmds/        CLI (ponderosa CmdTree); `cheeto ng ...` is the async stack
+cheeto/daemon/      persistent services: celery worker/beat tasks, FastAPI app
+cheeto/operations/  write path: Operation classes (one per mutation/export),
+                    transactional, recorded in the History collection
+cheeto/queries/     read path: pure query helpers over the models
+cheeto/models/      beanie (async MongoDB ODM) documents — the v2 data model
+cheeto/database/    v1 mongoengine documents + CRUD (legacy, kept until cutover)
+```
 
-    usage: cheeto hippo-convert [-h] -i HIPPO_FILE [-o PUPPET_FILE] [--key-dir KEY_DIR]
+External integration modules:
 
-    Convert HIPPO yaml to puppet.hpc format.
+- `cheeto/hippoapi/`, `cheeto/iamapi/` — generated httpx clients for the
+  HiPPO and UC Davis IAM APIs (do not hand-edit).
+- `cheeto/ldap_async.py` — bonsai-based async LDAP client/pool.
+- `cheeto/slurm.py` — `sacctmgr`/`scontrol` wrappers built on `sh`
+  (awaitable from async code).
 
-    options:
-      -h, --help            show this help message and exit
-      -i HIPPO_FILE, --hippo-file HIPPO_FILE
-      -o PUPPET_FILE, --puppet-file PUPPET_FILE
-      --key-dir KEY_DIR
+### Data model (v2, `cheeto/models/`)
 
-### Validating: `cheeto validate-puppet`
+- **Site**: an HPC cluster. Users and groups carry per-site records
+  (`UserSiteInfo`, `GroupMembership`); site-wide defaults (sticky groups,
+  default Slurm account, home-storage provisioning defaults) are embedded
+  on the Site document.
+- **Slurm**: `SlurmAccount` is `(group, site)`; `SlurmAssociation` is
+  `(site, account, partition, qos)`; `SlurmQOS` holds group/user/job TRES
+  limit bundles. Sync follows read state → reconcile → emit `sacctmgr`
+  commands.
+- **Storage**: `StorageVolume` is the provisionable backing entity (ZFS
+  dataset or QuoByte volume, optionally nested under a parent volume);
+  `Storage` is the user-facing record `(volume, subpath)` plus at most one
+  mount mechanism — an LDAP automount entry (`AutomountMap`) or an
+  fstab-style `StaticMount`.
+- **History**: every Operation records an audit entry (author, op name,
+  describe() payload).
 
-Validates the specified puppet YAML files.
-Optionally, deep-merge the files into the first supplied file.
-By default, prints the validated (and optionally merged) YAML
-to standard out.
+The v1 mongoengine model (`cheeto/database/`, `cheeto db ...` commands)
+remains operational in parallel; `cheeto ng migrate ...` migrates v1 data
+into the v2 collections.
 
-    usage: cheeto validate-puppet [-h] [--merge] [--dump DUMP] files [files ...]
+### Operations vs queries
 
-    positional arguments:
-      files        YAML files to validate.
+All mutations go through `Operation` subclasses
+(`cheeto/operations/*.py`), invoked as
+`await Op.run(client, author, **kwargs)`. Multi-document writes run in
+MongoDB transactions (replica set required). Reads used by the CLI, LDAP
+projection, and exports live in `cheeto/queries/`.
 
-    options:
-      -h, --help   show this help message and exit
-      --merge      Merge the given YAML files before validation.
-      --dump DUMP  Dump the validated YAML to the given file
+## CLI
 
-### Generating: `cheeto nocloud-render`
+Entry point: `cheeto` (`cheeto.cmds.__main__:main`). Top-level groups:
 
-Generates `nocloud-net` installation files combining a base template with disk-specific layouts defined on a per-host basis.
+```
+cheeto config            show/write configuration
+cheeto daemon            persistent services: celery worker/beat and REST API
+cheeto db                v1 (mongoengine) database operations
+cheeto ng                v2 (beanie/async) operations:
+  site | user | group | slurm | storage | history | migrate | hippo | iam | ldap
+cheeto puppet            legacy puppet YAML validation/merging
+cheeto nocloud           cloud-init nocloud template rendering
+cheeto monitor           ad-hoc monitoring helpers
+cheeto ipython           REPL with the environment loaded
+```
+
+Common flags on every command: `--config <path>` (default
+`~/.config/cheeto/config.yaml`), `--profile/-p <name>`, `--log [file]`,
+`--log-level`, `--quiet`.
+
+Read-only site exports: `cheeto ng site export
+{puppet-legacy,root-keys,sympa,storage}`.
+
+## Daemons
+
+`cheeto daemon` runs the scheduled syncs and the REST API as three
+process types. Celery is the task manager: RabbitMQ (amqp) is the broker;
+task results land in the application database's `celery_taskmeta`
+collection via celery's mongodb result backend.
+
+| Process | Command | Where |
+|---|---|---|
+| beat | `cheeto daemon beat` | exactly one instance, hub host |
+| hub worker | `cheeto daemon worker` | hub host; consumes the `cheeto` queue |
+| site worker | `cheeto daemon worker --site <name>` | each cluster head node; consumes `slurm.<name>` |
+| api | `cheeto daemon api` | hub host (uvicorn) |
+
+Task → queue topology: the hub worker runs HiPPO event processing, IAM
+sync, LDAP sync, account reaping, and Sympa list exports. `slurm_sync`
+must execute on each cluster's head node (it drives the local
+`sacctmgr`), so beat routes one `slurm_sync(site)` task per site to that
+site's `slurm.<site>` queue.
+
+Schedules come from the `daemon.tasks` config block: a numeric value is
+an interval in seconds, a string is a 5-field crontab, and an absent task
+is disabled. Interval tasks expire after one period so a backed-up queue
+drops stale ticks rather than piling them up; workers run one task at a
+time (`worker_concurrency=1`, prefetch 1). Scale by adding site queues,
+not by running multiple hub workers — a second hub worker would allow
+overlapping syncs.
+
+Each task run executes in a fresh event loop with a fresh beanie client
+(`AsyncMongoClient` is loop-bound). Operations are attributed to the
+`daemon.author` user in History. A `slurm_sync`/`ldap_sync` run that
+would exceed its `max_deletions` guard fails the task — visible in
+`celery_taskmeta` — instead of deleting.
+
+### REST API
+
+FastAPI app served by `cheeto daemon api`:
+
+```
+GET /puppet/root-keys/{site}   root authorized_keys for site admins (text)
+GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
+```
+
+If `api.api_key` is set in the config, requests must send a matching
+`X-API-Key` header; unknown sites return 404.
+
+## Configuration
+
+YAML at `~/.config/cheeto/config.yaml` (override with `--config`).
+Sections: `ldap`, `mongo`, `daemon`, and `api` are profiled
+(`default` plus named profiles, selected with `--profile`); `hippo` and
+`ucdiam` are global. `daemon` and `api` are optional.
+
+```yaml
+mongo:
+  default:
+    uri: 127.0.0.1
+    port: 27017
+    tls: false
+    user: ''
+    password: ''
+    database: hpccf_v2
+ldap:
+  default:
+    servers: [ldaps://ldap1.example.edu]
+    searchbase: dc=hpc,dc=ucdavis,dc=edu
+    login_dn: cn=admin,dc=hpc,dc=ucdavis,dc=edu
+    password: '...'
+    user_base: ou=users,dc=hpc,dc=ucdavis,dc=edu
+hippo:
+  base_url: https://hippo.ucdavis.edu
+  api_key: '...'
+  site_aliases: {caesfarm: farm}
+  max_tries: 10
+ucdiam:
+  base_url: https://iet-ws.ucdavis.edu/api
+  api_key: '...'
+daemon:
+  default:
+    broker_url: amqp://cheeto:...@rabbit.example.edu:5672/cheeto
+    author: cheeto-daemon
+    sites: [farm, hive]
+    beat_schedule_filename: /var/lib/cheeto/celerybeat-schedule
+    tasks:
+      hippo:      {schedule: 300, post_back: true}
+      iam_sync:   {schedule: '0 2 * * *', concurrency: 4}
+      ldap_sync:  {schedule: 600, max_deletions: 50}
+      slurm_sync: {schedule: 600, apply: true, max_deletions: 50}
+      reap:       {schedule: '0 3 * * *'}
+      sympa:      {schedule: 3600, output_dir: /var/lib/cheeto/sympa}
+api:
+  default:
+    host: 0.0.0.0
+    port: 8810
+    api_key: '...'
+```
+
+## Deployment
+
+Requirements:
+
+- Python >=3.12,<3.14; Poetry 2.x.
+- MongoDB with a replica set (transactions are required, even
+  single-node).
+- RabbitMQ reachable from the hub and every cluster head node (daemon
+  only).
+- System packages for the LDAP/Kerberos bindings: `libldap-dev`,
+  `libsasl2-dev`, `libkrb5-dev`.
+
+Install:
 
 ```bash
-usage: cheeto nocloud-render [-h] [--templates-dir TEMPLATES_DIR] [--authorized-keys AUTHORIZED_KEYS]
-                             [--output-dir OUTPUT_DIR] [--cobbler-ip COBBLER_IP]
-                             [--puppet-environment PUPPET_ENVIRONMENT] [--puppet-ip PUPPET_IP]
-                             [--puppet-fqdn PUPPET_FQDN]
-
-options:
-  -h, --help            show this help message and exit
-  --templates-dir TEMPLATES_DIR, -t TEMPLATES_DIR
-  --authorized-keys AUTHORIZED_KEYS, -k AUTHORIZED_KEYS
-  --output-dir OUTPUT_DIR, -o OUTPUT_DIR
-  --cobbler-ip COBBLER_IP, -c COBBLER_IP
-  --puppet-environment PUPPET_ENVIRONMENT, -e PUPPET_ENVIRONMENT
-  --puppet-ip PUPPET_IP
-  --puppet-fqdn PUPPET_FQDN
+poetry install
+poetry run cheeto --version
 ```
 
-Template layout structure:
+Daemon setup:
+
+1. Write the `daemon`/`api` config blocks on each host (profiles let one
+   file serve dev and prod). Ensure `beat_schedule_filename` and the
+   sympa `output_dir` are writable by the service user.
+2. Create the daemon author account once (a system user named by
+   `daemon.author`, e.g. `cheeto-daemon`) so History entries attribute
+   correctly.
+3. Run one unit per process type. Minimal systemd service sketch:
+
+```ini
+[Unit]
+Description=cheeto hub worker
+After=network-online.target
+
+[Service]
+User=cheeto
+ExecStart=/usr/local/bin/cheeto daemon worker --profile prod --log
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+   On the hub: `worker`, `beat` (add `--pidfile`), and `api`. On each
+   cluster head node: `worker --site <name>` (needs local `sacctmgr`;
+   `slurm_sync` honors the `sudo` task option).
+
+Operational notes:
+
+- Task results and failures: `db.celery_taskmeta` in the application
+  database (pruned automatically after `result_expires`).
+- One-off manual runs of any sync remain available via the CLI
+  (`cheeto ng slurm sync`, `cheeto ng ldap sync-site`,
+  `cheeto ng iam sync-all`, `cheeto ng hippo process`).
+- The API serves credential material (root keys); set `api.api_key`
+  and/or bind it to a management network.
+
+## Development
+
 ```bash
-templates/
-templates/hosts/ # Required: individual HOSTNAME.j2 files
-templates/layouts/ # Optional: additional templates with disk layouts
-templates/snippets/ # Optional: snippets to be available (e.g. for --authorized-keys)
+poetry install
+poetry run pytest                                  # full suite
+poetry run pytest cheeto/tests/test_beanie.py -k name -v
 ```
 
-Simple template for a host with a single disk (`templates/hosts/HOSTNAME.j2`):
-```jinja
-{#- HOSTNAME
-Any metadata you want to have as notes about the host.
--#}
-{% extends "single_disk.yaml" %}
-```
+The test suite starts an ephemeral `mongod` (port 28080, replica set) via
+a session fixture in `cheeto/tests/conftest.py`; `mongod` and `mongosh`
+must be on PATH. No RabbitMQ is needed — celery wiring is tested in eager
+mode and the API via an in-process ASGI transport.
 
-More complex host template that requires multiple drive layouts  (`templates/hosts/HOSTNAME.j2`):
-```jinja
-{#- HOSTNAME
-Any metadata you want to have as notes about the host.
--#}
-{%- extends "raid1_all_root.yaml" %}
-{%- block disks %}
-{{ super() }}
-{%- include 'raid1_largest_scratch.yaml' %}
-{%- endblock disks %}
-```
+Versioning: `poetry version patch|minor|major` (syncs
+`cheeto/__init__.py`).
+
+See `CLAUDE.md` and `.claude/rules/` for module-specific development
+conventions (Slurm accounting model, `sh` subprocess usage, beanie
+patterns).
