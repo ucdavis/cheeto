@@ -9,7 +9,7 @@ from pydantic import Field, field_validator
 
 from .base import link_target_id
 from .group import Group
-from .ldap_sync import ldap_touch
+from .ldap_sync import ldap_touch, queue_ldap_touch
 from .site_association import SiteAssociation
 from .user import User
 
@@ -50,14 +50,18 @@ class GroupMembership(SiteAssociation):
         # Membership edges affect BOTH sides of the LDAP projection: the
         # user's memberOf reconcile and the group's member list. Update
         # covers save()/save_changes() (they route through self.update());
-        # runs without the caller's session (spurious dirty is harmless).
-        await User.find_one(
-            User.id == link_target_id(self.user),
-        ).update(ldap_touch())
-        await Group.find_one(
-            Group.id == link_target_id(self.group),
-            with_children=True,
-        ).update(ldap_touch())
+        # sessionless writes — deferred past any active Operation
+        # transaction (see ldap_sync docstring).
+        user_id = link_target_id(self.user)
+        group_id = link_target_id(self.group)
+
+        async def touch():
+            await User.find_one(User.id == user_id).update(ldap_touch())
+            await Group.find_one(
+                Group.id == group_id, with_children=True,
+            ).update(ldap_touch())
+
+        await queue_ldap_touch(touch)
 
     class Settings:
         name = 'group_membership'

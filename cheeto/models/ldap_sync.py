@@ -18,15 +18,29 @@ stays dirty.
 Changes that affect a record's LDAP projection but live on OTHER documents
 (SshKey, UserSiteInfo, GroupMembership, StorageVolume, AutomountMap) are
 covered by propagation hooks on those documents that set
-`ldap.modified_at` on the affected records directly — see `touch_ldap`.
+`ldap.modified_at` on the affected records directly — see `ldap_touch` /
+`queue_ldap_touch`.
+
+Transaction safety: the propagation write runs OUTSIDE any session. If it
+executed while an Operation's transaction holds an uncommitted write to
+the same parent document (e.g. SetUserStatus saves the USI and then the
+user; MigrateUser folds access and then inserts USIs), the two writes
+deadlock until mongod aborts the transaction at transactionLifetimeLimit.
+So inside an Operation the touches are DEFERRED: `Operation._run` opens a
+deferral scope (contextvar, task-local) and the hooks queue their writes,
+which flush only after the transaction commits — also meaning a rolled-
+back operation marks nothing dirty. Outside an operation (direct saves in
+scripts/tests) the touch applies immediately.
 """
 
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from beanie import (
     Insert,
@@ -39,12 +53,42 @@ from beanie import (
 from beanie.operators import Set
 from pydantic import BaseModel, Field, field_validator
 
+_DEFERRED_TOUCHES: ContextVar[list[Callable[[], Awaitable]] | None] = (
+    ContextVar('ldap_deferred_touches', default=None)
+)
+
 
 def ldap_touch() -> Set:
     """Update operator that marks a record LDAP-dirty directly. Used by the
     propagation hooks (and only them): applied through query-builder
     updates, it bypasses the target's own action events by design."""
     return Set({'ldap.modified_at': utcnow_naive()})
+
+
+async def queue_ldap_touch(touch: Callable[[], Awaitable]) -> None:
+    """Apply a propagation touch, or queue it when a deferral scope is
+    active (see the module docstring). `touch` is a zero-arg coroutine
+    factory so the timestamp is minted at flush time."""
+    deferred = _DEFERRED_TOUCHES.get()
+    if deferred is not None:
+        deferred.append(touch)
+    else:
+        await touch()
+
+
+@asynccontextmanager
+async def deferred_ldap_touches():
+    """Defer propagation touches queued in this task until the block exits
+    cleanly. On an exception the queued touches are dropped — the writes
+    that would have justified them rolled back with the transaction."""
+    touches: list[Callable[[], Awaitable]] = []
+    token = _DEFERRED_TOUCHES.set(touches)
+    try:
+        yield
+    finally:
+        _DEFERRED_TOUCHES.reset(token)
+    for touch in touches:
+        await touch()
 
 
 def utcnow_naive() -> datetime:

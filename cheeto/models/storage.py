@@ -44,7 +44,12 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..constants import DATA_QUOTA_REGEX, MOUNT_FSTYPES, STORAGE_CATEGORIES
 from ..utils import megs_to_size, size_to_megs_exact
 from .base import BaseDocument, Expirable, link_target_id
-from .ldap_sync import LDAPSyncable, ldap_touch, stable_fingerprint
+from .ldap_sync import (
+    LDAPSyncable,
+    ldap_touch,
+    queue_ldap_touch,
+    stable_fingerprint,
+)
 from .site import Site
 from .user import User
 
@@ -125,10 +130,14 @@ class AutomountMap(BaseDocument):
     async def mark_storages_ldap_dirty(self) -> None:
         # Storage.mount_options derives from this map's options; mark the
         # dependent rows dirty directly. Update covers save()/save_changes();
-        # runs without the caller's session (spurious dirty is harmless).
-        await Storage.find(
-            Storage.automount_map.id == self.id,
-        ).update_many(ldap_touch())
+        # sessionless write — deferred past any active Operation
+        # transaction (see ldap_sync docstring).
+        map_id = self.id
+        await queue_ldap_touch(
+            lambda: Storage.find(
+                Storage.automount_map.id == map_id,
+            ).update_many(ldap_touch())
+        )
 
     class Settings:
         name = 'automount_maps'
@@ -200,11 +209,15 @@ class StorageVolume(BaseDocument, Expirable):
     @after_event(Insert, Replace, Update, Delete)
     async def mark_storages_ldap_dirty(self) -> None:
         # Storage.host/host_path derive from this volume; mark the dependent
-        # rows dirty directly. Update covers save()/save_changes(); runs
-        # without the caller's session (spurious dirty is harmless).
-        await Storage.find(
-            Storage.volume.id == self.id,
-        ).update_many(ldap_touch())
+        # rows dirty directly. Update covers save()/save_changes();
+        # sessionless write — deferred past any active Operation
+        # transaction (see ldap_sync docstring).
+        volume_id = self.id
+        await queue_ldap_touch(
+            lambda: Storage.find(
+                Storage.volume.id == volume_id,
+            ).update_many(ldap_touch())
+        )
 
     @property
     def quota(self) -> str | None:

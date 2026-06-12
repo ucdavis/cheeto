@@ -9,6 +9,7 @@ from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.history import History
+from ..models.ldap_sync import deferred_ldap_touches
 from ..models.user import User
 
 
@@ -77,11 +78,16 @@ class Operation(ABC):
         return result
 
     async def _run(self) -> Any:
-        async with self.client.start_session() as session:
-            if self.transactional:
-                async with await session.start_transaction():
-                    return await self._execute_and_log(session)
-            return await self._execute_and_log(session)
+        # LDAP dirty-propagation hooks write outside the session; deferring
+        # them until after the transaction commits prevents deadlocks with
+        # this operation's own writes (and drops them on rollback). See
+        # cheeto/models/ldap_sync.py.
+        async with deferred_ldap_touches():
+            async with self.client.start_session() as session:
+                if self.transactional:
+                    async with await session.start_transaction():
+                        return await self._execute_and_log(session)
+                return await self._execute_and_log(session)
 
     @classmethod
     async def run(cls, client: AsyncMongoClient, author: User | None, **kwargs: Any) -> Any:

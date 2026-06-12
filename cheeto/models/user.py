@@ -17,7 +17,12 @@ from ..constants import (
     USER_TYPES,
 )
 from .base import BaseDocument, Expirable, link_target_id
-from .ldap_sync import LDAPSyncable, ldap_touch, stable_fingerprint
+from .ldap_sync import (
+    LDAPSyncable,
+    ldap_touch,
+    queue_ldap_touch,
+    stable_fingerprint,
+)
 
 if TYPE_CHECKING:
     from .group import AccessGroup, StatusGroup
@@ -174,11 +179,13 @@ class SshKey(BaseDocument, Expirable):
     @after_event(Insert, Replace, Update, Delete)
     async def mark_user_ldap_dirty(self) -> None:
         # save()/save_changes() route through self.update(), so Update
-        # covers them; subscribing Save too would double-fire. Runs without
-        # the caller's session — a spurious dirty on txn abort is harmless.
-        await User.find_one(
-            User.id == link_target_id(self.user),
-        ).update(ldap_touch())
+        # covers them; subscribing Save too would double-fire. Sessionless
+        # write — deferred past any active Operation transaction (see
+        # ldap_sync module docstring).
+        user_id = link_target_id(self.user)
+        await queue_ldap_touch(
+            lambda: User.find_one(User.id == user_id).update(ldap_touch())
+        )
 
     class Settings:
         name = 'ssh_keys'

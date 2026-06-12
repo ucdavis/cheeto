@@ -8,7 +8,7 @@ from pymongo import IndexModel
 from pydantic import Field
 
 from .base import BaseDocument, Expirable, link_target_id
-from .ldap_sync import ldap_touch
+from .ldap_sync import ldap_touch, queue_ldap_touch
 from .site import Site
 from .user import User
 
@@ -34,11 +34,12 @@ class UserSiteInfo(BaseDocument, Expirable):
     @after_event(Insert, Replace, Update, Delete)
     async def mark_user_ldap_dirty(self) -> None:
         # Per-site status/access overrides feed the user's LDAP projection.
-        # Update covers save()/save_changes(); runs without the caller's
-        # session (spurious dirty on txn abort is harmless).
-        await User.find_one(
-            User.id == link_target_id(self.user),
-        ).update(ldap_touch())
+        # Update covers save()/save_changes(); sessionless write — deferred
+        # past any active Operation transaction (see ldap_sync docstring).
+        user_id = link_target_id(self.user)
+        await queue_ldap_touch(
+            lambda: User.find_one(User.id == user_id).update(ldap_touch())
+        )
 
     class Settings:
         name = 'user_site_info'
