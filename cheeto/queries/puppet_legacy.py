@@ -5,9 +5,12 @@ reads from the beanie collections and produces a
 `cheeto.puppet.PuppetAccountMap` that can be serialized via the existing
 marshmallow schema (`PuppetAccountMap.Schema().dumps(...)`).
 
-Storage and shares are intentionally out of scope for this pass — v2
-has the `Storage` model but no query helpers yet. The output omits
-`storage` on user/group records and emits an empty `share: {}` block.
+Storage follows v1's automount-table projection (`crud.py`
+user_to_puppet/group_to_puppet/share_to_puppet): the user record carries
+its home storage (`autofs` nas + parent path, `zfs` quota or false),
+group records carry a `storage:` list of their group-category automount
+rows, and share-category rows become the `share:` map. Storages without
+an automount map (static-mount sites) are not projected, matching v1.
 
 Shell handling matches v1 verbatim: the raw `User.shell` is emitted,
 even when the user is inactive/disabled. v1's `user_to_puppet` computes
@@ -17,23 +20,31 @@ a translated shell into a local variable that's never read
 
 from __future__ import annotations
 
+import logging
+from pathlib import PurePosixPath
+
 from beanie.operators import In
 
 from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
 from ..models.site import Site
+from ..models.storage import Storage
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
 from ..puppet import (
     PuppetAccountMap,
     PuppetGroupRecord,
+    PuppetShareRecord,
     PuppetUserRecord,
 )
 from ..utils import removed_nones
 from .access_status import resolve_access_names
 from .slurm import user_slurm_at_site
+from .storage import list_automap_storages
 from .user import effective_access_links
+
+logger = logging.getLogger(__name__)
 
 
 _ACCESS_TO_TAG = {
@@ -57,11 +68,26 @@ def _expiry_for(user: User, usi: UserSiteInfo) -> str | None:
     return when.date().isoformat()
 
 
+def _puppet_zfs(storage: Storage) -> dict | bool:
+    """v1 `get_puppet_zfs` parity: a quota'd managed dataset renders as
+    `{quota: ...}`, anything else (quobyte, bare/unmanaged volume, subpath
+    export — whose `quota` property is already None) as `false`."""
+    if storage.volume.zfs is not None and storage.quota:
+        return {'quota': storage.quota}
+    return False
+
+
+def _autofs_options(storage: Storage) -> str:
+    # v1 strips the fstype token and joins reverse-sorted (crud.py
+    # group_to_puppet).
+    return ','.join(
+        sorted(set(storage.mount_options) - {'fstype=nfs'}, reverse=True)
+    )
+
+
 async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     """Build a v1-compatible PuppetAccountMap from v2 data at `site`."""
     usis = await UserSiteInfo.find(UserSiteInfo.site.id == site.id).to_list()
-    if not usis:
-        return PuppetAccountMap(user={}, group={}, share={})
 
     user_ids = [usi.user.ref.id for usi in usis]
     usi_by_user_id = {usi.user.ref.id: usi for usi in usis}
@@ -99,6 +125,29 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     ]
     group_by_id = {g.id: g for g in candidate_groups}
 
+    # Automount-table storage projections (v1 user_to_puppet /
+    # group_to_puppet / share_to_puppet). Depth-1 link fetch resolves
+    # volume/automount_map/owner/group, which is all the blocks need.
+    home_by_owner: dict = {}
+    for s in await list_automap_storages(site, 'home'):
+        home_by_owner.setdefault(link_target_id(s.owner), s)
+
+    storages_by_group_id: dict = {}
+    for s in await list_automap_storages(site, 'group'):
+        gid = link_target_id(s.group)
+        storages_by_group_id.setdefault(gid, []).append(s)
+        # v1 exported every SiteGroup; a group whose only site presence is
+        # its storage must still appear in the group map.
+        if gid not in group_by_id and not isinstance(
+            s.group, (AccessGroup, StatusGroup),
+        ):
+            group_by_id[gid] = s.group
+            candidate_groups.append(s.group)
+
+    share_storages = sorted(
+        await list_automap_storages(site, 'share'), key=lambda s: s.name,
+    )
+
     member_groups_by_user: dict = {uid: set() for uid in user_ids}
     sudoer_groups_by_user: dict = {uid: set() for uid in user_ids}
     sponsor_ids_by_group: dict = {}
@@ -123,13 +172,14 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
 
     # Identify primary groups for at-site users — excluded from both
     # the user record's `groups` and the top-level `group:` map (matches
-    # v1's skip at crud.py:1140-1144).
-    primary_group_ids: set = set()
-    for u in users:
-        for gid in member_groups_by_user[u.id]:
-            g = group_by_id[gid]
-            if g.name == u.name and g.gid == u.uid:
-                primary_group_ids.add(gid)
+    # v1's skip at crud.py:1140-1144). Checked over every candidate group
+    # (not just member edges) so a storage-owning primary group is still
+    # excluded.
+    user_name_uid = {(u.name, u.uid) for u in users}
+    primary_group_ids: set = {
+        g.id for g in candidate_groups
+        if (g.name, g.gid) in user_name_uid
+    }
 
     # Batch sponsor name resolution across every sponsor edge.
     sponsor_ids = {
@@ -164,6 +214,21 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         slurm_rows = await user_slurm_at_site(u, site)
         account_names = sorted({row.group.name for row in slurm_rows})
 
+        home = home_by_owner.get(u.id)
+        if home is not None:
+            storage_data = {
+                'autofs': {
+                    'nas': home.host,
+                    'path': str(PurePosixPath(home.host_path).parent),
+                },
+                'zfs': _puppet_zfs(home),
+            }
+        else:
+            storage_data = None
+            logger.warning(
+                'No home storage found for %s at %s', u.name, site.name,
+            )
+
         record_data = removed_nones({
             'fullname': u.fullname,
             'email': u.email,
@@ -177,6 +242,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             'home': u.home_directory,
             'expiry': _expiry_for(u, usi),
             'slurm': {'account': account_names} if account_names else None,
+            'storage': storage_data,
         })
         user_records[u.name] = PuppetUserRecord.load(record_data)
 
@@ -188,14 +254,44 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             n for sid in sponsor_ids_by_group.get(g.id, set())
             if (n := sponsor_name_by_id.get(sid)) is not None
         })
+        # v1 emits the storage list unconditionally (empty when the group
+        # owns no automounted storage at the site).
+        storage_rows = [
+            {
+                'name': s.name,
+                'owner': s.owner.name,
+                'group': s.group.name,
+                'autofs': {
+                    'nas': s.host,
+                    'path': s.host_path,
+                    'options': _autofs_options(s),
+                },
+                'zfs': _puppet_zfs(s),
+                'globus': s.globus,
+            }
+            for s in sorted(
+                storages_by_group_id.get(g.id, []), key=lambda s: s.name,
+            )
+        ]
         record_data = removed_nones({
             'gid': g.gid,
             'sponsors': sponsor_names or None,
+            'storage': storage_rows,
         })
         group_records[g.name] = PuppetGroupRecord.load(record_data)
+
+    share_records = {
+        s.name: PuppetShareRecord.load({'storage': {
+            'owner': s.owner.name,
+            'group': s.group.name,
+            'autofs': {'nas': s.host, 'path': s.host_path},
+            'zfs': _puppet_zfs(s),
+        }})
+        for s in share_storages
+    }
 
     return PuppetAccountMap(
         user=user_records,
         group=group_records,
-        share={},
+        share=share_records,
     )

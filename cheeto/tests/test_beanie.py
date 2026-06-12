@@ -2617,7 +2617,8 @@ async def access_links_to_names(links) -> list[str]:
 
 class TestSiteToPuppetLegacy:
     """`site_to_puppet_legacy(site)` reproduces v1's site_to_puppet output
-    shape from v2 data. Storage/share blocks are intentionally empty."""
+    shape from v2 data. Storage/share blocks are covered separately in
+    TestSiteToPuppetLegacyStorage."""
 
     async def test_empty_site_yields_empty_maps(self, beanie_client):
         from cheeto.queries import site_to_puppet_legacy
@@ -2810,6 +2811,199 @@ class TestSiteToPuppetLegacy:
         result = await site_to_puppet_legacy(site)
         assert 'pl_sponsor' not in result.user  # not at site
         assert result.group['pl_lab'].sponsors == ['pl_sponsor']
+
+
+class TestSiteToPuppetLegacyStorage:
+    """Storage blocks in the legacy export: user home autofs/zfs, group
+    storage lists, and the share map (v1 user_to_puppet / group_to_puppet /
+    share_to_puppet parity)."""
+
+    async def _seed_base(self):
+        site = Site(name='plstor', fqdn='plstor.test')
+        await site.insert()
+        user = User(
+            name='pls_user', email='pls@x.test',
+            uid=62001, gid=62001, fullname='Storage User',
+            home_directory='/home/pls_user',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+        primary = Group(name='pls_user', gid=62001)
+        await primary.insert()
+        lab = Group(name='pls_lab', gid=62100)
+        await lab.insert()
+        await GroupMembership(
+            user=user, group=lab, site=site, roles=['member'],
+        ).insert()
+        return site, user, primary, lab
+
+    @staticmethod
+    async def _volume(site, name, host_path, quota=None, managed=True):
+        vol = StorageVolume(
+            name=name, site=site, backend='zfs',
+            zfs=ZFSConfig() if managed else None,
+            host='nas-1', host_path=host_path,
+            allocations=(
+                [StorageAllocation(quota=quota)] if quota else []
+            ),
+        )
+        await vol.insert()
+        return vol
+
+    async def test_user_home_storage(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        amap = AutomountMap(
+            name='home', site=site, prefix='/home',
+            options=['fstype=nfs', 'nosuid'],
+        )
+        await amap.insert()
+        vol = await self._volume(
+            site, 'home-pls_user', '/export/home/pls_user', quota='1T',
+        )
+        await Storage(
+            name='pls_user', site=site, category='home',
+            owner=user, group=primary, volume=vol, automount_map=amap,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        storage = result.user['pls_user'].storage
+        assert storage is not None
+        assert storage.autofs.nas == 'nas-1'
+        # v1 emits the PARENT of the storage path for user homes.
+        assert storage.autofs.path == '/export/home'
+        assert storage.zfs.quota == '1T'
+
+    async def test_user_without_home_storage_omits_block(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, *_ = await self._seed_base()
+        result = await site_to_puppet_legacy(site)
+        assert result.user['pls_user'].storage is None
+
+    async def test_subpath_home_renders_zfs_false(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        # Farm legacy shape: home carved out of a collection volume.
+        vol = await self._volume(
+            site, 'homes', '/export/home', quota='100T',
+        )
+        await Storage(
+            name='pls_user', site=site, category='home',
+            owner=user, group=primary, volume=vol, subpath='pls_user',
+            automount_map=amap,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        storage = result.user['pls_user'].storage
+        assert storage.autofs.path == '/export/home'
+        assert storage.zfs is False  # subpath storages have no quota
+
+    async def test_group_storage_list(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        amap = AutomountMap(
+            name='group', site=site, prefix='/group',
+            options=['fstype=nfs', 'noatime', 'nosuid'],
+        )
+        await amap.insert()
+        vol = await self._volume(
+            site, 'pls_lab', '/export/group/pls_lab', quota='10T',
+        )
+        await Storage(
+            name='pls_lab', site=site, category='group',
+            owner=user, group=lab, volume=vol, automount_map=amap,
+            globus=True,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        rows = result.group['pls_lab'].storage
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.name == 'pls_lab'
+        assert row.owner == 'pls_user'
+        assert row.group == 'pls_lab'
+        assert row.autofs.nas == 'nas-1'
+        assert row.autofs.path == '/export/group/pls_lab'  # full path
+        # fstype=nfs stripped; remaining options reverse-sorted (v1 parity).
+        assert row.autofs.options == 'nosuid,noatime'
+        assert row.zfs.quota == '10T'
+        assert row.globus is True
+
+    async def test_unmanaged_volume_renders_zfs_false(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        amap = AutomountMap(name='group', site=site, prefix='/group')
+        await amap.insert()
+        vol = await self._volume(
+            site, 'pls_lab', '/export/group/pls_lab',
+            quota='10T', managed=False,
+        )
+        await Storage(
+            name='pls_lab', site=site, category='group',
+            owner=user, group=lab, volume=vol, automount_map=amap,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert result.group['pls_lab'].storage[0].zfs is False
+
+    async def test_storage_only_group_appears(self, beanie_client):
+        """v1 exported every SiteGroup; a group with no membership edges
+        but with storage at the site must still appear."""
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        loner = Group(name='pls_loner', gid=62200)
+        await loner.insert()  # no GroupMembership edges
+        amap = AutomountMap(name='group', site=site, prefix='/group')
+        await amap.insert()
+        vol = await self._volume(
+            site, 'pls_loner', '/export/group/pls_loner', quota='5T',
+        )
+        await Storage(
+            name='pls_loner', site=site, category='group',
+            owner=user, group=loner, volume=vol, automount_map=amap,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert 'pls_loner' in result.group
+        assert result.group['pls_loner'].gid == 62200
+        assert result.group['pls_loner'].storage[0].zfs.quota == '5T'
+        # Groups without storage emit an empty list (v1 parity).
+        assert result.group['pls_lab'].storage == []
+
+    async def test_share_map(self, beanie_client):
+        from cheeto.queries import site_to_puppet_legacy
+
+        site, user, primary, lab = await self._seed_base()
+        amap = AutomountMap(name='share', site=site, prefix='/share')
+        await amap.insert()
+        vol = await self._volume(
+            site, 'datashare', '/export/share/datashare', quota='20T',
+        )
+        await Storage(
+            name='datashare', site=site, category='share',
+            owner=user, group=lab, volume=vol, automount_map=amap,
+        ).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert set(result.share.keys()) == {'datashare'}
+        rec = result.share['datashare'].storage
+        assert rec.owner == 'pls_user'
+        assert rec.group == 'pls_lab'
+        assert rec.autofs.nas == 'nas-1'
+        assert rec.autofs.path == '/export/share/datashare'
+        assert rec.zfs.quota == '20T'
 
 
 class _FakeLDAPManager:
