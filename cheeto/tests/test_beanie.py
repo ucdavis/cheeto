@@ -3350,6 +3350,28 @@ class TestLDAPSyncablePropagation:
         await key.save()
         assert len(calls) == 1
 
+    async def test_op_writing_parent_and_edge_defers_touch(
+        self, beanie_client,
+    ):
+        # SetUserStatus(site=...) saves the USI (whose hook touches the
+        # user) AND the user doc in one transaction. The touch must defer
+        # past the commit instead of deadlocking against the transaction's
+        # own user write (which previously stalled until mongod aborted
+        # the txn at transactionLifetimeLimit).
+        user, site = await self._seed()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+        before = await self._modified_at(User, user.id)
+
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='propu', status='inactive', reason='testing',
+            site='propsite',
+        )
+
+        assert await self._modified_at(User, user.id) > before
+
 
 async def _seed_gate_site(sitename='gatesite', username='gateu', uid=74001):
     user = User(
@@ -5239,6 +5261,126 @@ class TestMigrateSitesFilter:
             assert _validate_sites_filter(console, None) is True
             assert _validate_sites_filter(console, ['realsite']) is True
             assert _validate_sites_filter(console, ['realsite', 'nope']) is False
+        finally:
+            connection.drop_database(cfg.database)
+
+
+class TestMigrateTwoPass:
+    """`migrate --sites A` followed by `migrate --sites B` must converge:
+    users and groups migrated in the first pass still get their
+    UserSiteInfo records, access extras, and GroupMembership edges for the
+    newly onboarded site."""
+
+    # Reuse the two-site v1 seed/connect helpers (plain functions; they
+    # don't touch instance state).
+    _connect_v1 = TestMigrateSitesFilter._connect_v1
+    _seed_two_sites_v1 = TestMigrateSitesFilter._seed_two_sites_v1
+
+    async def test_second_pass_adds_new_site_state(self, beanie_client):
+        from cheeto.operations import (
+            MigrateGroups,
+            MigrateSites,
+            MigrateUsers,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_twopass_test')
+        try:
+            self._seed_two_sites_v1()
+
+            # Pass 1: only keepsite.
+            await MigrateSites.run(beanie_client, None, sitenames=['keepsite'])
+            await MigrateUsers.run(beanie_client, None, sitenames=['keepsite'])
+            await MigrateGroups.run(beanie_client, None, sitenames=['keepsite'])
+
+            user = await User.find_one(User.name == 'filtuser')
+            first_id = user.id
+            assert await UserSiteInfo.find(
+                UserSiteInfo.user.id == user.id,
+            ).count() == 1
+            assert await GroupMembership.find_all().count() == 1
+
+            # Pass 2: depsite is now onboarded.
+            await MigrateSites.run(beanie_client, None, sitenames=['depsite'])
+            users_op = MigrateUsers(
+                beanie_client, None, sitenames=['depsite'],
+            )
+            await users_op._run()
+            groups_op = MigrateGroups(
+                beanie_client, None, sitenames=['depsite'],
+            )
+            await groups_op._run()
+
+            assert users_op.migrated == 0
+            assert users_op.updated == 1
+            assert groups_op.migrated == 0
+            assert groups_op.skipped == 1
+            assert groups_op.edges_created == 1
+
+            # User not recreated; the new site's per-site access extra
+            # folded in (add-only).
+            user = await User.find_one(User.name == 'filtuser')
+            assert user.id == first_id
+            access = await access_links_to_names(user.access)
+            assert set(access) == {'login-ssh', 'root-ssh'}
+
+            dep = await Site.find_one(Site.name == 'depsite')
+            usi = await UserSiteInfo.find_one(
+                UserSiteInfo.user.id == user.id,
+                UserSiteInfo.site.id == dep.id,
+            )
+            assert usi is not None
+            group = await Group.find_one(Group.name == 'filtgrp')
+            edge = await GroupMembership.find_one(
+                GroupMembership.user.id == user.id,
+                GroupMembership.group.id == group.id,
+                GroupMembership.site.id == dep.id,
+            )
+            assert edge is not None
+            assert edge.roles == ['member']
+
+            # Re-running pass 2 is fully convergent: nothing new, no
+            # duplicate-key errors from the unique USI/edge indexes.
+            users_op2 = MigrateUsers(
+                beanie_client, None, sitenames=['depsite'],
+            )
+            await users_op2._run()
+            groups_op2 = MigrateGroups(
+                beanie_client, None, sitenames=['depsite'],
+            )
+            await groups_op2._run()
+            assert users_op2.updated == 0
+            assert users_op2.unchanged == 1
+            assert groups_op2.edges_created == 0
+            assert groups_op2.edges_existing == 1
+            assert await UserSiteInfo.find_all().count() == 2
+            assert await GroupMembership.find_all().count() == 2
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_single_user_migrate_on_existing_converges(
+        self, beanie_client,
+    ):
+        from cheeto.operations import MigrateSites, MigrateUser
+
+        connection, cfg = self._connect_v1('cheeto_migrate_twopass_single')
+        try:
+            self._seed_two_sites_v1()
+            await MigrateSites.run(beanie_client, None, sitenames=['keepsite'])
+            await MigrateUser.run(
+                beanie_client, None,
+                username='filtuser', sitenames=['keepsite'],
+            )
+
+            # Previously raised 'already exists'; now converges.
+            await MigrateSites.run(beanie_client, None, sitenames=['depsite'])
+            op = MigrateUser(
+                beanie_client, None,
+                username='filtuser', sitenames=['depsite'],
+            )
+            await op._run()
+            assert op.created is False
+            assert op.site_infos_created == 1
+            assert op.access_added == 1
         finally:
             connection.drop_database(cfg.database)
 

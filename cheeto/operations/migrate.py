@@ -508,7 +508,17 @@ class MigrateSiteGlobals(Operation):
 
 
 class MigrateUser(Operation):
-    """Migrate a single user and their site memberships from mongoengine to beanie."""
+    """Migrate a single user and their site memberships from mongoengine
+    to beanie.
+
+    Convergent: when the v2 User already exists (e.g. a previous
+    `migrate --sites A B` pass), the user document is NOT recreated, but
+    per-site state for the sites in scope still converges — missing
+    UserSiteInfo records are created and newly-in-scope sites' v1 per-site
+    access extras are folded (add-only) into the global access list. This
+    is what makes `migrate --sites A B` followed by `migrate --sites C`
+    pick up site C's memberships for already-migrated users.
+    """
 
     op_name = 'migrate_user'
 
@@ -524,7 +534,10 @@ class MigrateUser(Operation):
         super().__init__(client, author)
         self.username = username
         self.sitenames = set(sitenames) if sitenames else None
+        self.created = False
         self.site_infos_created = 0
+        self.site_infos_existing = 0
+        self.access_added = 0
         self.filtered = 0
         self._sites_by_name = sites_by_name
 
@@ -535,10 +548,6 @@ class MigrateUser(Operation):
 
     async def execute(self, session: AsyncClientSession) -> User:
         self.logger.info('MigrateUser starting for username=%s', self.username)
-        existing = await User.find_one(User.name == self.username)
-        if existing is not None:
-            raise ValueError(f'User {self.username} already exists in new database')
-
         old_user = GlobalUser.objects(username=self.username).first()
         if old_user is None:
             raise ValueError(f'User {self.username} not found in old database')
@@ -566,6 +575,34 @@ class MigrateUser(Operation):
                 if len(access_shorthands) > before:
                     sites_with_extras += 1
 
+        existing = await User.find_one(User.name == self.username)
+        if existing is not None:
+            user = existing
+            await self._fold_access_into_existing(
+                user, access_shorthands, session,
+            )
+        else:
+            user = await self._create_user(
+                old_user, access_shorthands, sites_with_extras, session,
+            )
+            self.created = True
+
+        await self._ensure_site_infos(user, old_site_users, session)
+
+        self.logger.info(
+            'MigrateUser done for %s: created=%s site_infos=%d existing=%d',
+            self.username, self.created,
+            self.site_infos_created, self.site_infos_existing,
+        )
+        return user
+
+    async def _create_user(
+        self,
+        old_user,
+        access_shorthands: set[str],
+        sites_with_extras: int,
+        session: AsyncClientSession,
+    ) -> User:
         user_status = await _resolve_status_link_for_migration(old_user.status)
         user_access = await _resolve_access_links_for_migration(
             sorted(access_shorthands)
@@ -600,7 +637,39 @@ class MigrateUser(Operation):
                 'Migrated %d ssh key(s) for %s',
                 len(old_user.ssh_key), self.username,
             )
+        return user
 
+    async def _fold_access_into_existing(
+        self,
+        user: User,
+        access_shorthands: set[str],
+        session: AsyncClientSession,
+    ) -> None:
+        """Add-only: a newly in-scope site's v1 access extras join the
+        existing global list; nothing is ever removed on a re-run."""
+        target_access = await _resolve_access_links_for_migration(
+            sorted(access_shorthands)
+        )
+        existing_ids = {link_target_id(a) for a in user.access}
+        new_links = [
+            a for a in target_access
+            if link_target_id(a) not in existing_ids
+        ]
+        if new_links:
+            user.access = list(user.access) + new_links
+            await user.save(session=session)
+            self.access_added = len(new_links)
+            self.logger.info(
+                'Folded %d new access link(s) into existing user %s',
+                len(new_links), self.username,
+            )
+
+    async def _ensure_site_infos(
+        self,
+        user: User,
+        old_site_users,
+        session: AsyncClientSession,
+    ) -> None:
         # Migrate SiteUser records for this user. We deliberately leave
         # `UserSiteInfo.access` empty — the v1 per-site overrides have
         # been folded into the global v2 list above, and v2 override
@@ -612,6 +681,14 @@ class MigrateUser(Operation):
                     'SiteUser %s references non-existent site %s, skipping',
                     self.username, old_site_user.sitename,
                 )
+                continue
+
+            existing_usi = await UserSiteInfo.find_one(
+                UserSiteInfo.user.id == user.id,
+                UserSiteInfo.site.id == site.id,
+            )
+            if existing_usi is not None:
+                self.site_infos_existing += 1
                 continue
 
             usi_status = await _resolve_status_link_for_migration(
@@ -632,16 +709,13 @@ class MigrateUser(Operation):
                 self.username, old_site_user.sitename,
             )
 
-        self.logger.info(
-            'MigrateUser done for %s: site_infos=%d',
-            self.username, self.site_infos_created,
-        )
-        return user
-
     def describe(self) -> dict[str, Any]:
         return {
             'username': self.username,
+            'created': self.created,
             'site_infos_created': self.site_infos_created,
+            'site_infos_existing': self.site_infos_existing,
+            'access_added': self.access_added,
             'filtered': self.filtered,
             'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
@@ -662,7 +736,8 @@ class MigrateUsers(Operation):
         super().__init__(client, author)
         self.sitenames = list(sitenames) if sitenames else None
         self.migrated = 0
-        self.skipped = 0
+        self.updated = 0
+        self.unchanged = 0
         self.total_site_infos = 0
         self.total_filtered = 0
 
@@ -676,14 +751,8 @@ class MigrateUsers(Operation):
         }
         users = []
         for old_user in GlobalUser.objects.order_by('username'):
-            existing = await User.find_one(User.name == old_user.username)
-            if existing is not None:
-                self.logger.info(
-                    'User %s already exists, skipping', old_user.username,
-                )
-                self.skipped += 1
-                continue
-
+            # MigrateUser converges existing users (missing USIs, access
+            # extras for newly in-scope sites) rather than skipping them.
             op = MigrateUser(
                 self.client, self.author,
                 username=old_user.username,
@@ -693,19 +762,27 @@ class MigrateUsers(Operation):
             user = await op.execute(session)
             self.total_site_infos += op.site_infos_created
             self.total_filtered += op.filtered
-            users.append(user)
-            self.migrated += 1
+            if op.created:
+                users.append(user)
+                self.migrated += 1
+            elif op.site_infos_created or op.access_added:
+                self.updated += 1
+            else:
+                self.unchanged += 1
 
         self.logger.info(
-            'MigrateUsers done: migrated=%d skipped=%d site_infos=%d',
-            self.migrated, self.skipped, self.total_site_infos,
+            'MigrateUsers done: migrated=%d updated=%d unchanged=%d '
+            'site_infos=%d',
+            self.migrated, self.updated, self.unchanged,
+            self.total_site_infos,
         )
         return users
 
     def describe(self) -> dict[str, Any]:
         return {
             'users_migrated': self.migrated,
-            'users_skipped': self.skipped,
+            'users_updated': self.updated,
+            'users_unchanged': self.unchanged,
             'site_infos_created': self.total_site_infos,
             'site_infos_filtered': self.total_filtered,
             'sites_filter': sorted(self.sitenames) if self.sitenames else None,
@@ -728,6 +805,8 @@ class MigrateGroups(Operation):
         self.upgraded = 0
         self.skipped = 0
         self.filtered = 0
+        self.edges_created = 0
+        self.edges_existing = 0
 
     async def _load_users(self, names: set[str]) -> dict[str, User]:
         if not names:
@@ -779,12 +858,21 @@ class MigrateGroups(Operation):
             )
             if raw is not None:
                 cid = raw.get('_class_id')
+                if cid is not None and cid != Group._class_id:
+                    # AccessGroup / StatusGroup — name owned by the seed
+                    # step. Don't overwrite; flag the mismatch for
+                    # operator review.
+                    self.logger.warning(
+                        'Group %s exists in v2 as %s but v1 type=%r — '
+                        'skipping (classification mismatch; investigate)',
+                        old_group.groupname, cid, old_group.type,
+                    )
+                    self.skipped += 1
+                    continue
                 if cid is None:
-                    # Legacy doc. Stamp the discriminator so polymorphic
-                    # queries see it going forward. Existing fields stay
-                    # — they came from this same migration on a previous
-                    # run, so re-collecting members would only churn the
-                    # data without changing it.
+                    # Legacy doc predating is_root=True. Stamp the
+                    # discriminator so polymorphic queries see it going
+                    # forward; existing global fields stay.
                     await coll.update_one(
                         {'_id': raw['_id']},
                         {'$set': {'_class_id': Group._class_id}},
@@ -796,22 +884,22 @@ class MigrateGroups(Operation):
                         '(stamped _class_id=%r)',
                         old_group.groupname, raw.get('gid'), Group._class_id,
                     )
-                    continue
-                if cid == Group._class_id:
+                else:
                     self.logger.info(
-                        'Group %s already exists, skipping',
+                        'Group %s already exists; converging memberships',
                         old_group.groupname,
                     )
                     self.skipped += 1
-                    continue
-                # AccessGroup / StatusGroup — name owned by the seed step.
-                # Don't overwrite; flag the mismatch for operator review.
-                self.logger.warning(
-                    'Group %s exists in v2 as %s but v1 type=%r — skipping '
-                    '(classification mismatch; investigate)',
-                    old_group.groupname, cid, old_group.type,
+                # The global doc is settled either way, but per-site edges
+                # must still converge: a later `--sites C` pass has to add
+                # site C's memberships to groups migrated in an earlier
+                # pass.
+                group = await Group.find_one(
+                    Group.name == old_group.groupname,
                 )
-                self.skipped += 1
+                await self._ensure_memberships(
+                    group, old_group, sites_by_name, session,
+                )
                 continue
 
             # Create the (global) Group record first; membership is per-site
@@ -825,65 +913,90 @@ class MigrateGroups(Operation):
             groups.append(group)
             self.migrated += 1
 
-            # One GroupMembership edge per (user, site) for this group,
-            # with `roles` reflecting which v1 buckets the user appeared in.
-            # Resolve all usernames across every SiteGroup bucket in one query.
-            # Excluded-site buckets are filtered up front so their members
-            # are never loaded and produce no edges.
-            site_groups = list(SiteGroup.objects(parent=old_group))
-            if self.sitenames is not None:
-                before_filter = len(site_groups)
-                site_groups = [
-                    sg for sg in site_groups
-                    if sg.sitename in self.sitenames
-                ]
-                self.filtered += before_filter - len(site_groups)
-            all_names: set[str] = set()
-            for sg in site_groups:
-                for bucket in (sg._members, sg._sponsors, sg._sudoers, sg._slurmers):
-                    all_names |= set(self._unique_usernames(bucket))
-            users_by_name = await self._load_users(all_names)
-
-            edges_created = 0
-            for sg in site_groups:
-                site = sites_by_name.get(sg.sitename)
-                if site is None:
-                    self.logger.warning(
-                        'SiteGroup %s references non-existent site %s, '
-                        'skipping its memberships',
-                        old_group.groupname, sg.sitename,
-                    )
-                    continue
-                roles_by_username: dict[str, set[str]] = {}
-                for role, bucket in (
-                    ('member', sg._members), ('sponsor', sg._sponsors),
-                    ('sudoer', sg._sudoers), ('slurmer', sg._slurmers),
-                ):
-                    for username in self._unique_usernames(bucket):
-                        if username not in users_by_name:
-                            continue
-                        roles_by_username.setdefault(username, set()).add(role)
-                for username, roles in roles_by_username.items():
-                    edge = GroupMembership(
-                        user=users_by_name[username],
-                        group=group,
-                        site=site,
-                        roles=sorted(roles),
-                    )
-                    await edge.insert(session=session)
-                    edges_created += 1
-
-            self.logger.info(
-                'Migrated group %s (gid=%d, %d membership edge(s) across %d site(s))',
-                old_group.groupname, old_group.gid,
-                edges_created, len(site_groups),
+            await self._ensure_memberships(
+                group, old_group, sites_by_name, session,
             )
 
         self.logger.info(
-            'MigrateGroups done: migrated=%d upgraded=%d skipped=%d',
+            'MigrateGroups done: migrated=%d upgraded=%d skipped=%d '
+            'edges_created=%d edges_existing=%d',
             self.migrated, self.upgraded, self.skipped,
+            self.edges_created, self.edges_existing,
         )
         return groups
+
+    async def _ensure_memberships(
+        self,
+        group: Group,
+        old_group,
+        sites_by_name: dict[str, Site],
+        session: AsyncClientSession,
+    ) -> None:
+        """One GroupMembership edge per (user, site) for this group, with
+        `roles` reflecting which v1 buckets the user appeared in. Existing
+        edges are left untouched (no role churn); only missing edges are
+        inserted, which is what makes a second `--sites` pass convergent.
+        Excluded-site buckets are filtered up front so their members are
+        never loaded and produce no edges."""
+        site_groups = list(SiteGroup.objects(parent=old_group))
+        if self.sitenames is not None:
+            before_filter = len(site_groups)
+            site_groups = [
+                sg for sg in site_groups
+                if sg.sitename in self.sitenames
+            ]
+            self.filtered += before_filter - len(site_groups)
+        all_names: set[str] = set()
+        for sg in site_groups:
+            for bucket in (sg._members, sg._sponsors, sg._sudoers, sg._slurmers):
+                all_names |= set(self._unique_usernames(bucket))
+        users_by_name = await self._load_users(all_names)
+
+        existing_edges = {
+            (link_target_id(e.user), link_target_id(e.site))
+            for e in await GroupMembership.find(
+                GroupMembership.group.id == group.id,
+            ).to_list()
+        }
+
+        edges_created = 0
+        for sg in site_groups:
+            site = sites_by_name.get(sg.sitename)
+            if site is None:
+                self.logger.warning(
+                    'SiteGroup %s references non-existent site %s, '
+                    'skipping its memberships',
+                    old_group.groupname, sg.sitename,
+                )
+                continue
+            roles_by_username: dict[str, set[str]] = {}
+            for role, bucket in (
+                ('member', sg._members), ('sponsor', sg._sponsors),
+                ('sudoer', sg._sudoers), ('slurmer', sg._slurmers),
+            ):
+                for username in self._unique_usernames(bucket):
+                    if username not in users_by_name:
+                        continue
+                    roles_by_username.setdefault(username, set()).add(role)
+            for username, roles in roles_by_username.items():
+                user = users_by_name[username]
+                if (user.id, site.id) in existing_edges:
+                    self.edges_existing += 1
+                    continue
+                edge = GroupMembership(
+                    user=user,
+                    group=group,
+                    site=site,
+                    roles=sorted(roles),
+                )
+                await edge.insert(session=session)
+                edges_created += 1
+
+        self.edges_created += edges_created
+        self.logger.info(
+            'Group %s: %d membership edge(s) created across %d site(s)',
+            old_group.groupname, edges_created, len(site_groups),
+        )
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -891,6 +1004,8 @@ class MigrateGroups(Operation):
             'upgraded': self.upgraded,
             'skipped': self.skipped,
             'filtered': self.filtered,
+            'edges_created': self.edges_created,
+            'edges_existing': self.edges_existing,
             'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
 
