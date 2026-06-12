@@ -115,6 +115,9 @@ class LDAPSyncTaskConfig(BaseModel):
     max_deletions: int = 50
     prune: bool = True
     force: bool = False
+    # Bypass the incremental gate (sync all records via the normal upsert
+    # path; force additionally delete-recreates).
+    full: bool = False
 
 
 @require_kwargs

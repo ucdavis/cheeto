@@ -114,6 +114,7 @@ async def ldap_sync_site_cmd(args: Namespace):
             args.db, args.author,
             sitename=args.site, ldap=ldap,
             force=args.force,
+            full=args.full,
             concurrency=args.concurrency,
             scope=scope,
             prune=not args.no_prune,
@@ -176,6 +177,10 @@ def _(parser: ArgParser):
     parser.add_argument('--force', action='store_true', default=False,
                         help='Delete-and-recreate user/group dns instead of '
                              'patching in place')
+    parser.add_argument('--full', action='store_true', default=False,
+                        help='Sync all records, not just changed ones '
+                             '(normal upsert; unlike --force, no '
+                             'delete-recreate)')
     parser.add_argument('--concurrency', type=int, default=1,
                         help='Concurrent per-user syncs (default 1)')
     parser.add_argument('--scope', default=None,
@@ -206,7 +211,7 @@ async def ldap_sync_user_cmd(args: Namespace):
         result = await SyncUserToLDAP.run(
             args.db, args.author,
             username=args.user, sitename=args.site,
-            ldap=ldap, force=args.force,
+            ldap=ldap, force=args.force, full=args.full,
         )
 
     style = {
@@ -228,6 +233,9 @@ async def ldap_sync_user_cmd(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--force', action='store_true', default=False,
                         help='Delete-and-recreate the user dn')
+    parser.add_argument('--full', action='store_true', default=False,
+                        help='Sync even if unchanged (normal upsert; '
+                             'unlike --force, no delete-recreate)')
 
 
 # ---------------------------------------------------------------------------
@@ -246,7 +254,7 @@ async def ldap_sync_group_cmd(args: Namespace):
         result = await SyncGroupToLDAP.run(
             args.db, args.author,
             groupname=args.group, sitename=args.site,
-            ldap=ldap, force=args.force,
+            ldap=ldap, force=args.force, full=args.full,
         )
 
     console.print(
@@ -259,6 +267,9 @@ async def ldap_sync_group_cmd(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--force', action='store_true', default=False,
                         help='Delete-and-recreate the group dn')
+    parser.add_argument('--full', action='store_true', default=False,
+                        help='Sync even if unchanged (normal upsert; '
+                             'unlike --force, no delete-recreate)')
 
 
 # ---------------------------------------------------------------------------
