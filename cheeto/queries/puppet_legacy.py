@@ -29,6 +29,7 @@ from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
 from ..models.site import Site
+from ..models.slurm import SlurmAccount
 from ..models.storage import Storage
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
@@ -148,6 +149,22 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         await list_automap_storages(site, 'share'), key=lambda s: s.name,
     )
 
+    # Groups with a slurm account at this site are site-present even with
+    # no member edges (v1 had a SiteGroup for every sponsor group with an
+    # account); they must appear in the group map.
+    slurm_accounts = await SlurmAccount.find(
+        SlurmAccount.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    ).to_list()
+    for account in slurm_accounts:
+        g = account.group
+        if g.id not in group_by_id and not isinstance(
+            g, (AccessGroup, StatusGroup),
+        ):
+            group_by_id[g.id] = g
+            candidate_groups.append(g)
+
     member_groups_by_user: dict = {uid: set() for uid in user_ids}
     sudoer_groups_by_user: dict = {uid: set() for uid in user_ids}
     sponsor_ids_by_group: dict = {}
@@ -245,6 +262,18 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             'storage': storage_data,
         })
         user_records[u.name] = PuppetUserRecord.load(record_data)
+
+    # v1 exported the special access/status groups (every site carried
+    # their SiteGroups); v2 keeps them as global AccessGroup/StatusGroup
+    # records. Added after the edge-attribution maps so they never count
+    # toward user posix memberships — they render as plain gid records.
+    for g in (
+        await AccessGroup.find_all().to_list()
+        + await StatusGroup.find_all().to_list()
+    ):
+        if g.id not in group_by_id:
+            group_by_id[g.id] = g
+            candidate_groups.append(g)
 
     group_records: dict[str, PuppetGroupRecord] = {}
     for g in candidate_groups:

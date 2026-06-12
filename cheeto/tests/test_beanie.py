@@ -2615,6 +2615,14 @@ async def access_links_to_names(links) -> list[str]:
     return await resolve_access_names(links)
 
 
+async def _special_group_names() -> set[str]:
+    from cheeto.models.group import AccessGroup, StatusGroup
+    return (
+        {g.name for g in await AccessGroup.find_all().to_list()}
+        | {g.name for g in await StatusGroup.find_all().to_list()}
+    )
+
+
 class TestSiteToPuppetLegacy:
     """`site_to_puppet_legacy(site)` reproduces v1's site_to_puppet output
     shape from v2 data. Storage/share blocks are covered separately in
@@ -2629,11 +2637,13 @@ class TestSiteToPuppetLegacy:
 
         result = await site_to_puppet_legacy(site)
         assert result.user == {}
-        assert result.group == {}
+        # Even an empty site exports the (global) special groups — v1
+        # carried their SiteGroups everywhere.
+        assert set(result.group.keys()) == await _special_group_names()
         assert result.share == {}
         # Marshmallow serialization is exercised in test_puppet.py;
-        # here just verify the dump path doesn't choke on the empty map.
-        assert PuppetAccountMap.Schema().dumps(result) == '{}\n'
+        # here just verify the dump path doesn't choke.
+        PuppetAccountMap.Schema().dumps(result)
 
     async def test_user_and_group_basic_fields(self, beanie_client):
         from cheeto.queries import site_to_puppet_legacy
@@ -2681,7 +2691,9 @@ class TestSiteToPuppetLegacy:
         assert rec.tag == ['sudo-tag']
         assert rec.slurm is None
 
-        assert set(result.group.keys()) == {'puppet_lab'}
+        assert set(result.group.keys()) == (
+            {'puppet_lab'} | await _special_group_names()
+        )
         assert result.group['puppet_lab'].gid == 61000
 
     async def test_sticky_group_surfaces_in_user_groups(self, beanie_client):
@@ -2811,6 +2823,49 @@ class TestSiteToPuppetLegacy:
         result = await site_to_puppet_legacy(site)
         assert 'pl_sponsor' not in result.user  # not at site
         assert result.group['pl_lab'].sponsors == ['pl_sponsor']
+
+    async def test_slurm_account_group_appears_without_members(
+        self, beanie_client,
+    ):
+        """A group whose only site presence is its slurm account must
+        appear in the group map (v1 had a SiteGroup for every sponsor
+        group with an account)."""
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_slacct', fqdn='slacct.test')
+        await site.insert()
+        other_site = Site(name='puppet_slacct_b', fqdn='slacctb.test')
+        await other_site.insert()
+
+        acct_grp = Group(name='pl_acctgrp', gid=61010)
+        await acct_grp.insert()  # no membership edges anywhere
+        await SlurmAccount(group=acct_grp, site=site).insert()
+
+        elsewhere_grp = Group(name='pl_elsewhere', gid=61011)
+        await elsewhere_grp.insert()
+        await SlurmAccount(group=elsewhere_grp, site=other_site).insert()
+
+        result = await site_to_puppet_legacy(site)
+        assert 'pl_acctgrp' in result.group
+        assert result.group['pl_acctgrp'].gid == 61010
+        # Accounts at other sites don't leak in.
+        assert 'pl_elsewhere' not in result.group
+
+    async def test_special_groups_exported_with_gids(self, beanie_client):
+        from cheeto.models.group import AccessGroup, StatusGroup
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_special', fqdn='special.test')
+        await site.insert()
+
+        result = await site_to_puppet_legacy(site)
+        for g in (
+            await AccessGroup.find_all().to_list()
+            + await StatusGroup.find_all().to_list()
+        ):
+            assert g.name in result.group
+            assert result.group[g.name].gid == g.gid
+            assert result.group[g.name].sponsors is None
 
 
 class TestSiteToPuppetLegacyStorage:
