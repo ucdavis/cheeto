@@ -84,6 +84,9 @@ from ..operations import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
+    SyncGroupToLDAP,
+    SyncSiteAutomounts,
+    SyncSiteLDAP,
     SyncSlurm,
     SyncUserToLDAP,
 )
@@ -2810,28 +2813,33 @@ class TestSiteToPuppetLegacy:
 
 
 class _FakeLDAPManager:
-    """Minimal stand-in for AsyncLDAPManager covering only what
-    SyncUserToLDAP touches. Records add/remove-group calls and serves a
-    seeded current-membership set so we can assert the reconcile decisions
+    """Minimal stand-in for AsyncLDAPManager covering what the per-record
+    sync ops touch. Records every write call and serves a seeded
+    current-membership set so we can assert reconcile and gate decisions
     without a live directory."""
 
-    def __init__(self, current_memberships: set[str]):
+    def __init__(self, current_memberships: set[str] = frozenset()):
         self._current = set(current_memberships)
         self.added: list[str] = []
         self.removed: list[str] = []
+        self.user_writes: list[str] = []
+        self.deleted_users: list[str] = []
+        self.group_writes: list[str] = []
+        self.deleted_groups: list[str] = []
+        self.automount_writes: list[str] = []
 
     def user_dn(self, username: str) -> str:
         return f'uid={username},ou=people'
 
     async def delete_user(self, username: str) -> None:
-        pass
+        self.deleted_users.append(username)
 
     async def update_user(self, record) -> None:
         # Pretend the user already exists → 'updated' path.
-        return None
+        self.user_writes.append(record.username)
 
     async def add_user(self, record) -> None:
-        pass
+        self.user_writes.append(record.username)
 
     async def list_user_memberships(self, username: str) -> set[str]:
         return set(self._current)
@@ -2841,6 +2849,29 @@ class _FakeLDAPManager:
 
     async def remove_users_from_group(self, group, usernames):
         self.removed.append(group)
+
+    async def delete_group(self, groupname: str) -> None:
+        self.deleted_groups.append(groupname)
+
+    async def set_group_members(self, groupname, members) -> None:
+        # Pretend the group already exists → 'membership_diffed' path.
+        self.group_writes.append(groupname)
+
+    async def add_group(self, record) -> None:
+        self.group_writes.append(record.groupname)
+
+    async def upsert_automount(self, *, mountname, mapname, host, path,
+                               options) -> None:
+        self.automount_writes.append(f'{mapname}:{mountname}')
+
+    @property
+    def write_count(self) -> int:
+        return (
+            len(self.user_writes) + len(self.deleted_users)
+            + len(self.group_writes) + len(self.deleted_groups)
+            + len(self.automount_writes)
+            + len(self.added) + len(self.removed)
+        )
 
 
 class TestSyncUserToLDAPMembership:
@@ -3124,6 +3155,286 @@ class TestLDAPSyncablePropagation:
         key.key = 'ssh-ed25519 BBB'
         await key.save()
         assert len(calls) == 1
+
+
+async def _seed_gate_site(sitename='gatesite', username='gateu', uid=74001):
+    user = User(
+        name=username, email=f'{username}@x.test',
+        uid=uid, gid=uid, fullname='Gate User',
+        home_directory=f'/home/{username}',
+        status=await status_link('active'),
+        access=await access_links(['login-ssh']),
+    )
+    await user.insert()
+    site = Site(name=sitename, fqdn=f'{sitename}.test')
+    await site.insert()
+    await UserSiteInfo(
+        user=user, site=site, status=await status_link('active'),
+    ).insert()
+    return user, site
+
+
+class TestSyncUserToLDAPGate:
+
+    async def _sync(self, client, ldap, **kwargs):
+        return await SyncUserToLDAP.run(
+            client, None,
+            username='gateu', sitename='gatesite', ldap=ldap, **kwargs,
+        )
+
+    async def test_sync_writes_watermark_then_skips_clean(self, beanie_client):
+        user, _ = await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        expected_watermark = (await User.get(user.id)).ldap.modified_at
+
+        r1 = await self._sync(beanie_client, ldap)
+        assert r1.outcome in ('updated', 'no_op')
+        raw = await User.get(user.id)
+        assert raw.ldap.synced['gatesite'] == expected_watermark
+        # Watermark write must not re-dirty (query update bypasses hooks).
+        assert raw.ldap.modified_at == expected_watermark
+        assert not raw.ldap.needs_sync('gatesite')
+
+        writes_after_first = ldap.write_count
+        r2 = await self._sync(beanie_client, ldap)
+        assert r2.outcome == 'skipped_clean'
+        assert ldap.write_count == writes_after_first
+
+    async def test_change_redirties_then_syncs(self, beanie_client):
+        user, _ = await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        await self._sync(beanie_client, ldap)
+
+        user = await User.get(user.id)
+        user.shell = '/usr/bin/zsh'
+        await user.save()
+        r = await self._sync(beanie_client, ldap)
+        assert r.outcome in ('updated', 'no_op')
+        assert not (await User.get(user.id)).ldap.needs_sync('gatesite')
+
+    async def test_force_bypasses_gate_and_recreates(self, beanie_client):
+        await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        await self._sync(beanie_client, ldap)
+        r = await self._sync(beanie_client, ldap, force=True)
+        assert r.outcome == 'recreated'
+        assert ldap.deleted_users == ['gateu']
+
+    async def test_full_bypasses_gate_without_recreate(self, beanie_client):
+        await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        await self._sync(beanie_client, ldap)
+        r = await self._sync(beanie_client, ldap, full=True)
+        assert r.outcome in ('updated', 'no_op')
+        assert ldap.deleted_users == []
+
+    async def test_ignore_beats_force(self, beanie_client):
+        user, _ = await _seed_gate_site()
+        user.ldap.ignore = True
+        await user.save()
+        ldap = _FakeLDAPManager()
+        r = await self._sync(beanie_client, ldap, force=True)
+        assert r.outcome == 'skipped_ignored'
+        assert ldap.write_count == 0
+
+    async def test_two_site_watermarks_independent(self, beanie_client):
+        user, _ = await _seed_gate_site()
+        site_b = Site(name='gatesiteb', fqdn='b.test')
+        await site_b.insert()
+        await UserSiteInfo(
+            user=user, site=site_b, status=await status_link('active'),
+        ).insert()
+
+        await self._sync(beanie_client, _FakeLDAPManager())
+        raw = await User.get(user.id)
+        assert not raw.ldap.needs_sync('gatesite')
+        assert raw.ldap.needs_sync('gatesiteb')
+
+
+class TestSyncGroupToLDAPGate:
+
+    async def _sync(self, client, ldap, groupname='gategrp', **kwargs):
+        return await SyncGroupToLDAP.run(
+            client, None,
+            groupname=groupname, sitename='gatesite', ldap=ldap, **kwargs,
+        )
+
+    async def _seed_group_with_member(self):
+        user, site = await _seed_gate_site()
+        group = Group(name='gategrp', gid=74100)
+        await group.insert()
+        await GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        ).insert()
+        return group
+
+    async def test_sync_writes_watermark_then_skips_clean(self, beanie_client):
+        group = await self._seed_group_with_member()
+        ldap = _FakeLDAPManager()
+
+        r1 = await self._sync(beanie_client, ldap)
+        assert r1.outcome == 'membership_diffed'
+        assert not (await Group.get(group.id)).ldap.needs_sync('gatesite')
+
+        r2 = await self._sync(beanie_client, ldap)
+        assert r2.outcome == 'skipped_clean'
+        assert ldap.group_writes == ['gategrp']
+
+    async def test_membership_change_redirties(self, beanie_client):
+        group = await self._seed_group_with_member()
+        ldap = _FakeLDAPManager()
+        await self._sync(beanie_client, ldap)
+
+        edge = await GroupMembership.find_one(
+            GroupMembership.group.id == group.id,
+        )
+        await edge.delete()
+        assert (await Group.get(group.id)).ldap.needs_sync('gatesite')
+
+    async def test_no_members_writes_watermark(self, beanie_client):
+        _, site = await _seed_gate_site()
+        group = Group(name='gategrp', gid=74100)
+        await group.insert()
+        ldap = _FakeLDAPManager()
+
+        r1 = await self._sync(beanie_client, ldap)
+        assert r1.outcome == 'skipped_no_members_on_site'
+        r2 = await self._sync(beanie_client, ldap)
+        assert r2.outcome == 'skipped_clean'
+
+    async def test_special_group_no_watermark(self, beanie_client):
+        await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        r = await self._sync(
+            beanie_client, ldap, groupname='login-ssh-users',
+        )
+        assert r.outcome == 'skipped_special'
+        special = await Group.find_one(
+            Group.name == 'login-ssh-users', with_children=True,
+        )
+        assert special.ldap.synced == {}
+
+
+class TestSyncSiteAutomountsGate:
+
+    async def _seed(self):
+        owner, group, site = await _seed_storage_actors('amgate', 74200)
+        volume = await _seed_volume(site)
+        amap = AutomountMap(name='group', site=site, prefix='/group')
+        await amap.insert()
+        storage = Storage(
+            name='amgstor', site=site, category='group',
+            owner=owner, group=group, volume=volume, automount_map=amap,
+        )
+        await storage.insert()
+        return storage, site
+
+    async def test_upsert_then_skip_clean(self, beanie_client):
+        storage, site = await self._seed()
+        ldap = _FakeLDAPManager()
+
+        r1 = await SyncSiteAutomounts.run(
+            beanie_client, None, sitename=site.name, ldap=ldap,
+        )
+        assert r1['group_automounts'] == 1
+        assert len(ldap.automount_writes) == 1
+
+        r2 = await SyncSiteAutomounts.run(
+            beanie_client, None, sitename=site.name, ldap=ldap,
+        )
+        assert r2['group_automounts'] == 0
+        assert r2['skipped_clean'] == 1
+        assert len(ldap.automount_writes) == 1
+
+        # A volume change re-dirties the row via propagation.
+        volume = await StorageVolume.find_one(StorageVolume.name == 'nas01vol')
+        volume.host = 'nas02'
+        await volume.save()
+        r3 = await SyncSiteAutomounts.run(
+            beanie_client, None, sitename=site.name, ldap=ldap,
+        )
+        assert r3['group_automounts'] == 1
+
+
+class TestSyncSiteLDAPIncremental:
+
+    async def _seed(self):
+        user, site = await _seed_gate_site()
+        other = User(
+            name='gateu2', email='g2@x.test', uid=74002, gid=74002,
+            fullname='Gate User Two', home_directory='/home/gateu2',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await other.insert()
+        await UserSiteInfo(
+            user=other, site=site, status=await status_link('active'),
+        ).insert()
+        group = Group(name='gategrp', gid=74100)
+        await group.insert()
+        await GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        ).insert()
+        return user, other, group, site
+
+    async def _run(self, client, ldap, **kwargs):
+        return await SyncSiteLDAP.run(
+            client, None,
+            sitename='gatesite', ldap=ldap,
+            scope=['users', 'groups'], **kwargs,
+        )
+
+    async def test_second_run_skips_everything(self, beanie_client):
+        await self._seed()
+        ldap = _FakeLDAPManager()
+
+        r1 = await self._run(beanie_client, ldap)
+        assert r1['users']['skipped_clean'] == 0
+        assert (
+            r1['users']['updated'] + r1['users']['no_op']
+            + r1['users']['created'] == 2
+        )
+        writes_after_first = ldap.write_count
+
+        r2 = await self._run(beanie_client, ldap)
+        assert r2['users']['skipped_clean'] == 2
+        assert r2['groups']['skipped_clean'] == 1
+        # No per-record ops generated at all → no LDAP writes.
+        assert ldap.write_count == writes_after_first
+
+    async def test_full_resyncs_clean_records(self, beanie_client):
+        await self._seed()
+        ldap = _FakeLDAPManager()
+        await self._run(beanie_client, ldap)
+
+        r = await self._run(beanie_client, ldap, full=True)
+        assert r['users']['skipped_clean'] == 0
+        assert r['groups']['skipped_clean'] == 0
+        assert ldap.deleted_users == []
+
+    async def test_ignored_user_never_synced(self, beanie_client):
+        user, *_ = await self._seed()
+        user.ldap.ignore = True
+        await user.save()
+        ldap = _FakeLDAPManager()
+
+        r = await self._run(beanie_client, ldap, force=True)
+        assert r['users']['skipped_ignored'] == 1
+        assert 'gateu' not in ldap.user_writes
+
+    async def test_only_dirty_user_synced(self, beanie_client):
+        user, other, group, site = await self._seed()
+        ldap = _FakeLDAPManager()
+        await self._run(beanie_client, ldap)
+
+        other = await User.get(other.id)
+        other.shell = '/usr/bin/zsh'
+        await other.save()
+
+        r = await self._run(beanie_client, ldap)
+        assert r['users']['skipped_clean'] == 1
+        assert ldap.user_writes.count('gateu2') == 2
+        assert ldap.user_writes.count('gateu') == 1
 
 
 async def _seed_slurm_site(with_default=False, partition_name='hi'):

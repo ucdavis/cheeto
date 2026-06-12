@@ -26,7 +26,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from beanie.operators import In
+from beanie.operators import In, Set
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
@@ -187,7 +187,16 @@ class SyncUserToLDAP(Operation):
     add/remove rather than a wholesale set, so it never clobbers a group's
     other members.
 
-    Outcomes: `created`, `updated`, `recreated`, `no_op`.
+    Incremental gate: a user whose `ldap` dirty state is clean for this
+    site is skipped before any further queries; `force` or `full` bypasses
+    the gate (`force` additionally delete-recreates the entry). On success
+    the user's per-site watermark is set to the `modified_at` snapshotted
+    at execute start — via a query-builder update, so it neither re-fires
+    the fingerprint hook nor bumps `updated_at`, and a record mutated
+    mid-sync stays dirty. `ldap.ignore` skips unconditionally.
+
+    Outcomes: `created`, `updated`, `recreated`, `no_op`, `skipped_clean`,
+    `skipped_ignored`.
     """
 
     op_name = 'sync_user_to_ldap'
@@ -201,12 +210,14 @@ class SyncUserToLDAP(Operation):
         sitename: str,
         ldap: AsyncLDAPManager,
         force: bool = False,
+        full: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.username = username
         self.sitename = sitename
         self.ldap = ldap
         self.force = force
+        self.full = full
         self._outcome: str = ''
         self._added_groups: list[str] = []
         self._removed_groups: list[str] = []
@@ -217,6 +228,21 @@ class SyncUserToLDAP(Operation):
         user = await User.find_one(User.name == self.username)
         if user is None:
             raise ValueError(f'User {self.username!r} does not exist')
+
+        if user.ldap.ignore:
+            self._outcome = 'skipped_ignored'
+            return LDAPSyncResult(
+                name=self.username, outcome=self._outcome, extra={},
+            )
+        if (
+            not (self.force or self.full)
+            and not user.ldap.needs_sync(self.sitename)
+        ):
+            self._outcome = 'skipped_clean'
+            return LDAPSyncResult(
+                name=self.username, outcome=self._outcome, extra={},
+            )
+        watermark = user.ldap.modified_at
 
         site = await Site.find_one(Site.name == self.sitename)
         if site is None:
@@ -258,6 +284,11 @@ class SyncUserToLDAP(Operation):
             outcome = 'no_op'
         self._outcome = outcome
 
+        await User.find_one(User.id == user.id).update(
+            Set({f'ldap.synced.{self.sitename}': watermark}),
+            session=session,
+        )
+
         return LDAPSyncResult(
             name=self.username, outcome=outcome,
             extra={
@@ -293,7 +324,7 @@ class SyncUserToLDAP(Operation):
                 )
                 self._added_groups.append(g)
             except LDAPNotFound:
-                logger.warning(
+                self.logger.warning(
                     'sync_user_to_ldap(%s): target group %s not in LDAP; '
                     'run BootstrapLDAPSite first', self.username, g,
                 )
@@ -310,6 +341,7 @@ class SyncUserToLDAP(Operation):
             'sitename': self.sitename,
             'outcome': self._outcome,
             'force': self.force,
+            'full': self.full,
             'added_groups': list(self._added_groups),
             'removed_groups': list(self._removed_groups),
         }
@@ -321,6 +353,12 @@ class SyncGroupToLDAP(Operation):
     for (member, site).
 
     Skips access/status groups — those are reconciled by `SyncUserToLDAP`.
+
+    Incremental gate as in `SyncUserToLDAP`: clean groups are skipped
+    unless `force`/`full`; the per-site watermark is written on success
+    AND on `skipped_no_members_on_site` (a successfully evaluated steady
+    state — a later membership change re-dirties via the GroupMembership
+    propagation hook), never on `skipped_special` or errors.
     """
 
     op_name = 'sync_group_to_ldap'
@@ -334,12 +372,14 @@ class SyncGroupToLDAP(Operation):
         sitename: str,
         ldap: AsyncLDAPManager,
         force: bool = False,
+        full: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.groupname = groupname
         self.sitename = sitename
         self.ldap = ldap
         self.force = force
+        self.full = full
         self._outcome: str = ''
         self._member_count: int = 0
 
@@ -362,6 +402,21 @@ class SyncGroupToLDAP(Operation):
                 extra={'member_count': 0},
             )
 
+        if group.ldap.ignore:
+            self._outcome = 'skipped_ignored'
+            return LDAPSyncResult(
+                name=self.groupname, outcome=self._outcome, extra={},
+            )
+        if (
+            not (self.force or self.full)
+            and not group.ldap.needs_sync(self.sitename)
+        ):
+            self._outcome = 'skipped_clean'
+            return LDAPSyncResult(
+                name=self.groupname, outcome=self._outcome, extra={},
+            )
+        watermark = group.ldap.modified_at
+
         site = await Site.find_one(Site.name == self.sitename)
         if site is None:
             raise ValueError(f'Site {self.sitename!r} does not exist')
@@ -370,6 +425,7 @@ class SyncGroupToLDAP(Operation):
 
         if not member_names and not self.force:
             self._outcome = 'skipped_no_members_on_site'
+            await self._write_watermark(group, watermark, session)
             return LDAPSyncResult(
                 name=self.groupname, outcome=self._outcome,
                 extra={'member_count': 0},
@@ -391,9 +447,19 @@ class SyncGroupToLDAP(Operation):
             self._outcome = 'created'
         self._member_count = len(member_names)
 
+        await self._write_watermark(group, watermark, session)
+
         return LDAPSyncResult(
             name=self.groupname, outcome=self._outcome,
             extra={'member_count': self._member_count},
+        )
+
+    async def _write_watermark(
+        self, group: Group, watermark, session: AsyncClientSession,
+    ) -> None:
+        await Group.find_one(Group.id == group.id).update(
+            Set({f'ldap.synced.{self.sitename}': watermark}),
+            session=session,
         )
 
     async def _members_at_site(self, group: Group, site: Site) -> set[str]:
@@ -425,6 +491,7 @@ class SyncGroupToLDAP(Operation):
             'outcome': self._outcome,
             'member_count': self._member_count,
             'force': self.force,
+            'full': self.full,
         }
 
 
@@ -437,6 +504,10 @@ class SyncSiteAutomounts(Operation):
     """Refresh home/group automount entries for a site from beanie Storage
     rows. Uses upsert (delete + add per entry) which is safer than v1's
     wipe-the-whole-map approach when storage rows are partially inconsistent.
+
+    Incremental gate per Storage row, as in `SyncUserToLDAP` (volume- and
+    map-derived changes dirty the rows via the StorageVolume/AutomountMap
+    propagation hooks).
     """
 
     op_name = 'sync_site_automounts'
@@ -448,11 +519,18 @@ class SyncSiteAutomounts(Operation):
         *,
         sitename: str,
         ldap: AsyncLDAPManager,
+        force: bool = False,
+        full: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.sitename = sitename
         self.ldap = ldap
-        self._counts: dict[str, int] = {'home_automounts': 0, 'group_automounts': 0}
+        self.force = force
+        self.full = full
+        self._counts: dict[str, int] = {
+            'home_automounts': 0, 'group_automounts': 0,
+            'skipped_clean': 0, 'skipped_ignored': 0,
+        }
 
     async def execute(self, session: AsyncClientSession) -> dict[str, int]:
         from ..queries.storage import list_automap_storages
@@ -466,12 +544,26 @@ class SyncSiteAutomounts(Operation):
             ('group', AUTO_GROUP, 'group_automounts'),
         ):
             for storage in await list_automap_storages(site, category):
+                if storage.ldap.ignore:
+                    self._counts['skipped_ignored'] += 1
+                    continue
+                if (
+                    not (self.force or self.full)
+                    and not storage.ldap.needs_sync(self.sitename)
+                ):
+                    self._counts['skipped_clean'] += 1
+                    continue
+                watermark = storage.ldap.modified_at
                 await self.ldap.upsert_automount(
                     mountname=storage.mount_name or storage.name,
                     mapname=mapname,
                     host=storage.host,
                     path=storage.host_path,
                     options=_render_mount_options(storage),
+                )
+                await Storage.find_one(Storage.id == storage.id).update(
+                    Set({f'ldap.synced.{self.sitename}': watermark}),
+                    session=session,
                 )
                 self._counts[tally_key] += 1
         return dict(self._counts)
@@ -745,7 +837,8 @@ class PruneSiteLDAP(Operation):
 _SYNC_TALLY_KEYS = (
     'created', 'updated', 'recreated', 'memberships_only', 'no_op',
     'membership_diffed', 'skipped_special', 'skipped_no_members_on_site',
-    'skipped_inactive', 'transient_error', 'error',
+    'skipped_inactive', 'skipped_clean', 'skipped_ignored',
+    'transient_error', 'error',
 )
 
 
@@ -761,6 +854,13 @@ class SyncSiteLDAP(Operation):
     behavior); a single failure does not cascade. Transient errors are
     counted as 'transient_error' and skipped.
 
+    Incremental by default: records whose `ldap` dirty state is clean for
+    this site are filtered out of the gather, so their per-record ops (and
+    History entries) are never generated. `full=True` syncs everything via
+    the normal upsert path; `force=True` additionally delete-recreates.
+    Ignored records (`ldap.ignore`) are always filtered. Errors leave a
+    record dirty, so it retries next run. Prune is unaffected by the gate.
+
     `scope` restricts to subsets of
     `['users', 'groups', 'automounts', 'prune']`.
     """
@@ -775,6 +875,7 @@ class SyncSiteLDAP(Operation):
         sitename: str,
         ldap: AsyncLDAPManager,
         force: bool = False,
+        full: bool = False,
         concurrency: int = 1,
         scope: list[str] | None = None,
         prune: bool = True,
@@ -785,6 +886,7 @@ class SyncSiteLDAP(Operation):
         self.sitename = sitename
         self.ldap = ldap
         self.force = force
+        self.full = full
         self.concurrency = max(1, concurrency)
         self.scope = scope if scope is not None else [
             'users', 'groups', 'automounts', 'prune',
@@ -814,13 +916,13 @@ class SyncSiteLDAP(Operation):
                 await User.find(In(User.id, user_ids)).to_list()
                 if user_ids else []
             )
-            usernames = [u.name for u in users]
+            usernames = self._gate_records(users, self._users_tally)
             await self._run_per_record(
                 self._users_tally, 'user', usernames,
                 lambda name: SyncUserToLDAP.run(
                     self.client, self.author,
                     username=name, sitename=self.sitename,
-                    ldap=self.ldap, force=self.force,
+                    ldap=self.ldap, force=self.force, full=self.full,
                 ),
             )
 
@@ -829,13 +931,13 @@ class SyncSiteLDAP(Operation):
             # subclasses (AccessGroup/StatusGroup) are filtered by _class_id
             # when with_children is omitted.
             groups = await Group.find_all().to_list()
-            group_names = [g.name for g in groups]
+            group_names = self._gate_records(groups, self._groups_tally)
             await self._run_per_record(
                 self._groups_tally, 'group', group_names,
                 lambda name: SyncGroupToLDAP.run(
                     self.client, self.author,
                     groupname=name, sitename=self.sitename,
-                    ldap=self.ldap, force=self.force,
+                    ldap=self.ldap, force=self.force, full=self.full,
                 ),
             )
 
@@ -850,6 +952,24 @@ class SyncSiteLDAP(Operation):
             'automounts': dict(self._automounts_result),
             'pruned': dict(self._prune_result),
         }
+
+    def _gate_records(self, records, tally: dict[str, int]) -> list[str]:
+        """Incremental gate at gather time: drop ignored and (unless
+        force/full) clean records so their per-record ops — and History
+        entries — are never generated. The surviving ops re-check the gate
+        themselves; the fresh read there is authoritative."""
+        names: list[str] = []
+        for record in records:
+            if record.ldap.ignore:
+                tally['skipped_ignored'] += 1
+            elif (
+                not (self.force or self.full)
+                and not record.ldap.needs_sync(self.sitename)
+            ):
+                tally['skipped_clean'] += 1
+            else:
+                names.append(record.name)
+        return names
 
     async def _run_per_record(
         self,
@@ -866,13 +986,13 @@ class SyncSiteLDAP(Operation):
             try:
                 result = await run_op(name)
             except LDAPTransientError as e:
-                logger.warning(
+                self.logger.warning(
                     'LDAP transient error for %s %s: %s', label, name, e,
                 )
                 tally['transient_error'] += 1
                 return
             except Exception as e:
-                logger.exception(
+                self.logger.exception(
                     'LDAP %s sync failed for %s: %s', label, name, e,
                 )
                 tally['error'] += 1
@@ -900,9 +1020,10 @@ class SyncSiteLDAP(Operation):
             self._automounts_result = await SyncSiteAutomounts.run(
                 self.client, self.author,
                 sitename=self.sitename, ldap=self.ldap,
+                force=self.force, full=self.full,
             )
         except Exception as e:
-            logger.exception('LDAP automount sync failed: %s', e)
+            self.logger.exception('LDAP automount sync failed: %s', e)
             self._automounts_result = {'error': str(e)}
 
     async def _prune(self) -> None:
@@ -913,7 +1034,7 @@ class SyncSiteLDAP(Operation):
                 max_deletions=self.max_deletions, dry_run=self.dry_run,
             )
         except LDAPPruneAborted as e:
-            logger.warning('Prune aborted: %s', e)
+            self.logger.warning('Prune aborted: %s', e)
             self._prune_result = {
                 'aborted': True,
                 'would_delete': e.would_delete,
@@ -926,6 +1047,7 @@ class SyncSiteLDAP(Operation):
         return {
             'sitename': self.sitename,
             'force': self.force,
+            'full': self.full,
             'concurrency': self.concurrency,
             'scope': list(self.scope),
             'prune': self.prune,
