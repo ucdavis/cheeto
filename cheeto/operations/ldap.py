@@ -1060,3 +1060,52 @@ class SyncSiteLDAP(Operation):
                 for k, v in self._prune_result.items()
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# BackfillLDAPInfo
+# ---------------------------------------------------------------------------
+
+
+class BackfillLDAPInfo(Operation):
+    """Persist `ldap` dirty-tracking state on documents that predate the
+    LDAPSyncable field.
+
+    Such documents read with default_factory values — a FRESH `modified_at`
+    on every read — while the sync ops' watermark write `$set`s only
+    `ldap.synced.<site>`. Without a stored `modified_at`/`fingerprint` the
+    record is therefore perpetually dirty. Saving each document fires the
+    fingerprint hook and persists the full `ldap` subdocument; one run per
+    database upgrade is enough (idempotent: only documents missing a stored
+    fingerprint are touched).
+    """
+
+    op_name = 'backfill_ldap_info'
+    # Bare session: a whole-collection backfill can exceed the server's
+    # transaction limits, and each save is independently idempotent.
+    transactional = False
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+    ) -> None:
+        super().__init__(client, author)
+        self._counts: dict[str, int] = {}
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        missing = {'ldap.fingerprint': {'$exists': False}}
+        for label, query in (
+            ('users', User.find(missing)),
+            ('groups', Group.find(missing, with_children=True)),
+            ('storages', Storage.find(missing)),
+        ):
+            count = 0
+            async for doc in query:
+                await doc.save(session=session)
+                count += 1
+            self._counts[label] = count
+        return dict(self._counts)
+
+    def describe(self) -> dict[str, Any]:
+        return dict(self._counts)

@@ -66,6 +66,7 @@ from .iam import (
     SyncUserIAMResult,
 )
 from .ldap import (
+    BackfillLDAPInfo,
     BootstrapLDAPSite,
     ClearLDAPTree,
     LDAPSyncResult,

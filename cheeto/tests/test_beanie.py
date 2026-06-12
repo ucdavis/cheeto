@@ -3437,6 +3437,75 @@ class TestSyncSiteLDAPIncremental:
         assert ldap.user_writes.count('gateu') == 1
 
 
+class TestBackfillLDAPInfo:
+
+    async def _raw_insert_legacy_user(self):
+        """Insert a user document the way it existed before LDAPSyncable:
+        no `ldap` field stored."""
+        coll = User.get_pymongo_collection()
+        res = await coll.insert_one({
+            'name': 'legacyu', 'email': 'legacy@x.test',
+            'uid': 74900, 'gid': 74900, 'fullname': 'Legacy User',
+            'home_directory': '/home/legacyu',
+        })
+        return res.inserted_id
+
+    async def test_legacy_doc_mints_fresh_dirty_state_per_read(
+        self, beanie_client,
+    ):
+        # Without a stored ldap subdocument, default_factory mints a new
+        # modified_at on every read — the record can never go clean.
+        doc_id = await self._raw_insert_legacy_user()
+        first = await User.get(doc_id)
+        second = await User.get(doc_id)
+        assert first.ldap.fingerprint is None
+        assert first.ldap.modified_at != second.ldap.modified_at
+        assert first.ldap.needs_sync('anysite')
+
+    async def test_backfill_persists_state_and_is_idempotent(
+        self, beanie_client,
+    ):
+        doc_id = await self._raw_insert_legacy_user()
+        from ..operations import BackfillLDAPInfo
+
+        result = await BackfillLDAPInfo.run(beanie_client, None)
+        # Seeded access/status groups were inserted through beanie, so
+        # their ldap state is already stored; only the raw doc is touched.
+        assert result == {'users': 1, 'groups': 0, 'storages': 0}
+
+        first = await User.get(doc_id)
+        second = await User.get(doc_id)
+        assert first.ldap.fingerprint is not None
+        assert first.ldap.modified_at == second.ldap.modified_at
+
+        again = await BackfillLDAPInfo.run(beanie_client, None)
+        assert again == {'users': 0, 'groups': 0, 'storages': 0}
+
+    async def test_backfilled_doc_goes_clean_after_sync(self, beanie_client):
+        await self._raw_insert_legacy_user()
+        from ..operations import BackfillLDAPInfo
+        await BackfillLDAPInfo.run(beanie_client, None)
+
+        site = Site(name='legacysite', fqdn='legacy.test')
+        await site.insert()
+        user = await User.find_one(User.name == 'legacyu')
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+
+        ldap = _FakeLDAPManager()
+        r1 = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='legacyu', sitename='legacysite', ldap=ldap,
+        )
+        assert r1.outcome in ('updated', 'no_op')
+        r2 = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='legacyu', sitename='legacysite', ldap=ldap,
+        )
+        assert r2.outcome == 'skipped_clean'
+
+
 async def _seed_slurm_site(with_default=False, partition_name='hi'):
     """Seed a site with one group, a slurm account, partition, QOS, and an
     association, plus a slurm-eligible member (alice) and an ineligible one

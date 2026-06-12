@@ -28,6 +28,7 @@ from ...ldap_async import (
 from ...log import Console
 from ...models.user import User
 from ...operations import (
+    BackfillLDAPInfo,
     BootstrapLDAPSite,
     ClearLDAPTree,
     PruneSiteLDAP,
@@ -71,6 +72,25 @@ async def ldap_bootstrap_cmd(args: Namespace):
     for name, status in result['special_groups'].items():
         style = 'yellow' if status == 'created' else 'dim'
         table.add_row('special_group', name, f'[{style}]{status}[/]')
+    console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# `ng ldap backfill`
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'ldap', 'backfill',
+                   help='Persist LDAP dirty-tracking state on documents '
+                        'that predate the LDAPSyncable field')
+async def ldap_backfill_cmd(args: Namespace):
+    console = Console()
+    result = await BackfillLDAPInfo.run(args.db, args.author)
+    table = Table(title='LDAP dirty-tracking backfill')
+    table.add_column('collection', style='cyan')
+    table.add_column('backfilled', justify='right', style='green')
+    for label, count in result.items():
+        table.add_row(label, str(count))
     console.print(table)
 
 
