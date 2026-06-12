@@ -47,6 +47,10 @@ class HippoEvent(BaseDocument):
         default_factory=lambda: datetime.now(timezone.utc)
     )
     completed_at: datetime | None = None
+    # When the terminal status was successfully posted back to the HiPPO
+    # API; None = not yet (post_back disabled or the postback call failed).
+    # Processing is gated on `status`, postback healing on this field.
+    posted_back_at: datetime | None = None
 
     @field_validator('action')
     @classmethod

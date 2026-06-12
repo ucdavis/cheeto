@@ -614,15 +614,29 @@ class HippoEventProcessor:
             if upstream.status != 'Pending':
                 continue
             record = await _upsert_hippo_event(upstream, self.config)
+
+            if record.status in ('Complete', 'Failed', 'Canceled'):
+                # Already processed locally (e.g. a previous run without
+                # post_back); never re-handle or re-notify. If HiPPO still
+                # serves the event as Pending we owe it a postback so it
+                # stops.
+                if post_back and record.posted_back_at is None:
+                    if await _postback(hippo_client, upstream.id,
+                                       record.status):
+                        record.posted_back_at = datetime.now(timezone.utc)
+                        await record.save()
+                continue
+
             handler = self.registry.get(upstream.action)
             if handler is None:
                 msg = f'no handler for action {upstream.action}'
                 logger.error(msg)
                 record.status = 'Failed'
                 record.last_error = msg
+                if post_back and await _postback(hippo_client, upstream.id,
+                                                 'Failed'):
+                    record.posted_back_at = datetime.now(timezone.utc)
                 await record.save()
-                if post_back:
-                    await _postback(hippo_client, upstream.id, 'Failed')
                 continue
 
             context = HippoContext(
@@ -647,24 +661,27 @@ class HippoEventProcessor:
                 if record.n_tries >= self.config.max_tries:
                     record.status = 'Failed'
                     record.completed_at = datetime.now(timezone.utc)
-                    await record.save()
-                    if post_back:
-                        await _postback(hippo_client, upstream.id, 'Failed')
-                else:
-                    await record.save()
+                    if post_back and await _postback(hippo_client,
+                                                     upstream.id, 'Failed'):
+                        record.posted_back_at = datetime.now(timezone.utc)
+                await record.save()
                 continue
 
             record.status = 'Complete'
             record.completed_at = datetime.now(timezone.utc)
             record.last_error = None
+            if post_back and await _postback(hippo_client, upstream.id,
+                                             'Complete'):
+                record.posted_back_at = datetime.now(timezone.utc)
             await record.save()
-            if post_back:
-                await _postback(hippo_client, upstream.id, 'Complete')
 
 
 async def _postback(client: AuthenticatedClient,
                     event_id: int,
-                    status: str) -> None:
+                    status: str) -> bool:
+    """Report a terminal status to the HiPPO API. Returns success: callers
+    record `posted_back_at` only on a 200 so a failed postback is retried
+    on a later run (without re-processing the event)."""
     body = QueuedEventUpdateModel(status=status, id=event_id)
     resp = await event_queue_update_status.asyncio_detailed(
         client=client, body=body,
@@ -674,3 +691,5 @@ async def _postback(client: AuthenticatedClient,
             'postback %s -> %s failed: status=%d',
             event_id, status, resp.status_code,
         )
+        return False
+    return True

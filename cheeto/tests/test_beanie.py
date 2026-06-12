@@ -5417,3 +5417,180 @@ class TestEmbeddedRefStorage:
         assert raw['slurm']['sticky'] == [account.id]
         assert type(raw['slurm']['sticky'][0]) is ObjectId
         assert raw['slurm']['default_account'] == account.id
+
+
+# ---------------------------------------------------------------------------
+# HiPPO event processor idempotency
+# ---------------------------------------------------------------------------
+
+
+class _RecordingHippoHandler:
+    """Stands in for a registered handler: counts handle() calls (and the
+    notify flag) instead of running operations or sending email."""
+
+    action = 'CreateAccount'
+
+    def __init__(self, fail_times: int = 0):
+        self.calls: list[bool] = []
+        self.fail_times = fail_times
+
+    async def handle(self, event, context, notify=True):
+        self.calls.append(notify)
+        if len(self.calls) <= self.fail_times:
+            raise RuntimeError('handler boom')
+
+
+class _FakePostbackEndpoint:
+    """Replaces hippoapi's event_queue_update_status module in the
+    operations.hippo namespace."""
+
+    def __init__(self, status_code: int = 200):
+        self.status_code = status_code
+        self.calls: list[tuple[int, str]] = []
+
+    async def asyncio_detailed(self, *, client, body):
+        from types import SimpleNamespace
+        self.calls.append((body.id, body.status))
+        return SimpleNamespace(status_code=self.status_code, content=b'')
+
+
+class TestHippoEventProcessor:
+    """The local HippoEvent record must gate processing: without postback,
+    HiPPO keeps serving processed events as Pending, and re-handling them
+    duplicates work and notification emails."""
+
+    _EVENT_DATA = {
+        'groups': [{'name': 'hippogrp'}],
+        'accounts': [{'kerberos': 'hippouser',
+                      'name': 'Hippo User',
+                      'email': 'hippo@x.test',
+                      'iam': '1000000001',
+                      'mothra': '09999999',
+                      'key': '',
+                      'accessTypes': ['SshKey']}],
+        'cluster': 'hipposite',
+        'metadata': {},
+    }
+
+    def _upstream(self, event_id=1):
+        from ..hippoapi.models.queued_event_model import QueuedEventModel
+        return QueuedEventModel.from_dict({
+            'id': event_id,
+            'action': 'CreateAccount',
+            'status': 'Pending',
+            'data': dict(self._EVENT_DATA),
+        })
+
+    def _processor(self, client, handler, max_tries=3):
+        from ..config import HippoConfig
+        from ..operations.hippo import (
+            HippoEventProcessor,
+            HippoHandlerRegistry,
+        )
+        registry = HippoHandlerRegistry()
+        registry.register(handler)
+        config = HippoConfig(
+            api_key='test', base_url='http://hippo.test',
+            site_aliases={}, max_tries=max_tries,
+        )
+        return HippoEventProcessor(client, config, registry=registry)
+
+    def _patch_postback(self, monkeypatch, status_code=200):
+        from ..operations import hippo as hippo_ops
+        fake = _FakePostbackEndpoint(status_code)
+        monkeypatch.setattr(hippo_ops, 'event_queue_update_status', fake)
+        return fake
+
+    async def _record(self):
+        return await HippoEvent.find_one(HippoEvent.hippo_id == 1)
+
+    async def test_no_postback_processes_once(self, beanie_client, monkeypatch):
+        postback = self._patch_postback(monkeypatch)
+        handler = _RecordingHippoHandler()
+        processor = self._processor(beanie_client, handler)
+
+        await processor._process_events([self._upstream()], object(), False)
+        await processor._process_events([self._upstream()], object(), False)
+
+        assert handler.calls == [True]
+        record = await self._record()
+        assert record.status == 'Complete'
+        assert record.posted_back_at is None
+        assert postback.calls == []
+
+    async def test_later_postback_heals_without_rehandling(
+        self, beanie_client, monkeypatch,
+    ):
+        postback = self._patch_postback(monkeypatch)
+        handler = _RecordingHippoHandler()
+        processor = self._processor(beanie_client, handler)
+
+        await processor._process_events([self._upstream()], object(), False)
+        await processor._process_events([self._upstream()], object(), True)
+
+        assert handler.calls == [True]
+        assert postback.calls == [(1, 'Complete')]
+        record = await self._record()
+        assert record.posted_back_at is not None
+
+        # Once posted back, no further postbacks either.
+        await processor._process_events([self._upstream()], object(), True)
+        assert postback.calls == [(1, 'Complete')]
+
+    async def test_postback_from_the_start(self, beanie_client, monkeypatch):
+        postback = self._patch_postback(monkeypatch)
+        handler = _RecordingHippoHandler()
+        processor = self._processor(beanie_client, handler)
+
+        await processor._process_events([self._upstream()], object(), True)
+
+        assert handler.calls == [True]
+        assert postback.calls == [(1, 'Complete')]
+        assert (await self._record()).posted_back_at is not None
+
+    async def test_failed_postback_retried_without_rehandling(
+        self, beanie_client, monkeypatch,
+    ):
+        postback = self._patch_postback(monkeypatch, status_code=500)
+        handler = _RecordingHippoHandler()
+        processor = self._processor(beanie_client, handler)
+
+        await processor._process_events([self._upstream()], object(), True)
+        assert postback.calls == [(1, 'Complete')]
+        assert (await self._record()).posted_back_at is None
+
+        postback.status_code = 200
+        await processor._process_events([self._upstream()], object(), True)
+        assert handler.calls == [True]
+        assert postback.calls == [(1, 'Complete'), (1, 'Complete')]
+        assert (await self._record()).posted_back_at is not None
+
+    async def test_failed_terminal_not_reprocessed(
+        self, beanie_client, monkeypatch,
+    ):
+        postback = self._patch_postback(monkeypatch)
+        handler = _RecordingHippoHandler(fail_times=10)
+        processor = self._processor(beanie_client, handler, max_tries=1)
+
+        await processor._process_events([self._upstream()], object(), False)
+        record = await self._record()
+        assert record.status == 'Failed'
+        assert len(handler.calls) == 1
+
+        await processor._process_events([self._upstream()], object(), True)
+        assert len(handler.calls) == 1
+        assert postback.calls == [(1, 'Failed')]
+
+    async def test_retry_path_unblocked(self, beanie_client, monkeypatch):
+        self._patch_postback(monkeypatch)
+        handler = _RecordingHippoHandler(fail_times=1)
+        processor = self._processor(beanie_client, handler, max_tries=3)
+
+        await processor._process_events([self._upstream()], object(), False)
+        record = await self._record()
+        assert record.status == 'Pending'
+        assert record.n_tries == 1
+
+        await processor._process_events([self._upstream()], object(), False)
+        assert len(handler.calls) == 2
+        assert (await self._record()).status == 'Complete'
