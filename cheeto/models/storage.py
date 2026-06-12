@@ -27,13 +27,24 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import pymongo
-from beanie import Insert, Link, Replace, Save, SaveChanges, Update, before_event
+from beanie import (
+    Delete,
+    Insert,
+    Link,
+    Replace,
+    Save,
+    SaveChanges,
+    Update,
+    after_event,
+    before_event,
+)
 from pymongo import IndexModel
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ..constants import DATA_QUOTA_REGEX, MOUNT_FSTYPES, STORAGE_CATEGORIES
 from ..utils import megs_to_size, size_to_megs_exact
-from .base import BaseDocument, Expirable
+from .base import BaseDocument, Expirable, link_target_id
+from .ldap_sync import LDAPSyncable, ldap_touch, stable_fingerprint
 from .site import Site
 from .user import User
 
@@ -110,6 +121,15 @@ class AutomountMap(BaseDocument):
     prefix: Annotated[str, Field(min_length=1)]
     options: list[str] = Field(default_factory=list)
 
+    @after_event(Insert, Replace, Update, Delete)
+    async def mark_storages_ldap_dirty(self) -> None:
+        # Storage.mount_options derives from this map's options; mark the
+        # dependent rows dirty directly. Update covers save()/save_changes();
+        # runs without the caller's session (spurious dirty is harmless).
+        await Storage.find(
+            Storage.automount_map.id == self.id,
+        ).update_many(ldap_touch())
+
     class Settings:
         name = 'automount_maps'
         indexes = [
@@ -176,6 +196,15 @@ class StorageVolume(BaseDocument, Expirable):
     def revalidate(self) -> None:
         # Close the in-place-mutation hole (the Site settings pattern).
         self._check_backend_config()
+
+    @after_event(Insert, Replace, Update, Delete)
+    async def mark_storages_ldap_dirty(self) -> None:
+        # Storage.host/host_path derive from this volume; mark the dependent
+        # rows dirty directly. Update covers save()/save_changes(); runs
+        # without the caller's session (spurious dirty is harmless).
+        await Storage.find(
+            Storage.volume.id == self.id,
+        ).update_many(ldap_touch())
 
     @property
     def quota(self) -> str | None:
@@ -284,7 +313,7 @@ class StaticMount(BaseDocument):
         ]
 
 
-class Storage(BaseDocument, Expirable):
+class Storage(LDAPSyncable, BaseDocument, Expirable):
     """User-facing record: a named thing, owned by (owner, group), backed
     by `(volume, subpath)`, visible via at most one mount mechanism —
     automount (LDAP autofs) or static (fstab). Both None is legal (e.g.
@@ -357,6 +386,22 @@ class Storage(BaseDocument, Expirable):
     @before_event(Insert, Replace, Save, SaveChanges, Update)
     def revalidate(self) -> None:
         self._check_mount_mechanism()
+
+    def ldap_fingerprint(self) -> str:
+        # Own fields only: host/host_path/mount_options are properties over
+        # links that may be unfetched at save time (_require_fetched raises).
+        # Volume- and map-derived changes arrive via the propagation hooks
+        # on StorageVolume / AutomountMap instead.
+        return stable_fingerprint({
+            'name': self.name,
+            'category': self.category,
+            'subpath': self.subpath,
+            'mount_name': self.mount_name,
+            'mount_overrides': self.mount_overrides.model_dump(),
+            'volume': str(link_target_id(self.volume)),
+            'automount_map': str(link_target_id(self.automount_map)),
+            'static_mount': str(link_target_id(self.static_mount)),
+        })
 
     @property
     def host(self) -> str:

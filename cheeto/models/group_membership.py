@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Literal
 
 import pymongo
-from beanie import Link
+from beanie import Delete, Insert, Link, Replace, Update, after_event
 from pymongo import IndexModel
 from pydantic import Field, field_validator
 
+from .base import link_target_id
 from .group import Group
+from .ldap_sync import ldap_touch
 from .site_association import SiteAssociation
 from .user import User
 
@@ -42,6 +44,20 @@ class GroupMembership(SiteAssociation):
         # Literal; de-dupe and sort so the stored array reads consistently
         # regardless of insertion order.
         return sorted(set(v))
+
+    @after_event(Insert, Replace, Update, Delete)
+    async def mark_edges_ldap_dirty(self) -> None:
+        # Membership edges affect BOTH sides of the LDAP projection: the
+        # user's memberOf reconcile and the group's member list. Update
+        # covers save()/save_changes() (they route through self.update());
+        # runs without the caller's session (spurious dirty is harmless).
+        await User.find_one(
+            User.id == link_target_id(self.user),
+        ).update(ldap_touch())
+        await Group.find_one(
+            Group.id == link_target_id(self.group),
+            with_children=True,
+        ).update(ldap_touch())
 
     class Settings:
         name = 'group_membership'

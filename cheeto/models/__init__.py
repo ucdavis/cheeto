@@ -1,4 +1,5 @@
 from .base import BaseDocument, Expirable
+from .ldap_sync import LDAPInfo, LDAPSyncable
 from .site import (
     Site,
     SiteGroupSettings,

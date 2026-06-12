@@ -9,12 +9,13 @@ from pydantic import Field, field_validator, model_validator
 
 from ..constants import GROUP_TYPES, UINT_MAX
 from .base import BaseDocument
+from .ldap_sync import LDAPSyncable, stable_fingerprint
 
 if TYPE_CHECKING:
     from .slurm import SlurmAccount
 
 
-class Group(BaseDocument):
+class Group(LDAPSyncable, BaseDocument):
     """The base group document.
 
     Polymorphic root via `is_root=True` — `AccessGroup` and `StatusGroup`
@@ -41,6 +42,11 @@ class Group(BaseDocument):
         if v not in GROUP_TYPES:
             raise ValueError(f'Invalid group type: {v}')
         return v
+
+    def ldap_fingerprint(self) -> str:
+        # The LDAP group entry is (cn=name, gidNumber=gid); membership
+        # changes arrive via GroupMembership propagation.
+        return stable_fingerprint({'name': self.name, 'gid': self.gid})
 
     class Settings:
         name = 'groups'

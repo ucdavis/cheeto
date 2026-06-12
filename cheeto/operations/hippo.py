@@ -217,6 +217,8 @@ class UpdateSshKeyHandler(AccountHippoHandler):
             raise ValueError(f'User {parsed.username} does not exist')
         key = parsed.hippo_account.key
         if key:
+            # The bulk delete bypasses SshKey's LDAP-dirty propagation hook,
+            # but the paired insert below fires it — the user is re-dirtied.
             await SshKeyModel.find(SshKeyModel.user.id == user.id).delete()
             await SshKeyModel(key=key, user=user).insert()
         await AddUserAccess.run(

@@ -4,7 +4,7 @@ import datetime
 from typing import TYPE_CHECKING, Annotated
 
 import pymongo
-from beanie import BackLink, Link
+from beanie import BackLink, Delete, Insert, Link, Replace, Update, after_event
 from pydantic import BaseModel, Field, field_validator
 
 from ..constants import (
@@ -16,7 +16,8 @@ from ..constants import (
     UINT_MAX,
     USER_TYPES,
 )
-from .base import BaseDocument, Expirable
+from .base import BaseDocument, Expirable, link_target_id
+from .ldap_sync import LDAPSyncable, ldap_touch, stable_fingerprint
 
 if TYPE_CHECKING:
     from .group import AccessGroup, StatusGroup
@@ -84,7 +85,7 @@ class UCDIAMInfo(BaseModel):
         return v
 
 
-class User(BaseDocument, Expirable):
+class User(LDAPSyncable, BaseDocument, Expirable):
     name: Annotated[str, Field(min_length=1, max_length=32)]
     email: Annotated[str, Field(pattern=EMAIL_REGEX)]
     uid: Annotated[int, Field(ge=0, le=UINT_MAX)]
@@ -137,6 +138,26 @@ class User(BaseDocument, Expirable):
             raise ValueError(f'Invalid user type: {v}')
         return v
 
+    def ldap_fingerprint(self) -> str:
+        # Exactly the fields LDAPUserRecord projects (operations/ldap.py)
+        # plus the access/status links that drive special-group membership.
+        # SshKey / UserSiteInfo / GroupMembership changes are covered by
+        # propagation hooks on those documents, not here.
+        return stable_fingerprint({
+            'name': self.name,
+            'email': self.email,
+            'uid': self.uid,
+            'gid': self.gid,
+            'fullname': self.fullname,
+            'surname': self.surname,
+            'home_directory': self.home_directory,
+            'shell': self.shell,
+            'password': self.password,
+            'expires_at': self.expires_at,
+            'status': str(link_target_id(self.status)),
+            'access': sorted(str(link_target_id(a)) for a in self.access),
+        })
+
     class Settings:
         name = 'users'
         indexes = [
@@ -149,6 +170,15 @@ class User(BaseDocument, Expirable):
 class SshKey(BaseDocument, Expirable):
     key: str
     user: Link[User]
+
+    @after_event(Insert, Replace, Update, Delete)
+    async def mark_user_ldap_dirty(self) -> None:
+        # save()/save_changes() route through self.update(), so Update
+        # covers them; subscribing Save too would double-fire. Runs without
+        # the caller's session — a spurious dirty on txn abort is harmless.
+        await User.find_one(
+            User.id == link_target_id(self.user),
+        ).update(ldap_touch())
 
     class Settings:
         name = 'ssh_keys'

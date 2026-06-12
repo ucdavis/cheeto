@@ -4,6 +4,7 @@ Requires the session-scoped start_mongodb fixture from conftest.py
 which starts an ephemeral mongod with replica set support.
 """
 
+import datetime
 import os
 
 import pytest
@@ -16,8 +17,9 @@ from beanie import init_beanie
 
 from ..models import ALL_MODELS
 from ..models.history import History
+from ..models.ldap_sync import LDAPInfo
 from ..models.site import Site
-from ..models.user import User, SshKey
+from ..models.user import UCDIAMInfo, User, SshKey
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
 from ..models.slurm import (
@@ -2898,6 +2900,230 @@ class TestSyncUserToLDAPMembership:
 
         assert result.extra['removed_groups'] == ['oldgrp']
         assert 'labgrp' not in result.extra['removed_groups']
+
+
+# ---------------------------------------------------------------------------
+# LDAPSyncable dirty tracking
+# ---------------------------------------------------------------------------
+
+
+class TestLDAPInfo:
+    """Unit semantics of the embedded LDAPInfo model."""
+
+    def test_needs_sync_per_site(self):
+        info = LDAPInfo()
+        watermark = info.modified_at
+        assert info.needs_sync('a') and info.needs_sync('b')
+        info.synced['a'] = watermark
+        assert not info.needs_sync('a')
+        assert info.needs_sync('b')
+
+    def test_stale_watermark_stays_dirty(self):
+        # A record mutated mid-sync: the op wrote the OLD modified_at as
+        # the watermark, so the record must still read dirty.
+        info = LDAPInfo()
+        info.synced['a'] = info.modified_at
+        info.modified_at = info.modified_at + datetime.timedelta(seconds=1)
+        assert info.needs_sync('a')
+
+    def test_datetimes_coerced_naive_utc(self):
+        # The mongo client is tz-naive; aware inputs must coerce or the
+        # needs_sync comparison raises TypeError.
+        aware = datetime.datetime(2026, 6, 1, 12, tzinfo=datetime.timezone.utc)
+        info = LDAPInfo(modified_at=aware, synced={'a': aware})
+        assert info.modified_at.tzinfo is None
+        assert info.synced['a'].tzinfo is None
+        info.needs_sync('a')  # must not raise
+
+
+class TestLDAPSyncableFingerprint:
+
+    async def _user(self, name='fpuser', uid=73001):
+        u = User(
+            name=name, email=f'{name}@x.test',
+            uid=uid, gid=uid, fullname='FP User',
+            home_directory=f'/home/{name}',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await u.insert()
+        return u
+
+    async def _modified_at(self, model, doc_id):
+        return (await model.get(doc_id, with_children=True)).ldap.modified_at
+
+    async def test_insert_sets_fingerprint_and_dirty(self, beanie_client):
+        u = await self._user()
+        fetched = await User.get(u.id)
+        assert fetched.ldap.fingerprint is not None
+        assert fetched.ldap.synced == {}
+        assert fetched.ldap.needs_sync('anysite')
+
+    async def test_bookkeeping_save_does_not_redirty(self, beanie_client):
+        # The nightly IAM sync saves every user just to advance
+        # iam.iam_synced_at; that must NOT re-dirty LDAP state — this is
+        # the regression the fingerprint exists for.
+        u = await self._user()
+        before = await self._modified_at(User, u.id)
+        u.iam = UCDIAMInfo(
+            iam_status='present',
+            iam_synced_at=datetime.datetime(2026, 6, 1, 2, 0, 0),
+        )
+        await u.save()
+        assert await self._modified_at(User, u.id) == before
+
+    async def test_projected_field_change_redirties(self, beanie_client):
+        u = await self._user()
+        before = await self._modified_at(User, u.id)
+        u.shell = '/usr/bin/zsh'
+        await u.save()
+        assert await self._modified_at(User, u.id) > before
+
+    async def test_access_change_redirties(self, beanie_client):
+        u = await self._user()
+        before = await self._modified_at(User, u.id)
+        u.access = await access_links(['login-ssh', 'sudo'])
+        await u.save()
+        assert await self._modified_at(User, u.id) > before
+
+    async def test_fingerprint_link_fetch_invariant(self, beanie_client):
+        u = await self._user()
+        unfetched = await User.get(u.id)
+        fetched = await User.get(u.id, fetch_links=True)
+        assert unfetched.ldap_fingerprint() == fetched.ldap_fingerprint()
+
+    async def test_group_gid_change_redirties(self, beanie_client):
+        g = Group(name='fpgrp', gid=73100)
+        await g.insert()
+        before = await self._modified_at(Group, g.id)
+        g.gid = 73101
+        await g.save()
+        assert await self._modified_at(Group, g.id) > before
+
+    async def test_storage_own_field_change_redirties(self, beanie_client):
+        owner, group, site = await _seed_storage_actors('fpstor', 73200)
+        volume = await _seed_volume(site)
+        storage = Storage(
+            name='fpstor', site=site, category='group',
+            owner=owner, group=group, volume=volume,
+        )
+        await storage.insert()
+        before = await self._modified_at(Storage, storage.id)
+        storage.mount_name = 'renamed'
+        await storage.save()
+        assert await self._modified_at(Storage, storage.id) > before
+
+
+class TestLDAPSyncablePropagation:
+    """Changes on relational documents must mark the documents whose LDAP
+    projection they feed."""
+
+    async def _modified_at(self, model, doc_id):
+        return (await model.get(doc_id, with_children=True)).ldap.modified_at
+
+    async def _seed(self):
+        user = User(
+            name='propu', email='p@x.test', uid=73301, gid=73301,
+            fullname='Prop User', home_directory='/home/propu',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        site = Site(name='propsite', fqdn='prop.test')
+        await site.insert()
+        return user, site
+
+    async def test_ssh_key_insert_and_delete(self, beanie_client):
+        user, _ = await self._seed()
+        before = await self._modified_at(User, user.id)
+        key = SshKey(key='ssh-ed25519 AAA', user=user)
+        await key.insert()
+        after_insert = await self._modified_at(User, user.id)
+        assert after_insert > before
+        await key.delete()
+        assert await self._modified_at(User, user.id) > after_insert
+
+    async def test_user_site_info_save(self, beanie_client):
+        user, site = await self._seed()
+        usi = UserSiteInfo(user=user, site=site)
+        await usi.insert()
+        before = await self._modified_at(User, user.id)
+        usi.status = await status_link('inactive')
+        await usi.save()
+        assert await self._modified_at(User, user.id) > before
+
+    async def test_group_membership_marks_both_edges(self, beanie_client):
+        user, site = await self._seed()
+        group = Group(name='propgrp', gid=73400)
+        await group.insert()
+        u_before = await self._modified_at(User, user.id)
+        g_before = await self._modified_at(Group, group.id)
+        edge = GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        )
+        await edge.insert()
+        u_after = await self._modified_at(User, user.id)
+        g_after = await self._modified_at(Group, group.id)
+        assert u_after > u_before and g_after > g_before
+        await edge.delete()
+        assert await self._modified_at(User, user.id) > u_after
+        assert await self._modified_at(Group, group.id) > g_after
+
+    async def test_volume_marks_only_its_storages(self, beanie_client):
+        owner, group, site = await _seed_storage_actors('propstor', 73500)
+        vol_a = await _seed_volume(site, name='vola', host_path='/nas/a')
+        vol_b = await _seed_volume(site, name='volb', host_path='/nas/b')
+        stor_a = Storage(
+            name='stora', site=site, category='group',
+            owner=owner, group=group, volume=vol_a,
+        )
+        stor_b = Storage(
+            name='storb', site=site, category='group',
+            owner=owner, group=group, volume=vol_b,
+        )
+        await stor_a.insert()
+        await stor_b.insert()
+        a_before = await self._modified_at(Storage, stor_a.id)
+        b_before = await self._modified_at(Storage, stor_b.id)
+        vol_a.allocations = [StorageAllocation(quota='10T')]
+        await vol_a.save()
+        assert await self._modified_at(Storage, stor_a.id) > a_before
+        assert await self._modified_at(Storage, stor_b.id) == b_before
+
+    async def test_automount_map_marks_its_storages(self, beanie_client):
+        owner, group, site = await _seed_storage_actors('propmnt', 73600)
+        volume = await _seed_volume(site)
+        amap = AutomountMap(name='group', site=site, prefix='/group')
+        await amap.insert()
+        storage = Storage(
+            name='mntstor', site=site, category='group',
+            owner=owner, group=group, volume=volume, automount_map=amap,
+        )
+        await storage.insert()
+        before = await self._modified_at(Storage, storage.id)
+        amap.options = ['nosuid']
+        await amap.save()
+        assert await self._modified_at(Storage, storage.id) > before
+
+    async def test_propagation_fires_once_per_save(self, beanie_client, monkeypatch):
+        # Guards the Update-covers-Save assumption: save() routes through
+        # self.update(), so subscribing Save too would double-fire the
+        # cross-collection write. Count ldap_touch calls during one save.
+        from ..models import user as user_module
+        user, _ = await self._seed()
+        key = SshKey(key='ssh-ed25519 AAA', user=user)
+        await key.insert()
+
+        calls = []
+        real_touch = user_module.ldap_touch
+
+        def counting_touch():
+            calls.append(1)
+            return real_touch()
+
+        monkeypatch.setattr(user_module, 'ldap_touch', counting_touch)
+        key.key = 'ssh-ed25519 BBB'
+        await key.save()
+        assert len(calls) == 1
 
 
 async def _seed_slurm_site(with_default=False, partition_name='hi'):
