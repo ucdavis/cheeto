@@ -40,6 +40,73 @@ def _options(schedule: int | float | str, queue: str | None = None) -> dict:
     return opts
 
 
+# Task shorthand → (registered task name, takes a sitename arg). The
+# shorthands double as the `cheeto daemon enqueue` CLI vocabulary and match
+# the daemon.tasks config keys (with `hippo` spelled out).
+TASK_SPECS: dict[str, tuple[str, bool]] = {
+    'hippo_process': ('cheeto.hippo_process', False),
+    'iam_sync': ('cheeto.iam_sync', False),
+    'reap': ('cheeto.reap', False),
+    'ldap_sync': ('cheeto.ldap_sync', True),
+    'slurm_sync': ('cheeto.slurm_sync', True),
+    'sympa_export': ('cheeto.sympa_export', True),
+}
+
+
+def _configured_sites(config: Config, task: str) -> list[str]:
+    """Per-site default fan-out for `task`: the task config's `sites`
+    override when set, else the daemon-wide site list — the same resolution
+    `build_beat_schedule` uses."""
+    tcfg = getattr(config.daemon.tasks, 'sympa' if task == 'sympa_export'
+                   else task, None)
+    if tcfg is not None and getattr(tcfg, 'sites', None):
+        return list(tcfg.sites)
+    return list(config.daemon.sites)
+
+
+def build_enqueue_entries(
+    config: Config,
+    task: str,
+    sites: list[str] | None = None,
+) -> list[dict]:
+    """One-off submissions for `task`: entries of
+    `{'task': <name>, 'args': [...], 'options': {'queue': ...}}` mirroring
+    the beat routing (slurm_sync → `slurm.<site>`, everything else → the
+    default `cheeto` queue), but with no expiry — an explicitly enqueued
+    task should run even if the worker picks it up late.
+
+    Per-site tasks fan out over `sites` (or the configured sites when not
+    given); singleton tasks reject a sites argument.
+    """
+    if task not in TASK_SPECS:
+        raise ValueError(
+            f'Unknown task {task!r}; expected one of {sorted(TASK_SPECS)}'
+        )
+    name, per_site = TASK_SPECS[task]
+    if not per_site:
+        if sites:
+            raise ValueError(f'Task {task!r} does not take a site')
+        return [{'task': name, 'args': [], 'options': {'queue': 'cheeto'}}]
+
+    targets = sites or _configured_sites(config, task)
+    if not targets:
+        raise ValueError(
+            f'Task {task!r} is per-site but no sites were given or configured'
+        )
+    return [
+        {
+            'task': name,
+            'args': [site],
+            'options': {
+                'queue': (
+                    f'slurm.{site}' if task == 'slurm_sync' else 'cheeto'
+                ),
+            },
+        }
+        for site in targets
+    ]
+
+
 def build_beat_schedule(config: Config) -> dict[str, dict]:
     """Build the celery beat_schedule dict from the daemon config: one entry
     per enabled singleton task (hippo, iam_sync, reap) and one per site for

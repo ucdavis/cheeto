@@ -93,6 +93,69 @@ def _(parser: ArgParser):
                         help='Celery beat log level')
 
 
+@commands.register('daemon', 'enqueue',
+                   help='Enqueue a task for immediate execution on the '
+                        'relevant worker')
+def daemon_enqueue(args: Namespace):
+    from ..daemon.app import app, configure_celery_app
+    from ..daemon.schedule import build_enqueue_entries
+    from ..log import Console
+
+    console = Console()
+    configure_celery_app(args.config)
+    try:
+        entries = build_enqueue_entries(args.config, args.task,
+                                        sites=args.site)
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+
+    results = []
+    for entry in entries:
+        # apply_async on the registered task (rather than send_task by
+        # name) validates registration and honors task_always_eager.
+        result = app.tasks[entry['task']].apply_async(
+            args=entry['args'], **entry['options'],
+        )
+        results.append((entry, result))
+        target = f' {entry["args"][0]}' if entry['args'] else ''
+        console.print(
+            f'[bold]{args.task}{target}[/] -> queue '
+            f'[cyan]{entry["options"]["queue"]}[/] (id {result.id})'
+        )
+
+    if not args.wait:
+        return 0
+
+    failed = 0
+    for entry, result in results:
+        target = f' {entry["args"][0]}' if entry['args'] else ''
+        try:
+            value = result.get(timeout=args.timeout)
+        except Exception as e:
+            console.print(f'[red]{args.task}{target} FAILED:[/] {e}')
+            failed += 1
+        else:
+            console.print(f'[green]{args.task}{target} done:[/] {value}')
+    return 1 if failed else 0
+
+
+@daemon_enqueue.args()
+def _(parser: ArgParser):
+    from ..daemon.schedule import TASK_SPECS
+    parser.add_argument('task', choices=sorted(TASK_SPECS),
+                        help='Task to enqueue')
+    parser.add_argument('--site', action='append', default=None,
+                        help='Target site for per-site tasks (repeatable; '
+                             'default: all configured sites)')
+    parser.add_argument('--wait', action='store_true', default=False,
+                        help='Block until the task(s) finish and report '
+                             'results (requires the result backend)')
+    parser.add_argument('--timeout', type=float, default=3600,
+                        help='Per-task wait timeout in seconds with --wait '
+                             '(default 3600)')
+
+
 @commands.register('daemon', 'api',
                    help='Run the REST API (uvicorn)')
 def daemon_api(args: Namespace):

@@ -25,7 +25,11 @@ from ..daemon.app import (
     daemon_config,
     mongo_result_backend,
 )
-from ..daemon.schedule import build_beat_schedule, parse_schedule
+from ..daemon.schedule import (
+    build_beat_schedule,
+    build_enqueue_entries,
+    parse_schedule,
+)
 from ..daemon.tasks import _reap, _sympa_export
 from ..models import ALL_MODELS
 from ..models.history import History
@@ -185,6 +189,65 @@ class TestBuildBeatSchedule:
         assert 'sympa-export-a' in sched
         assert 'sympa-export-b' in sched
         assert 'sympa-export-test-site' not in sched
+
+
+class TestBuildEnqueueEntries:
+
+    def test_singleton_routes_to_default_queue(self, config):
+        entries = build_enqueue_entries(config, 'reap')
+        assert entries == [{
+            'task': 'cheeto.reap', 'args': [],
+            'options': {'queue': 'cheeto'},
+        }]
+
+    def test_slurm_routes_to_site_queue(self, config):
+        entries = build_enqueue_entries(config, 'slurm_sync')
+        assert entries == [{
+            'task': 'cheeto.slurm_sync', 'args': ['test-site'],
+            'options': {'queue': 'slurm.test-site'},
+        }]
+
+    def test_explicit_sites_fan_out(self, config):
+        entries = build_enqueue_entries(
+            config, 'sympa_export', sites=['a', 'b'],
+        )
+        assert [e['args'] for e in entries] == [['a'], ['b']]
+        assert all(e['options']['queue'] == 'cheeto' for e in entries)
+
+    def test_per_site_default_uses_task_sites_override(self, config):
+        tasks = replace(
+            config.daemon.tasks,
+            sympa=replace(config.daemon.tasks.sympa, sites=['x']),
+        )
+        cfg = replace(config, daemon=replace(config.daemon, tasks=tasks))
+        entries = build_enqueue_entries(cfg, 'sympa_export')
+        assert [e['args'] for e in entries] == [['x']]
+
+    def test_unconfigured_per_site_task_uses_daemon_sites(self, config):
+        # ldap_sync has no daemon.tasks entry in the test config; an
+        # explicit enqueue still resolves sites from the daemon defaults.
+        entries = build_enqueue_entries(config, 'ldap_sync')
+        assert [e['args'] for e in entries] == [['test-site']]
+
+    def test_no_expiry_on_one_off_submissions(self, config):
+        for task in ('reap', 'slurm_sync', 'sympa_export'):
+            for entry in build_enqueue_entries(config, task):
+                assert 'expires' not in entry['options']
+
+    def test_singleton_rejects_site(self, config):
+        with pytest.raises(ValueError, match='does not take a site'):
+            build_enqueue_entries(config, 'iam_sync', sites=['a'])
+
+    def test_unknown_task_rejected(self, config):
+        with pytest.raises(ValueError, match='Unknown task'):
+            build_enqueue_entries(config, 'frobnicate')
+
+    def test_all_enqueueable_tasks_registered(self, config):
+        from ..daemon.schedule import TASK_SPECS
+        for task in TASK_SPECS:
+            sites = ['s'] if TASK_SPECS[task][1] else None
+            for entry in build_enqueue_entries(config, task, sites=sites):
+                assert entry['task'] in app.tasks
 
 
 # ---------------------------------------------------------------------------
