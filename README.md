@@ -99,10 +99,12 @@ collection via celery's mongodb result backend.
 | api | `cheeto daemon api` | hub host (uvicorn) |
 
 Task → queue topology: the hub worker runs HiPPO event processing, IAM
-sync, LDAP sync, account reaping, and Sympa list exports. `slurm_sync`
-must execute on each cluster's head node (it drives the local
-`sacctmgr`), so beat routes one `slurm_sync(site)` task per site to that
-site's `slurm.<site>` queue.
+sync, LDAP sync, account reaping, Sympa list exports, and the legacy
+puppet repo sync (`puppet_sync`, which commits/pushes each site's
+`domains/<fqdn>/merged/all.yaml` into a pre-cloned puppet.hpc repo).
+`slurm_sync` must execute on each cluster's head node (it drives the
+local `sacctmgr`), so beat routes one `slurm_sync(site)` task per site
+to that site's `slurm.<site>` queue.
 
 Schedules come from the `daemon.tasks` config block: a numeric value is
 an interval in seconds, a string is a 5-field crontab, and an absent task
@@ -174,6 +176,7 @@ daemon:
       slurm_sync: {schedule: 600, apply: true, max_deletions: 50}
       reap:       {schedule: '0 3 * * *'}
       sympa:      {schedule: 3600, output_dir: /var/lib/cheeto/sympa}
+      puppet_sync: {schedule: 1800, repo: /var/lib/cheeto/puppet.hpc}
 api:
   default:
     host: 0.0.0.0
