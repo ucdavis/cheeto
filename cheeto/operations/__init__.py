@@ -76,6 +76,7 @@ from .ldap import (
     SyncSiteLDAP,
     SyncUserToLDAP,
 )
+from .puppet import SyncOldPuppet
 from .storage import (
     CreateHomeStorage,
     CreateStaticMount,

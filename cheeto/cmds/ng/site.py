@@ -1,8 +1,9 @@
 import asyncio
 import sys
-from argparse import Namespace
+from argparse import BooleanOptionalAction, Namespace
 from pathlib import Path
 
+import sh
 from ponderosa import ArgParser
 from rich.panel import Panel
 from rich.table import Table
@@ -23,6 +24,7 @@ from ...operations import (
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
     SetSiteStorageDefaults,
+    SyncOldPuppet,
 )
 from ...puppet import PuppetAccountMap
 from ...queries import (
@@ -442,8 +444,8 @@ def site_export_cmd(args: Namespace):
 
 @site_args.apply(required=True)
 @commands.register('ng', 'site', 'export', 'puppet-legacy',
-                   help="Export site users/groups as v1-compatible "
-                        "puppet.hpc YAML (omits storage/share blocks)")
+                   help="Export site users/groups/storage as "
+                        "v1-compatible puppet.hpc YAML")
 async def site_export_puppet_legacy(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
@@ -463,6 +465,57 @@ async def site_export_puppet_legacy(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--output', '-o', default=None,
                         help='Write YAML to this path (default: stdout)')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'sync-old-puppet',
+                   help='Fully sync site from database to the puppet.hpc '
+                        'YAML repo')
+async def site_sync_old_puppet(args: Namespace):
+    console = Console()
+    try:
+        result = await SyncOldPuppet.run(
+            args.db, args.author,
+            sitename=args.site,
+            repo=args.repo,
+            base_branch=args.base_branch,
+            push=args.push_merge,
+            write_keys=args.write_keys,
+            delete_branch=args.delete_branch,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    except sh.ErrorReturnCode as e:
+        console.print(
+            f'[red]git failed:[/] {e.stderr.decode(errors="replace")}'
+        )
+        return 1
+
+    if result['changed']:
+        suffix = ' (pushed + merged)' if result['pushed'] else ' (no push)'
+        console.print(
+            f'Synced [bold]{args.site}[/] on branch '
+            f'[green]{result["branch"]}[/]{suffix}'
+        )
+    else:
+        console.print(f'[yellow]No changes for {args.site}[/]')
+
+
+@site_sync_old_puppet.args()
+def _(parser: ArgParser):
+    parser.add_argument('repo', type=Path,
+                        help='Path to the puppet.hpc repo clone')
+    parser.add_argument('--base-branch', default='main')
+    parser.add_argument('--push-merge', default=False, action='store_true',
+                        help='Push the working branch, merge it into the '
+                             'base branch, and push the merge')
+    parser.add_argument('--write-keys', default=False, action='store_true',
+                        help='Also write keys/<username>.pub files')
+    parser.add_argument('--delete-branch', default=True,
+                        action=BooleanOptionalAction,
+                        help='Delete the working branch after a successful '
+                             'push + merge')
 
 
 @site_args.apply(required=True)
