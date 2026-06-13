@@ -23,6 +23,7 @@ from ..models import User
 from ..operations.hippo import HippoEventProcessor
 from ..operations.iam import ReapOffboardedUsers, SyncAllUsersIAM
 from ..operations.ldap import SyncSiteLDAP
+from ..operations.puppet import SyncOldPuppet
 from ..operations.site import ExportSympaEmails
 from ..operations.slurm import SyncSlurm
 
@@ -131,6 +132,22 @@ async def _sympa_export(config: Config,
             'emails': len(text.splitlines())}
 
 
+async def _puppet_sync(config: Config,
+                       client: AsyncMongoClient,
+                       author: User | None,
+                       sitename: str) -> dict:
+    tcfg = config.daemon.tasks.puppet_sync
+    return await SyncOldPuppet.run(
+        client, author,
+        sitename=sitename,
+        repo=Path(tcfg.repo),
+        base_branch=tcfg.base_branch,
+        push=tcfg.push,
+        write_keys=tcfg.write_keys,
+        delete_branch=tcfg.delete_branch,
+    )
+
+
 # Explicit names so beat entries and queue routing are stable strings.
 # SlurmSyncAborted / prune-abort exceptions propagate to a task FAILURE in
 # the mongodb result backend — that is the alerting signal for a sync whose
@@ -164,3 +181,8 @@ def slurm_sync(sitename: str):
 @app.task(name='cheeto.sympa_export')
 def sympa_export(sitename: str):
     return run_op(_sympa_export, sitename)
+
+
+@app.task(name='cheeto.puppet_sync')
+def puppet_sync(sitename: str):
+    return run_op(_puppet_sync, sitename)

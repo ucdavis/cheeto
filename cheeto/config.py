@@ -148,6 +148,20 @@ class SympaTaskConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class PuppetSyncTaskConfig(BaseModel):
+    # Path to the puppet.hpc repo clone on the hub host (deploy step —
+    # the daemon never clones).
+    repo: str
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    base_branch: str = 'main'
+    push: bool = True
+    write_keys: bool = True
+    delete_branch: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class DaemonTasksConfig(BaseModel):
     hippo: Optional[HippoTaskConfig] = None
     iam_sync: Optional[IAMSyncTaskConfig] = None
@@ -155,6 +169,7 @@ class DaemonTasksConfig(BaseModel):
     slurm_sync: Optional[SlurmSyncTaskConfig] = None
     reap: Optional[ReapTaskConfig] = None
     sympa: Optional[SympaTaskConfig] = None
+    puppet_sync: Optional[PuppetSyncTaskConfig] = None
 
 
 @require_kwargs

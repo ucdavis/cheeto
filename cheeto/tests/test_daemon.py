@@ -30,7 +30,7 @@ from ..daemon.schedule import (
     build_enqueue_entries,
     parse_schedule,
 )
-from ..daemon.tasks import _reap, _sympa_export
+from ..daemon.tasks import _puppet_sync, _reap, _sympa_export
 from ..models import ALL_MODELS
 from ..models.history import History
 from ..models.site import Site
@@ -103,6 +103,15 @@ class TestDaemonConfig:
         assert config.daemon.tasks.ldap_sync is None
         assert config.daemon.tasks.reap is None
 
+    def test_puppet_sync_config_parses(self, config):
+        tcfg = config.daemon.tasks.puppet_sync
+        assert tcfg.repo == '/tmp/cheeto-test-puppet'
+        assert tcfg.schedule == 1800
+        assert tcfg.base_branch == 'main'
+        assert tcfg.push is True
+        assert tcfg.write_keys is True
+        assert tcfg.delete_branch is True
+
     def test_api_section_parses(self, config):
         assert config.api is not None
         assert config.api.port == 8810
@@ -157,6 +166,7 @@ class TestBuildBeatSchedule:
             'iam-sync',
             'slurm-sync-test-site',
             'sympa-export-test-site',
+            'puppet-sync-test-site',
         }
         # disabled tasks (no config entry) produce no schedule entries
         assert not any(name.startswith('ldap-sync') for name in sched)
@@ -169,13 +179,15 @@ class TestBuildBeatSchedule:
         assert entry['args'] == ['test-site']
         assert entry['options']['queue'] == 'slurm.test-site'
         # everything else lands on the default queue
-        for name in ('hippo-process', 'iam-sync', 'sympa-export-test-site'):
+        for name in ('hippo-process', 'iam-sync', 'sympa-export-test-site',
+                     'puppet-sync-test-site'):
             assert 'queue' not in sched[name]['options']
 
     def test_interval_entries_expire(self, config):
         sched = build_beat_schedule(config)
         assert sched['hippo-process']['options']['expires'] == 300.0
         assert sched['sympa-export-test-site']['options']['expires'] == 3600.0
+        assert sched['puppet-sync-test-site']['options']['expires'] == 1800.0
         # crontab entries must not be silently dropped
         assert 'expires' not in sched['iam-sync']['options']
 
@@ -242,6 +254,13 @@ class TestBuildEnqueueEntries:
         with pytest.raises(ValueError, match='Unknown task'):
             build_enqueue_entries(config, 'frobnicate')
 
+    def test_puppet_sync_routes_to_default_queue(self, config):
+        entries = build_enqueue_entries(config, 'puppet_sync')
+        assert entries == [{
+            'task': 'cheeto.puppet_sync', 'args': ['test-site'],
+            'options': {'queue': 'cheeto'},
+        }]
+
     def test_all_enqueueable_tasks_registered(self, config):
         from ..daemon.schedule import TASK_SPECS
         for task in TASK_SPECS:
@@ -304,6 +323,31 @@ def _with_sympa_outdir(config, outdir: Path):
     return replace(config, daemon=replace(config.daemon, tasks=tasks))
 
 
+def _with_puppet_repo(config, repo: Path):
+    tasks = replace(
+        config.daemon.tasks,
+        puppet_sync=replace(config.daemon.tasks.puppet_sync, repo=str(repo)),
+    )
+    return replace(config, daemon=replace(config.daemon, tasks=tasks))
+
+
+@pytest.fixture
+def puppet_repo(tmp_path):
+    """Bare origin + working clone, like test_git_async.py's fixture."""
+    import os
+    import sh
+    if os.getenv('GITHUB_ACTIONS') == 'true':
+        sh.git('config', '--global', 'user.name', 'Test User')
+        sh.git('config', '--global', 'user.email', 'test@example.com')
+    origin = tmp_path / 'origin.git'
+    sh.git('init', '--bare', '-b', 'main', str(origin))
+    clone = tmp_path / 'repo'
+    sh.git('clone', str(origin), str(clone))
+    sh.git('commit', '--allow-empty', '-m', 'Root commit', _cwd=str(clone))
+    sh.git('push', '-u', 'origin', 'main', _cwd=str(clone))
+    return origin, clone
+
+
 async def _seed_user(name, uid, *, type='user', status='active', site=None,
                      access=('login-ssh',), keys=()):
     user = User(
@@ -364,6 +408,96 @@ class TestTaskBodies:
         fetched = await User.find_one(User.name == 'dm_expired',
                                       fetch_links=True, nesting_depth=1)
         assert fetched.status.status_name == 'inactive'
+
+    @staticmethod
+    async def _origin_show(origin: Path, path: str) -> str:
+        import sh
+        return str(await sh.git(
+            'show', f'main:{path}',
+            _cwd=str(origin), _async=True, _tty_out=False,
+        ))
+
+    async def test_puppet_sync_writes_yaml_and_keys(
+        self, beanie_client, clean_db, config, puppet_repo,
+    ):
+        import sh
+        from ..models.history import History
+        from ..puppet import PuppetAccountMap
+        from ..queries import site_to_puppet_legacy
+
+        origin, clone = puppet_repo
+        site = Site(name='test-site', fqdn='test.site')
+        await site.insert()
+        await _seed_user('dm_alice', 70001, site=site,
+                         keys=('ssh-ed25519 AAAA alice',))
+        await _seed_user('dm_bob', 70002, site=site)
+
+        cfg = _with_puppet_repo(config, clone)
+        result = await _puppet_sync(cfg, beanie_client, None, 'test-site')
+
+        assert result['changed'] is True
+        assert result['pushed'] is True
+        assert result['users_with_keys'] == 1
+
+        expected = PuppetAccountMap.Schema().dumps(
+            await site_to_puppet_legacy(site)
+        ) + '\n'
+        yaml_on_origin = await self._origin_show(
+            origin, 'domains/test.site/merged/all.yaml',
+        )
+        assert yaml_on_origin == expected
+        key_file = await self._origin_show(origin, 'keys/dm_alice.pub')
+        assert key_file == 'ssh-ed25519 AAAA alice\n'
+
+        # No leftover branches on origin (the v1 accumulation bug).
+        branches = str(await sh.git(
+            'branch', '--format=%(refname:short)',
+            _cwd=str(origin), _async=True, _tty_out=False,
+        ))
+        assert branches.split() == ['main']
+
+        history = await History.find_one(History.op == 'sync_old_puppet')
+        assert history is not None
+        assert history.changes['branch'] == result['branch']
+
+    async def test_puppet_sync_second_run_no_changes(
+        self, beanie_client, clean_db, config, puppet_repo,
+    ):
+        import sh
+        origin, clone = puppet_repo
+        site = Site(name='test-site', fqdn='test.site')
+        await site.insert()
+        await _seed_user('dm_alice', 70001, site=site)
+
+        cfg = _with_puppet_repo(config, clone)
+        first = await _puppet_sync(cfg, beanie_client, None, 'test-site')
+        assert first['changed'] is True
+
+        rev = str(await sh.git('rev-parse', 'main', _cwd=str(origin),
+                               _async=True, _tty_out=False)).strip()
+        second = await _puppet_sync(cfg, beanie_client, None, 'test-site')
+        assert second['changed'] is False
+        assert second['pushed'] is False
+        rev_after = str(await sh.git('rev-parse', 'main', _cwd=str(origin),
+                                     _async=True, _tty_out=False)).strip()
+        assert rev_after == rev
+
+    async def test_puppet_sync_unknown_site_raises(
+        self, beanie_client, clean_db, config, puppet_repo,
+    ):
+        _, clone = puppet_repo
+        cfg = _with_puppet_repo(config, clone)
+        with pytest.raises(ValueError, match='does not exist'):
+            await _puppet_sync(cfg, beanie_client, None, 'nope')
+
+    async def test_puppet_sync_missing_clone_raises(
+        self, beanie_client, clean_db, config, tmp_path,
+    ):
+        site = Site(name='test-site', fqdn='test.site')
+        await site.insert()
+        cfg = _with_puppet_repo(config, tmp_path / 'not-a-repo')
+        with pytest.raises(ValueError, match='not a git repository'):
+            await _puppet_sync(cfg, beanie_client, None, 'test-site')
 
 
 class TestCeleryEagerSmoke:

@@ -50,6 +50,7 @@ TASK_SPECS: dict[str, tuple[str, bool]] = {
     'ldap_sync': ('cheeto.ldap_sync', True),
     'slurm_sync': ('cheeto.slurm_sync', True),
     'sympa_export': ('cheeto.sympa_export', True),
+    'puppet_sync': ('cheeto.puppet_sync', True),
 }
 
 
@@ -159,5 +160,14 @@ def build_beat_schedule(config: Config) -> dict[str, dict]:
                 'args': [site],
                 'schedule': parse_schedule(tasks.sympa.schedule),
                 'options': _options(tasks.sympa.schedule),
+            }
+    if tasks.puppet_sync is not None and tasks.puppet_sync.schedule is not None:
+        # Default `cheeto` queue: the repo clone lives on the hub host.
+        for site in (tasks.puppet_sync.sites or daemon.sites):
+            sched[f'puppet-sync-{site}'] = {
+                'task': 'cheeto.puppet_sync',
+                'args': [site],
+                'schedule': parse_schedule(tasks.puppet_sync.schedule),
+                'options': _options(tasks.puppet_sync.schedule),
             }
     return sched

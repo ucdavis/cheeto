@@ -41,6 +41,9 @@ daemon:
       sympa:
         schedule: 3600
         output_dir: /tmp/cheeto-test-sympa
+      puppet_sync:
+        schedule: 1800
+        repo: /tmp/cheeto-test-puppet
       # ldap_sync and reap intentionally absent: disabled
 api:
   default:
