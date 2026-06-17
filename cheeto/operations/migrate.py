@@ -101,7 +101,28 @@ async def _resolve_status_link_for_migration(
 logger = logging.getLogger(__name__)
 
 
-class MigrateAccessStatusGroups(Operation):
+class _BulkMigrateOperation(Operation):
+    """Base for the bulk migrate driver ops.
+
+    These iterate over an entire v1 collection (users, groups, storages,
+    slurm associations, …) within a single ``execute()``. Wrapping that in one
+    Mongo transaction exceeds the server's ``transactionLifetimeLimitSeconds``
+    (default 60s) on a real migrate: the transaction is reaped mid-loop and the
+    next write fails with ``NoSuchTransaction`` / ``TransientTransactionError``.
+
+    The migrations are convergent and idempotent — re-running (including a
+    second ``--sites`` pass) only adds what is missing — so all-or-nothing
+    atomicity across the whole dataset is neither required nor achievable within
+    the transaction limit. Run in a bare session instead; a partial failure is
+    recovered by fixing the cause and re-running (or ``--drop`` + re-run).
+    Per-item ops invoked standalone (e.g. ``MigrateUser``) keep their own
+    transaction.
+    """
+
+    transactional = False
+
+
+class MigrateAccessStatusGroups(_BulkMigrateOperation):
     """Seed beanie AccessGroup/StatusGroup records so MigrateUsers (which
     expects access/status to resolve to Links) can run successfully.
 
@@ -314,7 +335,7 @@ class MigrateAccessStatusGroups(Operation):
         }
 
 
-class MigrateSites(Operation):
+class MigrateSites(_BulkMigrateOperation):
     op_name = 'migrate_sites'
 
     def __init__(
@@ -375,7 +396,7 @@ class MigrateSites(Operation):
         }
 
 
-class MigrateSiteGlobals(Operation):
+class MigrateSiteGlobals(_BulkMigrateOperation):
     """Fold v1 `Site.global_groups` and `Site.global_slurmers` into the v2
     sticky lists.
 
@@ -721,7 +742,7 @@ class MigrateUser(Operation):
         }
 
 
-class MigrateUsers(Operation):
+class MigrateUsers(_BulkMigrateOperation):
     """Migrate all users from mongoengine to beanie."""
 
     op_name = 'migrate_users'
@@ -789,7 +810,7 @@ class MigrateUsers(Operation):
         }
 
 
-class MigrateGroups(Operation):
+class MigrateGroups(_BulkMigrateOperation):
     op_name = 'migrate_groups'
 
     def __init__(
@@ -1028,7 +1049,7 @@ def _new_tres_from_old(old_tres) -> SlurmTRES:
     )
 
 
-class MigrateSlurmPartitions(Operation):
+class MigrateSlurmPartitions(_BulkMigrateOperation):
     op_name = 'migrate_slurm_partitions'
 
     def __init__(
@@ -1102,7 +1123,7 @@ class MigrateSlurmPartitions(Operation):
         }
 
 
-class MigrateSlurmQOSes(Operation):
+class MigrateSlurmQOSes(_BulkMigrateOperation):
     op_name = 'migrate_slurm_qoses'
 
     def __init__(
@@ -1218,7 +1239,7 @@ def _old_limits_are_default(old_limits) -> bool:
     )
 
 
-class MigrateSlurmAccounts(Operation):
+class MigrateSlurmAccounts(_BulkMigrateOperation):
     op_name = 'migrate_slurm_accounts'
 
     def __init__(
@@ -1317,7 +1338,7 @@ class MigrateSlurmAccounts(Operation):
         }
 
 
-class MigrateSlurmAssociations(Operation):
+class MigrateSlurmAssociations(_BulkMigrateOperation):
     op_name = 'migrate_slurm_associations'
 
     def __init__(
@@ -1526,7 +1547,7 @@ def _v1_source_export(src) -> NFSExportConfig | None:
     return None
 
 
-class MigrateAutomountMaps(Operation):
+class MigrateAutomountMaps(_BulkMigrateOperation):
     """Migrate v1 AutomountMaps to v2 (tablename → name)."""
 
     op_name = 'migrate_automount_maps'
@@ -1628,7 +1649,7 @@ class MigrateAutomountMaps(Operation):
         }
 
 
-class MigrateStorageVolumes(Operation):
+class MigrateStorageVolumes(_BulkMigrateOperation):
     """Create v2 StorageVolumes from v1 collections + mount sources.
 
     Three passes (shallow paths first so nesting parents correctly):
@@ -1948,7 +1969,7 @@ class MigrateStorageVolumes(Operation):
         }
 
 
-class MigrateStorages(Operation):
+class MigrateStorages(_BulkMigrateOperation):
     """Migrate v1 Storage records (source + Automount) to v2 Storages
     referencing the volumes created by MigrateStorageVolumes.
 
