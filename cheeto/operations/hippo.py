@@ -18,18 +18,16 @@ from pymongo import AsyncMongoClient
 
 from ..config import HippoConfig
 from ..constants import HIPPO_EVENT_ACTIONS
+from ..hippo import filter_events, hippoapi_client, send_email
 from ..hippoapi import AuthenticatedClient
 from ..hippoapi.api.event_queue import (
     event_queue_pending_events,
     event_queue_update_status,
 )
-from ..hippoapi.api.notify import notify_styled
 from ..hippoapi.models.queued_event_account_model import QueuedEventAccountModel
 from ..hippoapi.models.queued_event_data_model import QueuedEventDataModel
 from ..hippoapi.models.queued_event_model import QueuedEventModel
 from ..hippoapi.models.queued_event_update_model import QueuedEventUpdateModel
-from ..hippoapi.models.simple_notification_model import SimpleNotificationModel
-from ..log import Console
 from ..mail import (
     Email,
     NewAccountEmail,
@@ -54,24 +52,8 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Client factory + helpers
+# Helpers
 # ---------------------------------------------------------------------------
-
-
-def hippoapi_client(config: HippoConfig, quiet: bool = False) -> AuthenticatedClient:
-    """Build an authenticated HTTP client for the HiPPO REST API."""
-    if not quiet:
-        console = Console(stderr=True)
-        console.print(f'hippo config:')
-        console.print(f'  base_url: [green]{config.base_url}')
-        console.print(f'  max_tries: [green]{config.max_tries}')
-    return AuthenticatedClient(
-        follow_redirects=True,
-        base_url=config.base_url,
-        token=config.api_key,
-        auth_header_name='X-API-Key',
-        prefix='',
-    )
 
 
 _HIPPO_ACCESS_MAP = {
@@ -86,16 +68,6 @@ def _hippo_to_cheeto_access(access_types: list[str] | None) -> set[str]:
     return {
         _HIPPO_ACCESS_MAP[t] for t in access_types if t in _HIPPO_ACCESS_MAP
     }
-
-
-def filter_events(events, event_type: str | None = None, event_id: int | None = None):
-    """Yield events whose action and/or id match the filters (None = match all)."""
-    for event in events:
-        if event_type is not None and event.action != event_type:
-            continue
-        if event_id is not None and event.id != event_id:
-            continue
-        yield event
 
 
 # ---------------------------------------------------------------------------
@@ -178,31 +150,6 @@ class AccountHippoHandler(BaseHippoHandler):
 
 
 # ---------------------------------------------------------------------------
-# Email sending via hippoapi notify endpoint
-# ---------------------------------------------------------------------------
-
-
-async def _send_email(mail: Email, hippo_client: AuthenticatedClient) -> None:
-    body = SimpleNotificationModel(
-        subject=mail.subject,
-        header=mail.header,
-        emails=mail.emails,
-        cc_emails=mail.ccEmails,
-        paragraphs=list(mail.paragraphs()),
-    )
-    response = await notify_styled.asyncio_detailed(
-        client=hippo_client, body=body,
-    )
-    if response.status_code == 200:
-        logger.info('sent email subject=%r to=%r', mail.subject, mail.emails)
-    else:
-        logger.error(
-            'email send failed (status=%d): %s',
-            response.status_code, response.content,
-        )
-
-
-# ---------------------------------------------------------------------------
 # Concrete handlers
 # ---------------------------------------------------------------------------
 
@@ -239,7 +186,7 @@ class UpdateSshKeyHandler(AccountHippoHandler):
             sitename=parsed.sitename,
             sitefqdn=sitefqdn,
         )
-        await _send_email(mail, context.hippo_client)
+        await send_email(mail, context.hippo_client)
 
 
 class CreateAccountHandler(BaseHippoHandler):
@@ -290,7 +237,7 @@ class CreateAccountHandler(BaseHippoHandler):
 
         if notify:
             mail = await self._build_email(parsed, user, site)
-            await _send_email(mail, context.hippo_client)
+            await send_email(mail, context.hippo_client)
         return user
 
     async def _ensure_user(self, parsed: ParsedEventContext,
@@ -420,7 +367,7 @@ class AddAccountToGroupHandler(AccountHippoHandler):
             slurm_accounts=slurm_accounts,
             group_storages=[],
         )
-        await _send_email(mail, context.hippo_client)
+        await send_email(mail, context.hippo_client)
 
 
 class RemoveAccountFromGroupHandler(AccountHippoHandler):
@@ -469,7 +416,7 @@ class RemoveAccountFromGroupHandler(AccountHippoHandler):
             sitename=parsed.sitename,
             sponsors=sponsors,
         )
-        await _send_email(mail, context.hippo_client)
+        await send_email(mail, context.hippo_client)
 
 
 class CreateGroupHandler(BaseHippoHandler):
@@ -504,7 +451,7 @@ class CreateGroupHandler(BaseHippoHandler):
                 sitename=parsed.sitename,
                 sitefqdn=sitefqdn,
             )
-            await _send_email(mail, context.hippo_client)
+            await send_email(mail, context.hippo_client)
         return sponsor, group
 
 
