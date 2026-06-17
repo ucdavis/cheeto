@@ -28,6 +28,7 @@ from ..iam_async import (
     IAMUserPayload,
     build_ucdiam_info,
 )
+from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail
 from ..models import ALL_MODELS
 from ..models.history import History
 from ..models.user import UCDIAMInfo, UCDIAMPerson, User
@@ -830,3 +831,139 @@ class TestReapOffboardedUsers:
         # No offboarding users at all.
         reaped = await ReapOffboardedUsers.run(beanie_client, None, now=now)
         assert reaped == []
+
+
+# ---------------------------------------------------------------------------
+# Offboarding lifecycle notifications
+# ---------------------------------------------------------------------------
+
+
+def _collector():
+    """A notifier that records the Email objects it is handed."""
+    sent: list = []
+
+    async def notify(mail) -> None:
+        sent.append(mail)
+
+    return sent, notify
+
+
+class TestSyncAllUsersIAMNotify:
+
+    async def _seed_leaver(self, name, uid, now, *, days_missing):
+        await User(
+            name=name, email=f'{name}@example.edu', uid=uid, gid=uid,
+            fullname=name.capitalize(), home_directory=f'/home/{name}',
+            type='user', status=await status_link('active'),
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=uid, mothra_id=uid),
+                first_missing_at=now - timedelta(days=days_missing),
+            ),
+        ).insert()
+
+    async def test_offboarding_sends_warning(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        await self._seed_leaver('leaver', 40001, now, days_missing=20)
+        sent, notify = _collector()
+
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            tally = await SyncAllUsersIAM.run(
+                beanie_client, None,
+                iam_api=api, grace_days=14, expiry_offset_days=30,
+                now=now, notifier=notify,
+            )
+        assert tally['miss_offboarding'] == 1
+        assert tally['notified_offboarding'] == 1
+        assert tally['notify_error'] == 0
+
+        assert len(sent) == 1
+        mail = sent[0]
+        assert isinstance(mail, AccountOffboardingEmail)
+        assert mail.emails == ['leaver@example.edu']
+        body = '\n\n'.join(mail.paragraphs())
+        assert (now + timedelta(days=30)).strftime('%B %d, %Y') in body
+
+    async def test_no_mail_within_grace(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        await self._seed_leaver('recent', 40002, now, days_missing=2)
+        sent, notify = _collector()
+
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            tally = await SyncAllUsersIAM.run(
+                beanie_client, None,
+                iam_api=api, grace_days=14, expiry_offset_days=30,
+                now=now, notifier=notify,
+            )
+        assert tally['miss_within_grace'] == 1
+        assert tally['notified_offboarding'] == 0
+        assert sent == []
+
+    async def test_notify_failure_does_not_block_transition(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        await self._seed_leaver('leaver2', 40003, now, days_missing=20)
+
+        async def boom(mail):
+            raise RuntimeError('notify endpoint down')
+
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            tally = await SyncAllUsersIAM.run(
+                beanie_client, None,
+                iam_api=api, grace_days=14, expiry_offset_days=30,
+                now=now, notifier=boom,
+            )
+        # The state change is committed and tallied; only the send failed.
+        assert tally['miss_offboarding'] == 1
+        assert tally['notified_offboarding'] == 0
+        assert tally['notify_error'] == 1
+
+        fetched = await User.find_one(
+            User.name == 'leaver2', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == 'offboarding'
+        assert fetched.expires_at == now + timedelta(days=30)
+
+
+class TestReapOffboardedUsersNotify:
+
+    async def _seed(self, name, uid, status_link_obj, expires_at):
+        await User(
+            name=name, email=f'{name}@example.edu', uid=uid, gid=uid,
+            fullname=name.capitalize(), home_directory=f'/home/{name}',
+            type='user', status=status_link_obj, expires_at=expires_at,
+        ).insert()
+
+    async def test_deactivation_sends_email_only_to_reaped(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        offboarding = await status_link('offboarding')
+        await self._seed('past', 41001, offboarding, now - timedelta(days=1))
+        await self._seed('future', 41002, offboarding, now + timedelta(days=5))
+        sent, notify = _collector()
+
+        reaped = await ReapOffboardedUsers.run(
+            beanie_client, None, now=now, notifier=notify,
+        )
+        assert reaped == ['past']
+        assert len(sent) == 1
+        assert isinstance(sent[0], AccountDeactivatedEmail)
+        assert sent[0].emails == ['past@example.edu']
+
+    async def test_notify_failure_does_not_block_reap(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        offboarding = await status_link('offboarding')
+        await self._seed('past2', 41003, offboarding, now - timedelta(days=1))
+
+        async def boom(mail):
+            raise RuntimeError('notify endpoint down')
+
+        reaped = await ReapOffboardedUsers.run(
+            beanie_client, None, now=now, notifier=boom,
+        )
+        assert reaped == ['past2']
+        fetched = await User.find_one(
+            User.name == 'past2', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == 'inactive'

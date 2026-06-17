@@ -14,6 +14,7 @@ from rich.table import Table
 
 from .. import commands
 from ...constants import IAM_SYNCABLE_USER_TYPES
+from ...hippo import email_notifier
 from ...iam_async import AsyncIAMAPI
 from ...log import Console
 from ...models.user import User
@@ -22,6 +23,7 @@ from ...operations import (
     SyncAllUsersIAM,
     SyncUserIAM,
 )
+from ...operations.iam import maybe_notify_offboarding
 from ...queries import resolve_status_name
 from ._args import user_args
 
@@ -61,6 +63,10 @@ async def iam_sync_cmd(args: Namespace):
             console.print(f'[red]{e}[/]')
             return 1
 
+    with email_notifier(args.config.hippo, enabled=args.notify) as notify:
+        if await maybe_notify_offboarding(result, notify):
+            console.print('[dim]sent offboarding notification[/]')
+
     style = _outcome_style(result.outcome)
     console.print(
         f'[bold]{result.username}[/] -> [{style}]{result.outcome}[/] '
@@ -75,6 +81,9 @@ def _(parser: ArgParser):
                         help='Override IAMConfig.grace_days for this run')
     parser.add_argument('--expiry-offset-days', type=int, default=None,
                         help='Override IAMConfig.expiry_offset_days for this run')
+    parser.add_argument('--notify', action='store_true', default=False,
+                        help='Email the user if this sync moves them into '
+                             'offboarding')
 
 
 # ---------------------------------------------------------------------------
@@ -95,15 +104,17 @@ async def iam_sync_all_cmd(args: Namespace):
     types = args.type or list(IAM_SYNCABLE_USER_TYPES)
 
     async with AsyncIAMAPI(cfg) as iam_api:
-        tally = await SyncAllUsersIAM.run(
-            args.db, args.author,
-            iam_api=iam_api,
-            grace_days=grace,
-            expiry_offset_days=offset,
-            types=types,
-            max_users=args.max_users,
-            concurrency=args.concurrency,
-        )
+        with email_notifier(args.config.hippo, enabled=args.notify) as notify:
+            tally = await SyncAllUsersIAM.run(
+                args.db, args.author,
+                iam_api=iam_api,
+                grace_days=grace,
+                expiry_offset_days=offset,
+                types=types,
+                max_users=args.max_users,
+                concurrency=args.concurrency,
+                notifier=notify,
+            )
 
     table = Table(title='IAM sync summary', show_header=True)
     table.add_column('outcome', style='cyan')
@@ -127,6 +138,8 @@ def _(parser: ArgParser):
                         help='Override IAMConfig.grace_days for this run')
     parser.add_argument('--expiry-offset-days', type=int, default=None,
                         help='Override IAMConfig.expiry_offset_days for this run')
+    parser.add_argument('--notify', action='store_true', default=False,
+                        help='Email users moved into offboarding by this run')
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +249,9 @@ async def iam_reap_cmd(args: Namespace):
             console.print(f'  [yellow]{u.name}[/] (expires_at={u.expires_at})')
         return
 
-    reaped = await ReapOffboardedUsers.run(args.db, args.author)
+    with email_notifier(args.config.hippo, enabled=args.notify) as notify:
+        reaped = await ReapOffboardedUsers.run(args.db, args.author,
+                                               notifier=notify)
     if not reaped:
         console.print('[dim](no users to reap)[/]')
         return
@@ -250,6 +265,9 @@ def _(parser: ArgParser):
     parser.add_argument('--dry-run', action='store_true', default=False,
                         help='Show users that would be reaped, but do not '
                              'flip their status')
+    parser.add_argument('--notify', action='store_true', default=False,
+                        help='Email each user when their account is '
+                             'deactivated')
 
 
 # ---------------------------------------------------------------------------

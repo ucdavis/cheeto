@@ -104,6 +104,8 @@ class IAMSyncTaskConfig(BaseModel):
     concurrency: int = 1
     types: Optional[List[str]] = None
     max_users: Optional[int] = None
+    # Email users when they are flipped into offboarding.
+    notify: bool = True
 
 
 @require_kwargs
@@ -135,6 +137,8 @@ class SlurmSyncTaskConfig(BaseModel):
 @dataclass(frozen=True)
 class ReapTaskConfig(BaseModel):
     schedule: ScheduleT = None
+    # Email users when their account is deactivated at the end of offboarding.
+    notify: bool = True
 
 
 @require_kwargs

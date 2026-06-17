@@ -103,6 +103,16 @@ class TestDaemonConfig:
         assert config.daemon.tasks.ldap_sync is None
         assert config.daemon.tasks.reap is None
 
+    def test_iam_sync_notify_defaults_true(self, config):
+        # Not set in the test config, so this comes from the dataclass default.
+        assert config.daemon.tasks.iam_sync.notify is True
+
+    def test_reap_task_notify_default_true(self):
+        # reap is absent from the test config; verify the dataclass default
+        # that the daemon body relies on.
+        from ..config import ReapTaskConfig
+        assert ReapTaskConfig().notify is True
+
     def test_puppet_sync_config_parses(self, config):
         tcfg = config.daemon.tasks.puppet_sync
         assert tcfg.repo == '/tmp/cheeto-test-puppet'

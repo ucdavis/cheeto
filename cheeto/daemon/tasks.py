@@ -17,6 +17,7 @@ from pymongo import AsyncMongoClient
 from .app import app, daemon_config
 from ..config import Config
 from ..database.base import connect_beanie
+from ..hippo import email_notifier
 from ..iam_async import AsyncIAMAPI
 from ..ldap_async import AsyncLDAPManager
 from ..models import User
@@ -64,21 +65,28 @@ async def _iam_sync(config: Config,
                     author: User | None) -> dict[str, int]:
     tcfg = config.daemon.tasks.iam_sync
     async with AsyncIAMAPI(config.ucdiam) as iam_api:
-        return await SyncAllUsersIAM.run(
-            client, author,
-            iam_api=iam_api,
-            grace_days=config.ucdiam.grace_days,
-            expiry_offset_days=config.ucdiam.expiry_offset_days,
-            types=tcfg.types,
-            max_users=tcfg.max_users,
-            concurrency=tcfg.concurrency,
-        )
+        with email_notifier(config.hippo, enabled=tcfg.notify) as notify:
+            return await SyncAllUsersIAM.run(
+                client, author,
+                iam_api=iam_api,
+                grace_days=config.ucdiam.grace_days,
+                expiry_offset_days=config.ucdiam.expiry_offset_days,
+                types=tcfg.types,
+                max_users=tcfg.max_users,
+                concurrency=tcfg.concurrency,
+                notifier=notify,
+            )
 
 
 async def _reap(config: Config,
                 client: AsyncMongoClient,
                 author: User | None) -> list[str]:
-    return await ReapOffboardedUsers.run(client, author)
+    # reap may be enqueued without a configured task block; only notify when
+    # the task is configured and opts in.
+    tcfg = config.daemon.tasks.reap
+    notify_enabled = tcfg.notify if tcfg is not None else False
+    with email_notifier(config.hippo, enabled=notify_enabled) as notify:
+        return await ReapOffboardedUsers.run(client, author, notifier=notify)
 
 
 async def _ldap_sync(config: Config,

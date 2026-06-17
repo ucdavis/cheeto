@@ -23,7 +23,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from beanie.operators import In, LTE
 from pymongo import AsyncMongoClient
@@ -37,6 +37,7 @@ from ..iam_async import (
     IAMUserPayload,
     build_ucdiam_info,
 )
+from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail, Email
 from ..models.user import UCDIAMInfo, User
 from ..queries.access_status import find_status_group, resolve_status_name
 from .base import Operation
@@ -50,6 +51,7 @@ class SyncUserIAMResult:
     describe() carries a richer dict; this is for direct callers."""
 
     username: str
+    email: str
     outcome: str
     iam_id: int | None
     expires_at: datetime | None
@@ -73,6 +75,42 @@ def _naive_utc(dt: datetime | None) -> datetime:
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
     return dt
+
+
+# A notifier sends a rendered Email; None disables notification. Production
+# builds one via cheeto.hippo.email_notifier; tests pass a list-collector.
+Notifier = Callable[[Email], Awaitable[None]]
+
+
+def _fmt_deactivation_date(dt: datetime | None) -> str:
+    if dt is None:
+        return 'an upcoming date'
+    return dt.strftime('%B %d, %Y')
+
+
+async def maybe_notify_offboarding(
+    result: SyncUserIAMResult,
+    notifier: Notifier | None,
+) -> bool:
+    """Email an offboarding warning (with the scheduled deactivation date) when
+    a user just transitioned into offboarding. Best-effort: a failed send is
+    logged and reported as False, never propagated. Returns True iff a mail was
+    sent. Shared by the SyncAllUsersIAM driver and the single-user CLI."""
+    if notifier is None or result.outcome != 'miss_offboarding':
+        return False
+    mail = AccountOffboardingEmail(
+        to=[result.email],
+        username=result.username,
+        deactivation_date=_fmt_deactivation_date(result.expires_at),
+    )
+    try:
+        await notifier(mail)
+    except Exception as e:
+        logger.warning(
+            'offboarding notification failed for %s: %s', result.username, e,
+        )
+        return False
+    return True
 
 
 class SyncUserIAM(Operation):
@@ -109,6 +147,7 @@ class SyncUserIAM(Operation):
         self._first_missing_at: datetime | None = None
         self._last_seen_at: datetime | None = None
         self._status: str = ''
+        self._email: str = ''
 
     async def execute(self, session: AsyncClientSession) -> SyncUserIAMResult:
         user = await User.find_one(User.name == self.username, session=session)
@@ -137,6 +176,7 @@ class SyncUserIAM(Operation):
         # Snapshot for describe(): resolve the StatusGroup link to a string
         # so the History entry stays JSON-serializable.
         self._expires_at = user.expires_at
+        self._email = user.email
         self._status = await resolve_status_name(user.status) or ''
         if user.iam is not None:
             self._first_missing_at = user.iam.first_missing_at
@@ -231,6 +271,7 @@ class SyncUserIAM(Operation):
     def _build_result(self) -> SyncUserIAMResult:
         return SyncUserIAMResult(
             username=self.username,
+            email=self._email,
             outcome=self._outcome,
             iam_id=self._iam_id,
             expires_at=self._expires_at,
@@ -265,6 +306,8 @@ _TALLY_KEYS = (
     'miss_already_expiring',
     'transient_error',
     'error',
+    'notified_offboarding',
+    'notify_error',
 )
 
 
@@ -281,6 +324,12 @@ class SyncAllUsersIAM(Operation):
 
     op_name = 'sync_all_users_iam'
 
+    # Performs external email I/O (offboarding notifications) and may loop over
+    # many users, so it runs in a bare session rather than holding one
+    # long-lived transaction; per-user state already commits in the inner
+    # SyncUserIAM.run() transactions.
+    transactional = False
+
     def __init__(
         self,
         client: AsyncMongoClient,
@@ -293,9 +342,11 @@ class SyncAllUsersIAM(Operation):
         max_users: int | None = None,
         concurrency: int = 1,
         now: datetime | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         super().__init__(client, author)
         self.iam_api = iam_api
+        self.notifier = notifier
         self.grace_days = grace_days
         self.expiry_offset_days = expiry_offset_days
         # Always intersect with IAM_SYNCABLE_USER_TYPES so a caller can
@@ -357,6 +408,12 @@ class SyncAllUsersIAM(Operation):
             self._tally.setdefault(result.outcome, 0)
             self._tally[result.outcome] += 1
 
+        if result.outcome == 'miss_offboarding' and self.notifier is not None:
+            if await maybe_notify_offboarding(result, self.notifier):
+                self._tally['notified_offboarding'] += 1
+            else:
+                self._tally['notify_error'] += 1
+
     def describe(self) -> dict[str, Any]:
         return {
             'total': self._total,
@@ -385,16 +442,25 @@ class ReapOffboardedUsers(Operation):
 
     op_name = 'reap_offboarded_users'
 
+    # Sends deactivation emails (external, non-rollbackable I/O), so each flip
+    # commits in a bare session before its notification; reaping is idempotent
+    # and per-user-independent, so per-user atomicity is unnecessary.
+    transactional = False
+
     def __init__(
         self,
         client: AsyncMongoClient,
         author: User | None,
         *,
         now: datetime | None = None,
+        notifier: Notifier | None = None,
     ) -> None:
         super().__init__(client, author)
         self.now = _naive_utc(now)
+        self.notifier = notifier
         self._reaped: list[str] = []
+        self._notified = 0
+        self._notify_errors = 0
 
     async def execute(self, session: AsyncClientSession) -> list[str]:
         offboarding_sg = await find_status_group('offboarding')
@@ -416,10 +482,26 @@ class ReapOffboardedUsers(Operation):
                 'reaped offboarded user %s (expires_at=%s)',
                 user.name, user.expires_at,
             )
+            await self._notify_deactivated(user)
         return list(self._reaped)
+
+    async def _notify_deactivated(self, user: User) -> None:
+        if self.notifier is None:
+            return
+        mail = AccountDeactivatedEmail(to=[user.email], username=user.name)
+        try:
+            await self.notifier(mail)
+            self._notified += 1
+        except Exception as e:
+            logger.warning(
+                'deactivation notification failed for %s: %s', user.name, e,
+            )
+            self._notify_errors += 1
 
     def describe(self) -> dict[str, Any]:
         return {
             'reaped_count': len(self._reaped),
             'reaped_users': list(self._reaped),
+            'notified_count': self._notified,
+            'notify_errors': self._notify_errors,
         }
