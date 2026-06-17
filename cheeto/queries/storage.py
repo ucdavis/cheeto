@@ -12,8 +12,11 @@ and the CLI listing use that.
 
 from __future__ import annotations
 
-from ..models.site import Site
-from ..models.storage import StaticMount, Storage, StorageVolume
+import asyncio
+
+from ..models.base import link_target_id
+from ..models.site import Site, SiteStorageSettings
+from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
 
 
 async def list_automap_storages(site: Site, category: str) -> list[Storage]:
@@ -61,6 +64,33 @@ async def list_site_static_mounts(site: Site) -> list[StaticMount]:
         fetch_links=True,
         nesting_depth=1,
     ).sort('+mount_path').to_list()
+
+
+async def _resolve_storage_name(ref, model) -> str | None:
+    """Resolve a SiteStorageSettings DocRef (bare ObjectId or None) to the
+    referenced document's `name`, or None if unset/missing."""
+    target_id = link_target_id(ref)
+    if target_id is None:
+        return None
+    doc = await model.get(target_id)
+    return doc.name if doc is not None else None
+
+
+async def resolve_site_storage_settings(settings: SiteStorageSettings) -> dict:
+    """Resolve a site's home-storage provisioning defaults to display labels:
+    the default home volume / automount map / static mount names, plus the
+    plain default home quota string. One lightweight fetch per set ref."""
+    volume, automount, static = await asyncio.gather(
+        _resolve_storage_name(settings.default_home_volume, StorageVolume),
+        _resolve_storage_name(settings.home_automount_map, AutomountMap),
+        _resolve_storage_name(settings.home_static_mount, StaticMount),
+    )
+    return {
+        'default_home_volume': volume,
+        'default_home_quota': settings.default_home_quota,
+        'home_automount_map': automount,
+        'home_static_mount': static,
+    }
 
 
 async def get_storage(

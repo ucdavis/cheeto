@@ -4543,6 +4543,61 @@ class TestSiteStorageSettings:
         ok = SiteStorageSettings(default_home_quota='20G')
         assert ok.default_home_quota == '20G'
 
+    async def test_resolve_settings_automount(self, beanie_client):
+        # The labels `ng site show` renders for an automount-backed site.
+        from cheeto.operations import SetSiteStorageDefaults
+        from cheeto.queries import resolve_site_storage_settings
+        site = Site(name='rss_auto', fqdn='rss-auto.test')
+        await site.insert()
+        await _seed_volume(site, name='home', host='flash01',
+                           host_path='/flash/export/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='rss_auto',
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        site = await Site.find_one(Site.name == 'rss_auto')
+        assert await resolve_site_storage_settings(site.storage) == {
+            'default_home_volume': 'home',
+            'default_home_quota': '20G',
+            'home_automount_map': 'home',
+            'home_static_mount': None,
+        }
+
+    async def test_resolve_settings_static_mount(self, beanie_client):
+        from cheeto.operations import SetSiteStorageDefaults
+        from cheeto.queries import resolve_site_storage_settings
+        site = Site(name='rss_static', fqdn='rss-static.test')
+        await site.insert()
+        volume = await _seed_volume(site, name='home', host='flash01',
+                                    host_path='/flash/export/home')
+        smount = StaticMount(name='home', site=site, fstype='nfs4',
+                             volume=volume, mount_path='/home')
+        await smount.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='rss_static',
+            home_volume='home', home_quota='20G', home_static_mount='home',
+        )
+        site = await Site.find_one(Site.name == 'rss_static')
+        resolved = await resolve_site_storage_settings(site.storage)
+        assert resolved['default_home_volume'] == 'home'
+        assert resolved['default_home_quota'] == '20G'
+        assert resolved['home_automount_map'] is None
+        assert resolved['home_static_mount'] == 'home'
+
+    async def test_resolve_settings_empty(self, beanie_client):
+        # A bare site (no storage defaults set) resolves to all-None.
+        from cheeto.queries import resolve_site_storage_settings
+        site = Site(name='rss_empty', fqdn='rss-empty.test')
+        await site.insert()
+        assert await resolve_site_storage_settings(site.storage) == {
+            'default_home_volume': None,
+            'default_home_quota': None,
+            'home_automount_map': None,
+            'home_static_mount': None,
+        }
+
 
 class TestCreateHomeStorageOp:
 

@@ -31,6 +31,7 @@ from ...queries import (
     count_site_dependents,
     find_site_by_name,
     resolve_group_names,
+    resolve_site_storage_settings,
     resolve_slurm_account_label,
     resolve_slurm_account_labels,
     site_to_puppet_legacy,
@@ -150,10 +151,13 @@ def _(parser: ArgParser):
 
 
 async def _site_to_dict(site: Site) -> dict:
-    sticky_groups, sticky_accounts, default_account = await asyncio.gather(
-        resolve_group_names(site.group.sticky),
-        resolve_slurm_account_labels(site.slurm.sticky),
-        resolve_slurm_account_label(site.slurm.default_account),
+    sticky_groups, sticky_accounts, default_account, storage = (
+        await asyncio.gather(
+            resolve_group_names(site.group.sticky),
+            resolve_slurm_account_labels(site.slurm.sticky),
+            resolve_slurm_account_label(site.slurm.default_account),
+            resolve_site_storage_settings(site.storage),
+        )
     )
     return {
         'name': site.name,
@@ -161,6 +165,7 @@ async def _site_to_dict(site: Site) -> dict:
         'sticky_groups': sticky_groups,
         'sticky_slurm_accounts': sticky_accounts,
         'default_slurm_account': default_account,
+        'storage': storage,
         'created_at': site.created_at,
         'updated_at': site.updated_at,
     }
@@ -191,6 +196,23 @@ def _render_site_panel(data: dict) -> Panel:
         default if default else '[dim](none)[/]',
     )
 
+    storage = data['storage']
+    table.add_row(
+        'home volume',
+        storage['default_home_volume'] or '[dim](none)[/]',
+    )
+    table.add_row(
+        'home quota',
+        storage['default_home_quota'] or '[dim](none)[/]',
+    )
+    if storage['home_automount_map']:
+        mount = f'{storage["home_automount_map"]} [dim](automount)[/]'
+    elif storage['home_static_mount']:
+        mount = f'{storage["home_static_mount"]} [dim](static)[/]'
+    else:
+        mount = '[dim](none)[/]'
+    table.add_row('home mount', mount)
+
     return Panel(
         table, title=f'[bold]Site:[/] [green]{data["name"]}[/]',
         border_style='green', expand=False,
@@ -199,8 +221,8 @@ def _render_site_panel(data: dict) -> Panel:
 
 @site_args.apply(required=True)
 @commands.register('ng', 'site', 'show',
-                   help='Show site details, including sticky groups + '
-                        'slurm accounts and the default slurm account')
+                   help='Show site details: sticky groups + slurm accounts, '
+                        'the default slurm account, and home-storage defaults')
 async def site_show(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
