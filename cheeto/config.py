@@ -195,6 +195,9 @@ class ApiConfig(BaseModel):
     port: int = 8000
     api_key: Optional[str] = None
     root_path: str = ''
+    # Path prefix the routes are mounted under (e.g. '/cheeto'); normalized
+    # to a leading-slash, no-trailing-slash form when the router is built.
+    prefix: str = ''
 
 
 @require_kwargs

@@ -87,6 +87,8 @@ from ..operations import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
+    root_authorized_keys_text,
+    root_ssh_keys,
     SyncGroupToLDAP,
     SyncSiteAutomounts,
     SyncSiteLDAP,
@@ -4240,8 +4242,16 @@ class TestExportRootSSHKeys:
             keys=['ssh-ed25519 AAAAoff off@h'],
         )
 
-        text = await ExportRootSSHKeys.run(beanie_client, None, sitename='rksite')
+        blocks = await ExportRootSSHKeys.run(beanie_client, None, sitename='rksite')
 
+        # The flat array (daemon API shape) is the per-admin entries in order.
+        assert root_ssh_keys(blocks) == [
+            'environment="REMOTE_SSH_USER=rk_alice" ssh-ed25519 AAAAaaa alice@laptop',
+            'environment="REMOTE_SSH_USER=rk_bob" ssh-ed25519 AAAAbbb bob@a',
+            'environment="REMOTE_SSH_USER=rk_bob" ssh-rsa AAAAbbb2 bob@b',
+        ]
+        # The authorized_keys file (CLI shape) adds a comment per admin.
+        text = root_authorized_keys_text(blocks)
         assert text == (
             '# rk_alice <rk_alice@x.test>\n'
             'environment="REMOTE_SSH_USER=rk_alice" ssh-ed25519 AAAAaaa alice@laptop\n'
@@ -4256,12 +4266,47 @@ class TestExportRootSSHKeys:
     async def test_export_empty_when_no_qualifying_admins(self, beanie_client):
         site = Site(name='rkempty', fqdn='rke.test')
         await site.insert()
-        text = await ExportRootSSHKeys.run(beanie_client, None, sitename='rkempty')
-        assert text == ''
+        blocks = await ExportRootSSHKeys.run(beanie_client, None, sitename='rkempty')
+        assert blocks == []
+        assert root_ssh_keys(blocks) == []
+        assert root_authorized_keys_text(blocks) == ''
 
     async def test_export_unknown_site_errors(self, beanie_client):
         with pytest.raises(ValueError):
             await ExportRootSSHKeys.run(beanie_client, None, sitename='nope')
+
+    async def test_export_global_when_no_sitename(self, beanie_client):
+        """With no sitename the search is not narrowed by site: every admin
+        with global root-ssh is returned (even one with no UserSiteInfo)."""
+        site1 = Site(name='g1', fqdn='g1.test')
+        await site1.insert()
+        site2 = Site(name='g2', fqdn='g2.test')
+        await site2.insert()
+        await self._admin(
+            'g_a', 81001, access=['root-ssh'], site=site1,
+            keys=['ssh-ed25519 AAAAa a@h'],
+        )
+        await self._admin(
+            'g_b', 81002, access=['root-ssh'], site=site2,
+            keys=['ssh-ed25519 AAAAb b@h'],
+        )
+        await self._admin(
+            'g_c', 81003, access=['root-ssh'], site=None,
+            keys=['ssh-ed25519 AAAAc c@h'],
+        )
+        # excluded: admin without root-ssh
+        await self._admin(
+            'g_noroot', 81004, access=['login-ssh'], site=site1,
+            keys=['ssh-ed25519 AAAAn n@h'],
+        )
+
+        # No sitename -> all admins with global root-ssh, across/without sites.
+        blocks = await ExportRootSSHKeys.run(beanie_client, None)
+        assert [b.name for b in blocks] == ['g_a', 'g_b', 'g_c']
+
+        # A sitename still narrows to that site's admins.
+        scoped = await ExportRootSSHKeys.run(beanie_client, None, sitename='g1')
+        assert [b.name for b in scoped] == ['g_a']
 
 
 class TestExportSympaEmails:

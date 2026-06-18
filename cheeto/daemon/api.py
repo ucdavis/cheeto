@@ -10,13 +10,12 @@
 import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Security
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Security
 from fastapi.security import APIKeyHeader
 
 from ..config import Config
 from ..database.base import connect_beanie
-from ..operations.site import ExportRootSSHKeys
+from ..operations.site import ExportRootSSHKeys, root_ssh_keys
 from ..operations.storage import ExportPuppetStorage
 from ..queries.site import find_site_by_name_or_fqdn
 
@@ -62,21 +61,36 @@ def create_api(config: Config, client=None) -> FastAPI:
                                 detail=f'unknown site {site!r}')
         return resolved.name
 
-    @api.get('/puppet/root-keys/{site}',
-             response_class=PlainTextResponse,
-             dependencies=[Depends(require_api_key)])
-    async def root_keys(request: Request,
-                        sitename: str = Depends(resolved_sitename)) -> str:
-        return await ExportRootSSHKeys.run(request.app.state.client,
-                                           None,
-                                           sitename=sitename)
+    # All routes live on a router so they can be mounted under a configurable
+    # path prefix; the API key is enforced router-wide.
+    router = APIRouter(dependencies=[Depends(require_api_key)])
 
-    @api.get('/puppet/storage/{site}',
-             dependencies=[Depends(require_api_key)])
+    @router.get('/puppet/root-keys/{site}')
+    async def root_keys(site: str, request: Request) -> dict:
+        # Unlike storage, root keys fall back to the global set (every admin
+        # with root-ssh) when the site is unknown rather than 404ing.
+        resolved = await find_site_by_name_or_fqdn(site)
+        sitename = resolved.name if resolved is not None else None
+        blocks = await ExportRootSSHKeys.run(request.app.state.client,
+                                             None,
+                                             sitename=sitename)
+        return {'root-ssh-public-keys': root_ssh_keys(blocks)}
+
+    @router.get('/puppet/storage/{site}')
     async def puppet_storage(request: Request,
                             sitename: str = Depends(resolved_sitename)) -> dict:
         return await ExportPuppetStorage.run(request.app.state.client,
                                              None,
                                              sitename=sitename)
 
+    api.include_router(router, prefix=_router_prefix(config))
     return api
+
+
+def _router_prefix(config: Config) -> str:
+    """Normalize the configured API prefix to FastAPI's router form: empty,
+    or a leading-slash path with no trailing slash (e.g. 'cheeto/' -> '/cheeto')."""
+    prefix = (config.api.prefix if config.api else '').strip().rstrip('/')
+    if prefix and not prefix.startswith('/'):
+        prefix = '/' + prefix
+    return prefix

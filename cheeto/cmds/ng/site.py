@@ -24,6 +24,7 @@ from ...operations import (
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
     SetSiteStorageDefaults,
+    root_authorized_keys_text,
     SyncOldPuppet,
 )
 from ...puppet import PuppetAccountMap
@@ -547,12 +548,13 @@ def _(parser: ArgParser):
 async def site_export_root_keys(args: Namespace):
     console = Console()
     try:
-        text = await ExportRootSSHKeys.run(
+        blocks = await ExportRootSSHKeys.run(
             args.db, args.author, sitename=args.site,
         )
     except ValueError as e:
         console.print(f'[red]{e}[/]')
         return 1
+    text = root_authorized_keys_text(blocks)
     if args.output:
         Path(args.output).write_text(text)
         console.print(f'Wrote root keys to [green]{args.output}[/]')

@@ -37,7 +37,7 @@ from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from ..operations.iam import ReapOffboardedUsers
-from ..operations.site import ExportRootSSHKeys, ExportSympaEmails
+from ..operations.site import ExportRootSSHKeys, ExportSympaEmails, root_ssh_keys
 from ..yaml import dumps as dumps_yaml, parse_yaml
 from .conftest import (
     MONGODB_PORT,
@@ -126,6 +126,7 @@ class TestDaemonConfig:
         assert config.api is not None
         assert config.api.port == 8810
         assert config.api.api_key == 'test-api-key'
+        assert config.api.prefix == ''  # defaults when absent from config
 
     def test_config_without_daemon_sections_parses(self, config_file, tmp_path):
         data = parse_yaml(str(config_file))
@@ -569,18 +570,30 @@ class TestDaemonApi:
             resp = await client.get('/puppet/root-keys/api-site',
                                     headers={'X-API-Key': 'test-api-key'})
         assert resp.status_code == 200
-        expected = await ExportRootSSHKeys.run(
+        blocks = await ExportRootSSHKeys.run(
             beanie_client, None, sitename='api-site',
         )
-        assert resp.text == expected
-        assert 'REMOTE_SSH_USER=api_admin' in resp.text
+        assert resp.json() == {'root-ssh-public-keys': root_ssh_keys(blocks)}
+        keys = resp.json()['root-ssh-public-keys']
+        assert any('REMOTE_SSH_USER=api_admin' in k for k in keys)
 
-    async def test_root_keys_unknown_site_404(self, beanie_client, config, rk_site):
+    async def test_root_keys_unknown_site_falls_back_to_global(
+        self, beanie_client, config, rk_site,
+    ):
+        """An unknown site returns the global key set (every admin with
+        root-ssh), not a 404 — unlike the storage endpoint."""
         api = create_api(config, client=beanie_client)
         async with _api_client(api) as client:
             resp = await client.get('/puppet/root-keys/nope',
                                     headers={'X-API-Key': 'test-api-key'})
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        global_blocks = await ExportRootSSHKeys.run(beanie_client, None)
+        assert resp.json() == {
+            'root-ssh-public-keys': root_ssh_keys(global_blocks),
+        }
+        # api_admin has global root-ssh, so it appears in the global set.
+        keys = resp.json()['root-ssh-public-keys']
+        assert any('REMOTE_SSH_USER=api_admin' in k for k in keys)
 
     async def test_endpoint_accepts_fqdn(self, beanie_client, config, rk_site):
         """`{site}` may be the site name or its fqdn; both resolve to the same
@@ -593,8 +606,9 @@ class TestDaemonApi:
                                        headers={'X-API-Key': 'test-api-key'})
         assert by_name.status_code == 200
         assert by_fqdn.status_code == 200
-        assert by_fqdn.text == by_name.text
-        assert 'REMOTE_SSH_USER=api_admin' in by_fqdn.text
+        assert by_fqdn.json() == by_name.json()
+        keys = by_fqdn.json()['root-ssh-public-keys']
+        assert any('REMOTE_SSH_USER=api_admin' in k for k in keys)
 
     async def test_no_api_key_configured_is_open(
         self, beanie_client, config, rk_site,
@@ -605,6 +619,24 @@ class TestDaemonApi:
             resp = await client.get('/puppet/root-keys/api-site')
         assert resp.status_code == 200
         assert 'api_admin' in resp.text
+
+    async def test_router_prefix_mounts_routes(
+        self, beanie_client, config, rk_site,
+    ):
+        """A configured prefix mounts the routes under it; the unprefixed
+        paths 404. The prefix is normalized (trailing slash stripped)."""
+        prefixed = replace(config, api=replace(config.api, prefix='/cheeto/'))
+        api = create_api(prefixed, client=beanie_client)
+        async with _api_client(api) as client:
+            under = await client.get('/cheeto/puppet/root-keys/api-site',
+                                     headers={'X-API-Key': 'test-api-key'})
+            unprefixed = await client.get(
+                '/puppet/root-keys/api-site',
+                headers={'X-API-Key': 'test-api-key'},
+            )
+        assert under.status_code == 200
+        assert 'root-ssh-public-keys' in under.json()
+        assert unprefixed.status_code == 404
 
     async def test_puppet_storage(self, beanie_client, config, rk_site):
         from ..models.group import Group
