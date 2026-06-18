@@ -176,6 +176,13 @@ class SshKey(BaseDocument, Expirable):
     key: str
     user: Link[User]
 
+    def authorized_keys_entry(self, username: str) -> str:
+        """Render this key as an authorized_keys line that records the
+        operator via sshd's `environment=` option, so a session resolves back
+        to the owning account (REMOTE_SSH_USER). Shared by root-key export and
+        the LDAP `sshPublicKey` projection."""
+        return f'environment="REMOTE_SSH_USER={username}" {self.key}'
+
     @after_event(Insert, Replace, Update, Delete)
     async def mark_user_ldap_dirty(self) -> None:
         # save()/save_changes() route through self.update(), so Update

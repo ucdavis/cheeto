@@ -87,14 +87,13 @@ from ..operations import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
-    root_authorized_keys_text,
-    root_ssh_keys,
     SyncGroupToLDAP,
     SyncSiteAutomounts,
     SyncSiteLDAP,
     SyncSlurm,
     SyncUserToLDAP,
 )
+from ..queries.user import root_authorized_keys_text, root_ssh_keys
 
 from .conftest import MONGODB_PORT, access_links, seed_access_status_groups, status_link
 
@@ -4307,6 +4306,82 @@ class TestExportRootSSHKeys:
         # A sitename still narrows to that site's admins.
         scoped = await ExportRootSSHKeys.run(beanie_client, None, sitename='g1')
         assert [b.name for b in scoped] == ['g_a']
+
+
+class TestLDAPUserRecordSshKeys:
+    """The LDAP user projection prefixes every SSH key with the same
+    environment="REMOTE_SSH_USER=<user>" option used for root keys, so an
+    LDAP-authenticated session also resolves back to the owning account."""
+
+    def test_authorized_keys_entry_format(self):
+        # model_construct: exercise the pure render method without a user link.
+        key = SshKey.model_construct(key='ssh-ed25519 AAAA u@host')
+        assert key.authorized_keys_entry('alice') == (
+            'environment="REMOTE_SSH_USER=alice" ssh-ed25519 AAAA u@host'
+        )
+
+    async def test_build_user_record_prefixes_keys(self, beanie_client):
+        from cheeto.operations.ldap import _build_user_record
+
+        u = User(
+            name='lk_user', email='lk@x.test', uid=82001, gid=82001,
+            fullname='LK User', home_directory='/home/lk_user',
+            status=await status_link('active'),
+        )
+        await u.insert()
+        await SshKey(key='ssh-ed25519 AAAA lk@host', user=u).insert()
+        await SshKey(key='ssh-rsa BBBB lk@other', user=u).insert()
+
+        record = await _build_user_record(u)
+        assert sorted(record.ssh_keys) == [
+            'environment="REMOTE_SSH_USER=lk_user" ssh-ed25519 AAAA lk@host',
+            'environment="REMOTE_SSH_USER=lk_user" ssh-rsa BBBB lk@other',
+        ]
+
+    async def test_system_user_gets_admin_root_keys(self, beanie_client):
+        """A type='system' user's LDAP entry carries its own key plus every
+        site admin's root-ssh keys (so admins can ssh-as-root via the system
+        account). Non-system users get only their own keys."""
+        from cheeto.operations.ldap import _build_user_record
+
+        site = Site(name='sysite', fqdn='sy.test')
+        await site.insert()
+
+        admin = User(
+            name='sy_admin', email='sy_admin@x.test', uid=83001, gid=83001,
+            fullname='Admin', home_directory='/home/sy_admin', type='admin',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'root-ssh']),
+        )
+        await admin.insert()
+        await UserSiteInfo(
+            user=admin, site=site, status=await status_link('active'),
+        ).insert()
+        await SshKey(key='ssh-ed25519 ADMINKEY admin@h', user=admin).insert()
+
+        sysu = User(
+            name='sy_svc', email='sy_svc@x.test', uid=83002, gid=83002,
+            fullname='Service', home_directory='/home/sy_svc', type='system',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await sysu.insert()
+        await UserSiteInfo(
+            user=sysu, site=site, status=await status_link('active'),
+        ).insert()
+        await SshKey(key='ssh-ed25519 SVCKEY svc@h', user=sysu).insert()
+
+        record = await _build_user_record(sysu, 'sysite')
+        assert sorted(record.ssh_keys) == [
+            'environment="REMOTE_SSH_USER=sy_admin" ssh-ed25519 ADMINKEY admin@h',
+            'environment="REMOTE_SSH_USER=sy_svc" ssh-ed25519 SVCKEY svc@h',
+        ]
+
+        # The admin (non-system) carries only its own key.
+        admin_record = await _build_user_record(admin, 'sysite')
+        assert admin_record.ssh_keys == [
+            'environment="REMOTE_SSH_USER=sy_admin" ssh-ed25519 ADMINKEY admin@h',
+        ]
 
 
 class TestExportSympaEmails:

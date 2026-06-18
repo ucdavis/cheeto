@@ -7,6 +7,7 @@ UserSiteInfo / Group rather than via a single aggregation pipeline.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
 
 from beanie import PydanticObjectId
@@ -244,3 +245,55 @@ async def find_users(
     return await User.find(
         In(User.id, list(ids)),
     ).sort('+name').to_list()
+
+
+# ---------------------------------------------------------------------------
+# Root SSH keys (admins with root-ssh)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RootKeyBlock:
+    """One admin's root authorized_keys block: their identity plus the
+    `environment="REMOTE_SSH_USER=<name>" <key>` entries (one per SSH key)."""
+    name: str
+    email: str
+    entries: list[str]
+
+
+async def root_key_blocks(site: str | None = None) -> list[RootKeyBlock]:
+    """Per-admin root authorized_keys blocks: every `admin` user with
+    effective `root-ssh` access that has at least one SSH key, each key
+    rendered with its REMOTE_SSH_USER prefix. Narrowed to `site` when given;
+    global (not narrowed by site) when None.
+
+    Shared by the `ExportRootSSHKeys` operation and the LDAP projection for
+    `type='system'` users (so admins can ssh-as-root via a system account)."""
+    blocks: list[RootKeyBlock] = []
+    for user in await find_users(type='admin', access='root-ssh', site=site):
+        keys = await list_user_ssh_keys(user)
+        if not keys:
+            continue
+        blocks.append(RootKeyBlock(
+            name=user.name,
+            email=user.email,
+            entries=[k.authorized_keys_entry(user.name) for k in keys],
+        ))
+    return blocks
+
+
+def root_ssh_keys(blocks: list[RootKeyBlock]) -> list[str]:
+    """Flat list of authorized_keys entries across all admins (the array the
+    daemon API serves, and the keys appended to system users in LDAP)."""
+    return [entry for block in blocks for entry in block.entries]
+
+
+def root_authorized_keys_text(blocks: list[RootKeyBlock]) -> str:
+    """Render `blocks` as authorized_keys file content: a `# name <email>`
+    comment per admin followed by their entries (the CLI/file shape, matching
+    v1's `db site root-key`)."""
+    lines: list[str] = []
+    for block in blocks:
+        lines.append(f'# {block.name} <{block.email}>')
+        lines.extend(block.entries)
+    return '\n'.join(lines) + '\n' if lines else ''

@@ -41,6 +41,7 @@ from .storage import (
     resolve_site_storage_settings,
 )
 from .user import (
+    RootKeyBlock,
     effective_access_links,
     find_user,
     find_user_by_email,
@@ -48,4 +49,7 @@ from .user import (
     find_user_by_uid,
     find_users,
     list_user_ssh_keys,
+    root_authorized_keys_text,
+    root_key_blocks,
+    root_ssh_keys,
 )

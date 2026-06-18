@@ -37,7 +37,8 @@ from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from ..operations.iam import ReapOffboardedUsers
-from ..operations.site import ExportRootSSHKeys, ExportSympaEmails, root_ssh_keys
+from ..operations.site import ExportRootSSHKeys, ExportSympaEmails
+from ..queries.user import root_ssh_keys
 from ..yaml import dumps as dumps_yaml, parse_yaml
 from .conftest import (
     MONGODB_PORT,

@@ -24,7 +24,6 @@ from ...operations import (
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
     SetSiteStorageDefaults,
-    root_authorized_keys_text,
     SyncOldPuppet,
 )
 from ...puppet import PuppetAccountMap
@@ -35,6 +34,7 @@ from ...queries import (
     resolve_site_storage_settings,
     resolve_slurm_account_label,
     resolve_slurm_account_labels,
+    root_authorized_keys_text,
     site_to_puppet_legacy,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml

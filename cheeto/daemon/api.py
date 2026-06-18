@@ -15,9 +15,10 @@ from fastapi.security import APIKeyHeader
 
 from ..config import Config
 from ..database.base import connect_beanie
-from ..operations.site import ExportRootSSHKeys, root_ssh_keys
+from ..operations.site import ExportRootSSHKeys
 from ..operations.storage import ExportPuppetStorage
 from ..queries.site import find_site_by_name_or_fqdn
+from ..queries.user import root_ssh_keys
 
 _api_key_header = APIKeyHeader(name='X-API-Key', auto_error=False)
 

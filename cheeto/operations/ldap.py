@@ -51,7 +51,7 @@ from ..queries.access_status import (
     resolve_status_ldapname,
 )
 from ..queries.group import effective_group_members, effective_user_groups
-from ..queries.user import effective_access_links
+from ..queries.user import effective_access_links, root_key_blocks, root_ssh_keys
 from .base import Operation
 
 logger = logging.getLogger(__name__)
@@ -69,8 +69,16 @@ _PROTECTED_USER_DNS = {'admin'}
 # ---------------------------------------------------------------------------
 
 
-async def _build_user_record(user: User) -> LDAPUserRecord:
+async def _build_user_record(
+    user: User, sitename: str | None = None,
+) -> LDAPUserRecord:
     keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+    ssh_keys = [k.authorized_keys_entry(user.name) for k in keys]
+    if user.type == 'system':
+        # System (service) accounts also carry every admin's root-ssh keys
+        # (the same set as the root-key export) so admins can ssh in as the
+        # account. Scoped to `sitename` when syncing a specific site.
+        ssh_keys.extend(root_ssh_keys(await root_key_blocks(sitename)))
     return LDAPUserRecord(
         username=user.name,
         email=user.email,
@@ -83,7 +91,7 @@ async def _build_user_record(user: User) -> LDAPUserRecord:
         ),
         home_directory=user.home_directory,
         shell=user.shell,
-        ssh_keys=[k.key for k in keys],
+        ssh_keys=ssh_keys,
         password=user.password,
         expires_at=user.expires_at,
     )
@@ -272,7 +280,7 @@ class SyncUserToLDAP(Operation):
         posix_groups, _sticky_ids = await effective_user_groups(user, site)
         target_groups.update(g.name for g in posix_groups)
 
-        record = await _build_user_record(user)
+        record = await _build_user_record(user, self.sitename)
         outcome = await self._upsert_user(record)
         await self._reconcile_memberships(target_groups)
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from beanie.operators import In
@@ -397,33 +396,6 @@ class SetSiteStorageDefaults(Operation):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class RootKeyBlock:
-    """One admin's root-key block at a site: their identity plus the
-    `environment="REMOTE_SSH_USER=<name>" <key>` authorized_keys entries (one
-    per SSH key)."""
-    name: str
-    email: str
-    entries: list[str]
-
-
-def root_ssh_keys(blocks: list[RootKeyBlock]) -> list[str]:
-    """Flat list of authorized_keys entries across all admins (the array the
-    daemon API serves as `root-ssh-public-keys`)."""
-    return [entry for block in blocks for entry in block.entries]
-
-
-def root_authorized_keys_text(blocks: list[RootKeyBlock]) -> str:
-    """Render `blocks` as authorized_keys file content: a `# name <email>`
-    comment per admin followed by their entries (the CLI/file shape, matching
-    v1's `db site root-key`)."""
-    lines: list[str] = []
-    for block in blocks:
-        lines.append(f'# {block.name} <{block.email}>')
-        lines.extend(block.entries)
-    return '\n'.join(lines) + '\n' if lines else ''
-
-
 class ExportRootSSHKeys(Operation):
     """Collect the root authorized_keys blocks for a site: the SSH keys of
     every `admin` user at the site whose effective access includes
@@ -436,10 +408,10 @@ class ExportRootSSHKeys(Operation):
     with global `root-ssh` access is included (the global key set). When a
     `sitename` is given it must exist.
 
-    Returns a list of `RootKeyBlock`; callers render it with
-    `root_authorized_keys_text` (the authorized_keys file) or `root_ssh_keys`
-    (the flat JSON array). Read-only; recorded in History as an audit trail of
-    root-key exports.
+    A thin, History-logging wrapper over `queries.user.root_key_blocks`;
+    callers render the returned `RootKeyBlock`s with `root_authorized_keys_text`
+    (the authorized_keys file) or `root_ssh_keys` (the flat JSON array).
+    Read-only; recorded in History as an audit trail of root-key exports.
     """
 
     op_name = 'export_root_ssh_keys'
@@ -457,38 +429,17 @@ class ExportRootSSHKeys(Operation):
         self._user_count = 0
         self._key_count = 0
 
-    async def execute(self, session: AsyncClientSession) -> list[RootKeyBlock]:
-        # Imported here to avoid any import-time coupling to the queries layer.
-        from ..queries.user import find_users, list_user_ssh_keys
+    async def execute(self, session: AsyncClientSession) -> list['RootKeyBlock']:
+        from ..queries.user import root_key_blocks
 
         if self.sitename is not None:
             site = await Site.find_one(Site.name == self.sitename)
             if site is None:
                 raise ValueError(f'Site {self.sitename!r} does not exist')
 
-        # Admins whose effective (override-aware) access includes root-ssh,
-        # sorted by name. With no sitename the filter is global (no site
-        # narrowing); with one it's the admins present at that site.
-        users = await find_users(
-            type='admin', access='root-ssh', site=self.sitename,
-        )
-
-        blocks: list[RootKeyBlock] = []
-        for user in users:
-            keys = await list_user_ssh_keys(user)
-            if not keys:
-                continue
-            self._user_count += 1
-            entries = []
-            for k in keys:
-                entries.append(
-                    f'environment="REMOTE_SSH_USER={user.name}" {k.key}'
-                )
-                self._key_count += 1
-            blocks.append(
-                RootKeyBlock(name=user.name, email=user.email, entries=entries)
-            )
-
+        blocks = await root_key_blocks(self.sitename)
+        self._user_count = len(blocks)
+        self._key_count = sum(len(b.entries) for b in blocks)
         return blocks
 
     def describe(self) -> dict[str, Any]:
