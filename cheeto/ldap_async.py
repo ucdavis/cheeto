@@ -278,8 +278,8 @@ def group_to_entry_attrs(record: LDAPGroupRecord) -> dict[str, list[Any]]:
 
 def _automount_info(record: LDAPAutomountRecord) -> str:
     if record.options:
-        return f'{record.options} {record.host}:{record.path}'.strip()
-    return f'{record.host}:{record.path}'
+        return f'{record.options} {record.host}${{HOST_SUFFIX}}:{record.path}'.strip()
+    return f'{record.host}${{HOST_SUFFIX}}:{record.path}'
 
 
 def automount_to_entry_attrs(record: LDAPAutomountRecord) -> dict[str, list[Any]]:
