@@ -61,6 +61,7 @@ from ..operations import (
     EditSlurmAllocation,
     AddUserAccess,
     AddUserComment,
+    CreateAutomountMap,
     CreateGroup,
     CreateGroupFromSponsor,
     CreateHomeStorage,
@@ -78,6 +79,8 @@ from ..operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    SetStorageMount,
+    SetVolumeStorageMounts,
     SetSiteDefaultSlurmAccount,
     ClearSiteDefaultSlurmAccount,
     ExportPuppetStorage,
@@ -6040,3 +6043,229 @@ class TestHippoEventProcessor:
         await processor._process_events([self._upstream()], object(), False)
         assert len(handler.calls) == 2
         assert (await self._record()).status == 'Complete'
+
+
+class TestStorageMountManagement:
+    """Create automount tables and change/clear a Storage's mount mechanism
+    (single record + volume-subtree bulk) after migration/creation."""
+
+    async def test_create_automount_map_and_dup(self, beanie_client):
+        _, _, site = await _seed_storage_actors('mm0', 60000)
+        amap = await CreateAutomountMap.run(
+            beanie_client, None, site_name=site.name,
+            name='home', prefix='/home', options=['vers=4.2'],
+        )
+        assert amap.name == 'home'
+        fetched = await AutomountMap.find_one(
+            AutomountMap.name == 'home', AutomountMap.site.id == site.id,
+        )
+        assert fetched is not None
+        assert fetched.prefix == '/home'
+        assert fetched.options == ['vers=4.2']
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateAutomountMap.run(
+                beanie_client, None, site_name=site.name,
+                name='home', prefix='/home',
+            )
+
+    async def test_set_storage_mount_transitions(self, beanie_client):
+        user, group, site = await _seed_storage_actors('mm1', 60001)
+        volume = await _seed_volume(site, name='homevol', host='nas0',
+                                    host_path='/nas0/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        smount = StaticMount(name='homestatic', site=site, fstype='nfs4',
+                             volume=volume, mount_path='/home')
+        await smount.insert()
+        storage = Storage(name='mm1', site=site, category='home',
+                          owner=user, group=group, volume=volume,
+                          automount_map=amap, mount_name='mm1')
+        await storage.insert()
+
+        # automount -> static
+        await SetStorageMount.run(
+            beanie_client, None, site_name=site.name, name='mm1',
+            static_mount='homestatic',
+        )
+        fetched = await Storage.find_one(
+            Storage.name == 'mm1', fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.automount_map is None
+        assert fetched.mount_name == ''
+        assert fetched.static_mount is not None
+        assert fetched.static_mount.name == 'homestatic'
+        assert fetched.mount_path == '/home'
+
+        # static -> none
+        await SetStorageMount.run(
+            beanie_client, None, site_name=site.name, name='mm1', no_mount=True,
+        )
+        fetched = await Storage.find_one(
+            Storage.name == 'mm1', fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.automount_map is None
+        assert fetched.static_mount is None
+        assert fetched.mount_path == ''
+
+        # none -> automount
+        await SetStorageMount.run(
+            beanie_client, None, site_name=site.name, name='mm1',
+            automount_map='home',
+        )
+        fetched = await Storage.find_one(
+            Storage.name == 'mm1', fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.static_mount is None
+        assert fetched.automount_map is not None
+        assert fetched.mount_path == '/home/mm1'
+
+    def test_set_storage_mount_requires_exactly_one(self, beanie_client):
+        with pytest.raises(ValueError, match='exactly one'):
+            SetStorageMount(beanie_client, None, site_name='x', name='mm1')
+
+    async def test_set_volume_storage_mounts_subtree(self, beanie_client):
+        user, group, site = await _seed_storage_actors('mm2', 60002)
+        parent = await _seed_volume(site, name='home', host='nas0',
+                                    host_path='/nas0/home')
+        child_a = await _seed_volume(site, name='home/a', host='nas0',
+                                     host_path='/nas0/home/a', parent=parent)
+        # grandchild — exercises full-depth descent
+        child_b = await _seed_volume(site, name='home/a/b', host='nas0',
+                                     host_path='/nas0/home/a/b', parent=child_a)
+        other = await _seed_volume(site, name='scratch', host='nas0',
+                                   host_path='/nas0/scratch')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+
+        async def _mk(name, vol, cat='home'):
+            await Storage(name=name, site=site, category=cat, owner=user,
+                          group=group, volume=vol).insert()
+
+        await _mk('sa', child_a)
+        await _mk('sb', child_b)
+        await _mk('sother', other, cat='group')
+
+        result = await SetVolumeStorageMounts.run(
+            beanie_client, None, site_name=site.name, volume_name='home',
+            automount_map='home',
+        )
+        assert result['updated'] == 2          # sa + sb; sother excluded
+        assert result['mechanism'] == 'automount:home'
+
+        sa = await Storage.find_one(Storage.name == 'sa', fetch_links=True,
+                                    nesting_depth=2)
+        sb = await Storage.find_one(Storage.name == 'sb', fetch_links=True,
+                                    nesting_depth=2)
+        sother = await Storage.find_one(Storage.name == 'sother',
+                                        fetch_links=True, nesting_depth=2)
+        assert sa.automount_map is not None and sa.mount_path == '/home/sa'
+        assert sb.automount_map is not None and sb.mount_path == '/home/sb'
+        assert sother.automount_map is None    # outside the subtree, untouched
+
+    async def test_storage_show_renders_full_detail(self, beanie_client):
+        import io
+        from rich.console import Console as RichConsole
+        from ..cmds.ng.storage import _render_storage_panel
+        from ..queries.storage import get_storage
+
+        user, group, site = await _seed_storage_actors('mm3', 60003)
+        parent = await _seed_volume(site, name='home', host='nas0',
+                                    host_path='/nas0/home')
+        child = await _seed_volume(
+            site, name='home/mm3', host='nas0',
+            host_path='/nas0/home/mm3', parent=parent,
+            allocations=[StorageAllocation(quota='20G', comment='init')],
+        )
+        amap = AutomountMap(name='home', site=site, prefix='/home',
+                            options=['vers=4.2'])
+        await amap.insert()
+        await Storage(name='mm3', site=site, category='home', owner=user,
+                      group=group, volume=child, automount_map=amap,
+                      mount_name='mm3').insert()
+
+        storage = await get_storage(site, 'mm3')
+        panel = _render_storage_panel(storage)   # exercises every property
+        buf = io.StringIO()
+        RichConsole(file=buf, width=120).print(panel)
+        out = buf.getvalue()
+        # storage + backing-volume + mount-mechanism detail all present
+        assert 'mm3' in out
+        assert 'home/mm3' in out          # backing volume name
+        assert '/nas0/home/mm3' in out    # volume host_path
+        assert 'automount:home' in out    # mount type label
+        assert '/home/mm3' in out         # derived mount path
+        assert '20G' in out               # volume quota
+
+
+class TestCreateAccountHomeStorage:
+    """The HiPPO CreateAccount handler provisions the new user's home storage
+    from the site's storage defaults (previously a no-op stub)."""
+
+    _EVENT = {
+        'groups': [],
+        'accounts': [{'kerberos': 'hippouser', 'name': 'Hippo User',
+                      'email': 'hippo@x.test', 'iam': '1000000001',
+                      'mothra': '09990001', 'key': '',
+                      'accessTypes': ['SshKey']}],
+        'cluster': 'hipposite',
+        'metadata': {},
+    }
+
+    async def _seed_site(self, beanie_client, *, defaults=True):
+        site = Site(name='hipposite', fqdn='hippo.test')
+        await site.insert()
+        if defaults:
+            await _seed_volume(site, name='home', host='nas0',
+                               host_path='/nas0/home')
+            await AutomountMap(name='home', site=site, prefix='/home').insert()
+            from cheeto.operations import SetSiteStorageDefaults
+            await SetSiteStorageDefaults.run(
+                beanie_client, None, sitename='hipposite',
+                home_volume='home', home_quota='20G', home_automount_map='home',
+            )
+
+    async def _run_handler(self, beanie_client):
+        from ..config import HippoConfig
+        from ..hippoapi.models.queued_event_model import QueuedEventModel
+        from ..operations.hippo import CreateAccountHandler, HippoContext
+        upstream = QueuedEventModel.from_dict({
+            'id': 1, 'action': 'CreateAccount', 'status': 'Pending',
+            'data': dict(self._EVENT),
+        })
+        # In-memory record (not inserted) — the handler only stashes attrs on
+        # it; the processor owns persistence.
+        record = HippoEvent(hippo_id=1, hippo_endpoint='http://hippo.test',
+                            action='CreateAccount', status='Pending',
+                            cluster='hipposite')
+        config = HippoConfig(api_key='x', base_url='http://hippo.test',
+                             site_aliases={}, max_tries=3)
+        context = HippoContext(client=beanie_client, hippo_client=None,
+                               config=config, event_record=record, author=None)
+        await CreateAccountHandler().handle(upstream.data, context, notify=False)
+
+    async def test_provisions_home_from_defaults(self, beanie_client):
+        await self._seed_site(beanie_client)
+        await self._run_handler(beanie_client)
+        storage = await Storage.find_one(
+            Storage.name == 'hippouser', Storage.category == 'home',
+            fetch_links=True, nesting_depth=2,
+        )
+        assert storage is not None
+        assert storage.mount_path == '/home/hippouser'
+
+    async def test_idempotent_on_reprocess(self, beanie_client):
+        await self._seed_site(beanie_client)
+        await self._run_handler(beanie_client)
+        await self._run_handler(beanie_client)   # must not raise
+        homes = await Storage.find(
+            Storage.name == 'hippouser', Storage.category == 'home',
+        ).to_list()
+        assert len(homes) == 1
+
+    async def test_no_defaults_skips_without_failing(self, beanie_client):
+        await self._seed_site(beanie_client, defaults=False)
+        await self._run_handler(beanie_client)   # must not raise
+        assert await User.find_one(User.name == 'hippouser') is not None
+        assert await Storage.find_one(
+            Storage.name == 'hippouser', Storage.category == 'home',
+        ) is None

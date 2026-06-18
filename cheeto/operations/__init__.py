@@ -78,10 +78,13 @@ from .ldap import (
 )
 from .puppet import SyncOldPuppet
 from .storage import (
+    CreateAutomountMap,
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
     ExportPuppetStorage,
+    SetStorageMount,
+    SetVolumeStorageMounts,
 )
 from .migrate import (
     MigrateAccessStatusGroups,

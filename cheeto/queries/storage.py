@@ -66,6 +66,42 @@ async def list_site_static_mounts(site: Site) -> list[StaticMount]:
     ).sort('+mount_path').to_list()
 
 
+async def find_automount_map(site: Site, name: str) -> AutomountMap | None:
+    return await AutomountMap.find_one(
+        AutomountMap.name == name,
+        AutomountMap.site.id == site.id,
+    )
+
+
+async def list_site_automount_maps(site: Site) -> list[AutomountMap]:
+    return await AutomountMap.find(
+        AutomountMap.site.id == site.id,
+    ).sort('+name').to_list()
+
+
+async def list_map_storages(amap: AutomountMap) -> list[Storage]:
+    """Storages (automount entries) attached to `amap`. Depth 2 resolves
+    `volume` so each entry's host/host_path derive."""
+    return await Storage.find(
+        Storage.automount_map.id == amap.id,
+        fetch_links=True,
+        nesting_depth=2,
+    ).sort('+name').to_list()
+
+
+def mount_mechanism_label(storage: Storage) -> str:
+    """Short label of a Storage's mount mechanism for display:
+    `automount:<map>` / `static:<mount>` / `—`. Tolerates unfetched links
+    (falls back to the bare mechanism word)."""
+    if storage.automount_map is not None:
+        name = getattr(storage.automount_map, 'name', None)
+        return f'automount:{name}' if name else 'automount'
+    if storage.static_mount is not None:
+        name = getattr(storage.static_mount, 'name', None)
+        return f'static:{name}' if name else 'static'
+    return '—'
+
+
 async def _resolve_storage_name(ref, model) -> str | None:
     """Resolve a SiteStorageSettings DocRef (bare ObjectId or None) to the
     referenced document's `name`, or None if unset/missing."""

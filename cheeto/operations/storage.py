@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from beanie.operators import In
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
@@ -10,6 +11,7 @@ from ..models.group import Group
 from ..models.site import Site
 from ..models.storage import (
     AutomountMap,
+    MountOverrides,
     NFSExportConfig,
     QuobyteConfig,
     StaticMount,
@@ -20,6 +22,7 @@ from ..models.storage import (
     _join_host_path,
 )
 from ..models.user import User
+from ..queries.storage import get_storage, list_site_volumes
 from .base import Operation
 
 
@@ -418,6 +421,306 @@ class CreateHomeStorage(Operation):
             'parent_volume': self.parent_volume,
             'host': self.host,
             'mechanism': self._mechanism,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Automount maps + mount-mechanism management
+# ---------------------------------------------------------------------------
+
+
+class CreateAutomountMap(Operation):
+    """Create an AutomountMap — an autofs table (e.g. 'home', 'group') that
+    Storages attach to as their automount mechanism. Mirrors the record
+    MigrateAutomountMaps builds from v1."""
+
+    op_name = 'create_automount_map'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        name: str,
+        prefix: str,
+        options: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.site_name = site_name
+        self.name = name
+        self.prefix = prefix
+        self.options = list(options or [])
+
+    async def execute(self, session: AsyncClientSession) -> AutomountMap:
+        site = await _find_site(self.site_name)
+        existing = await AutomountMap.find_one(
+            AutomountMap.name == self.name,
+            AutomountMap.site.id == site.id,
+        )
+        if existing is not None:
+            raise ValueError(
+                f'AutomountMap {self.name} already exists on {self.site_name}'
+            )
+        amap = AutomountMap(
+            name=self.name, site=site, prefix=self.prefix,
+            options=self.options,
+        )
+        await amap.insert(session=session)
+        self._map = amap
+        return amap
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.site_name,
+            'name': self.name,
+            'prefix': self.prefix,
+            'options': self.options,
+        }
+
+
+def _validate_mount_target(
+    automount_map: str | None, static_mount: str | None, no_mount: bool,
+) -> None:
+    if sum((automount_map is not None, static_mount is not None, no_mount)) != 1:
+        raise ValueError(
+            'specify exactly one of automount_map, static_mount, or no_mount'
+        )
+
+
+async def _resolve_mount_target(
+    site: Site, automount_map: str | None, static_mount: str | None,
+) -> tuple[AutomountMap | None, StaticMount | None]:
+    """Resolve a named automount map or static mount. The static mount is
+    fetched with its volume (nesting_depth=1) so mount_path coverage checks
+    work."""
+    if automount_map is not None:
+        amap = await AutomountMap.find_one(
+            AutomountMap.name == automount_map,
+            AutomountMap.site.id == site.id,
+        )
+        if amap is None:
+            raise ValueError(
+                f'AutomountMap {automount_map} does not exist on {site.name}'
+            )
+        return amap, None
+    if static_mount is not None:
+        smount = await StaticMount.find_one(
+            StaticMount.name == static_mount,
+            StaticMount.site.id == site.id,
+            fetch_links=True, nesting_depth=1,
+        )
+        if smount is None:
+            raise ValueError(
+                f'StaticMount {static_mount} does not exist on {site.name}'
+            )
+        return None, smount
+    return None, None
+
+
+def _mount_label(
+    amap: AutomountMap | None, smount: StaticMount | None, no_mount: bool,
+) -> str:
+    if amap is not None:
+        return f'automount:{amap.name}'
+    if smount is not None:
+        return f'static:{smount.name}'
+    return 'none'
+
+
+def _apply_storage_mount(
+    storage: Storage,
+    *,
+    amap: AutomountMap | None,
+    smount: StaticMount | None,
+    mount_name: str,
+    no_mount: bool,
+) -> None:
+    """Set exactly one mount mechanism on `storage` in place, clearing the
+    other so the at-most-one validator stays satisfied. `no_mount` (or neither
+    target) clears both. Automount preserves any existing mount_overrides;
+    switching to static/none clears them (they're automount-only)."""
+    if no_mount or (amap is None and smount is None):
+        storage.automount_map = None
+        storage.mount_name = ''
+        storage.mount_overrides = MountOverrides()
+        storage.static_mount = None
+        return
+    if amap is not None:
+        storage.static_mount = None
+        storage.automount_map = amap
+        storage.mount_name = mount_name or ''
+        return
+    storage.automount_map = None
+    storage.mount_name = ''
+    storage.mount_overrides = MountOverrides()
+    storage.static_mount = smount
+
+
+class SetStorageMount(Operation):
+    """Set, change, or clear the mount mechanism on a single existing
+    Storage — so mounting can be adjusted after migration/creation."""
+
+    op_name = 'set_storage_mount'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        name: str,
+        category: str | None = None,
+        automount_map: str | None = None,
+        mount_name: str = '',
+        static_mount: str | None = None,
+        no_mount: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        _validate_mount_target(automount_map, static_mount, no_mount)
+        self.site_name = site_name
+        self.name = name
+        self.category = category
+        self.automount_map = automount_map
+        self.mount_name = mount_name
+        self.static_mount = static_mount
+        self.no_mount = no_mount
+        self._mechanism = 'none'
+
+    async def execute(self, session: AsyncClientSession) -> Storage:
+        site = await _find_site(self.site_name)
+        storage = await get_storage(site, self.name, self.category)
+        if storage is None:
+            suffix = f' (category={self.category})' if self.category else ''
+            raise ValueError(
+                f'Storage {self.name} does not exist on {self.site_name}{suffix}'
+            )
+        amap, smount = await _resolve_mount_target(
+            site, self.automount_map, self.static_mount,
+        )
+        _apply_storage_mount(
+            storage, amap=amap, smount=smount,
+            mount_name=self.mount_name, no_mount=self.no_mount,
+        )
+        self._mechanism = _mount_label(amap, smount, self.no_mount)
+        await storage.save(session=session)
+        self._storage = storage
+        return storage
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.site_name,
+            'name': self.name,
+            'category': self.category,
+            'mechanism': self._mechanism,
+        }
+
+
+class SetVolumeStorageMounts(Operation):
+    """Apply a mount-mechanism change to every Storage backed by a volume's
+    full descendant subtree (the named volume plus all volumes nested under
+    it). Switches a whole tree — e.g. all per-user homes under a `home`
+    parent volume — between automount / static / no mount."""
+
+    op_name = 'set_volume_storage_mounts'
+
+    # Bulk: a home subtree can be thousands of storages, which would exceed the
+    # server's transactionLifetimeLimitSeconds in one transaction. Run in a
+    # bare session (per-storage saves commit individually); the op is
+    # idempotent. Same rationale as _BulkMigrateOperation.
+    transactional = False
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        volume_name: str,
+        automount_map: str | None = None,
+        static_mount: str | None = None,
+        no_mount: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        _validate_mount_target(automount_map, static_mount, no_mount)
+        self.site_name = site_name
+        self.volume_name = volume_name
+        self.automount_map = automount_map
+        self.static_mount = static_mount
+        self.no_mount = no_mount
+        self._mechanism = 'none'
+        self._updated = 0
+        self._warnings: list[str] = []
+
+    async def _descendant_volume_ids(self, site: Site, root: StorageVolume):
+        """BFS the site's volume tree (one query, parent resolved) collecting
+        the root volume id + all descendant volume ids."""
+        volumes = await list_site_volumes(site)
+        children: dict[Any, list[StorageVolume]] = {}
+        for v in volumes:
+            parent_id = link_target_id(v.parent)
+            if parent_id is not None:
+                children.setdefault(parent_id, []).append(v)
+        ids = {root.id}
+        frontier = [root]
+        while frontier:
+            nxt: list[StorageVolume] = []
+            for v in frontier:
+                for child in children.get(v.id, []):
+                    if child.id not in ids:
+                        ids.add(child.id)
+                        nxt.append(child)
+            frontier = nxt
+        return ids
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, Any]:
+        site = await _find_site(self.site_name)
+        root = await _find_volume(site, self.volume_name)
+        if root is None:
+            raise ValueError(
+                f'Volume {self.volume_name} does not exist on {self.site_name}'
+            )
+        amap, smount = await _resolve_mount_target(
+            site, self.automount_map, self.static_mount,
+        )
+        self._mechanism = _mount_label(amap, smount, self.no_mount)
+
+        subtree_ids = await self._descendant_volume_ids(site, root)
+        storages = await Storage.find(
+            In(Storage.volume.id, list(subtree_ids)),
+            Storage.site.id == site.id,
+            fetch_links=True,
+            nesting_depth=2,
+        ).to_list()
+
+        for storage in storages:
+            _apply_storage_mount(
+                storage, amap=amap, smount=smount,
+                mount_name='', no_mount=self.no_mount,
+            )
+            if smount is not None:
+                # Surface storages the static mount can't cover (mount_path
+                # would raise) without aborting the batch.
+                try:
+                    _ = storage.mount_path
+                except ValueError as e:
+                    self._warnings.append(f'{storage.name}: {e}')
+            await storage.save(session=session)
+            self._updated += 1
+
+        return {
+            'mechanism': self._mechanism if storages else None,
+            'updated': self._updated,
+            'warnings': list(self._warnings),
+        }
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.site_name,
+            'volume': self.volume_name,
+            'mechanism': self._mechanism,
+            'storages_updated': self._updated,
+            'warnings': list(self._warnings),
         }
 
 

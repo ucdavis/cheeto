@@ -268,11 +268,23 @@ class CreateAccountHandler(BaseHippoHandler):
         return found is not None
 
     async def _ensure_home_storage(self, parsed, user, site, context):
-        # home storage creation requires host info that doesn't come from the
-        # event payload; the old implementation derived it from site defaults.
-        # For now, skip automatic creation — operators can run
-        # `ng storage new home` or we add site-default host later.
-        return None
+        # Provision the user's home from the site's storage defaults — parent
+        # volume, quota, and mount mechanism all come from `site.storage`
+        # (CreateHomeStorage resolves them), so no host info from the event
+        # payload is needed.
+        try:
+            await CreateHomeStorage.run(
+                context.client, context.author,
+                user_name=parsed.username, site_name=parsed.sitename,
+            )
+        except ValueError as e:
+            # No site storage defaults configured yet, or the home already
+            # exists (re-processed event). Either way, don't fail account
+            # creation over storage — log and move on.
+            logger.warning(
+                'home storage not created for %s on %s: %s',
+                parsed.username, parsed.sitename, e,
+            )
 
     async def _add_to_group(self, username: str, groupname: str,
                             sitename: str,
