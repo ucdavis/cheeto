@@ -33,6 +33,7 @@ from pymongo.asynchronous.client_session import AsyncClientSession
 from ..ldap_async import (
     AUTO_GROUP,
     AUTO_HOME,
+    AUTO_SHARE,
     AsyncLDAPManager,
     LDAPAlreadyExists,
     LDAPGroupRecord,
@@ -536,7 +537,7 @@ class SyncSiteAutomounts(Operation):
         self.force = force
         self.full = full
         self._counts: dict[str, int] = {
-            'home_automounts': 0, 'group_automounts': 0,
+            'home_automounts': 0, 'group_automounts': 0, 'share_automounts': 0,
             'skipped_clean': 0, 'skipped_ignored': 0,
         }
 
@@ -550,6 +551,7 @@ class SyncSiteAutomounts(Operation):
         for category, mapname, tally_key in (
             ('home', AUTO_HOME, 'home_automounts'),
             ('group', AUTO_GROUP, 'group_automounts'),
+            ('share', AUTO_SHARE, 'share_automounts'),
         ):
             for storage in await list_automap_storages(site, category):
                 if storage.ldap.ignore:

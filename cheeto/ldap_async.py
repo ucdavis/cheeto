@@ -37,6 +37,7 @@ T = TypeVar('T')
 AUTO_MASTER = 'auto.master'
 AUTO_HOME = 'auto.home'
 AUTO_GROUP = 'auto.group'
+AUTO_SHARE = 'auto.share'
 
 
 # Object-class sets cheeto writes for new entries. shadowAccount lets
@@ -818,16 +819,18 @@ class AsyncLDAPManager:
             (self.automount_ou_dn(),
              {'objectClass': ['organizationalUnit', 'top'], 'ou': ['automount']}),
         ]
-        for mapname in (AUTO_MASTER, AUTO_HOME, AUTO_GROUP):
+        for mapname in (AUTO_MASTER, AUTO_HOME, AUTO_GROUP, AUTO_SHARE):
             plan.append((self.automount_map_dn(mapname), {
                 'objectClass': ['automountMap', 'top'],
                 'automountMapName': [mapname],
             }))
         home_map_dn = self.automount_map_dn(AUTO_HOME)
         group_map_dn = self.automount_map_dn(AUTO_GROUP)
+        share_map_dn = self.automount_map_dn(AUTO_SHARE)
         for key, info in (
             ('/home', home_map_dn),
             ('/group', f'{group_map_dn} --ghost'),
+            ('/share', share_map_dn),
         ):
             plan.append((self.dn.automount_dn(key, AUTO_MASTER), {
                 'objectClass': ['automount', 'top'],
