@@ -35,6 +35,23 @@ async def list_automap_storages(site: Site, category: str) -> list[Storage]:
     ).to_list()
 
 
+async def list_automap_storages_grouped(site: Site) -> dict[str, list[Storage]]:
+    """All automount-backed Storage at `site`, bucketed by category, in one
+    query (vs. one `list_automap_storages` call per category). Depth 1
+    resolves volume/automount_map/owner/group — everything the LDAP/puppet
+    projections read."""
+    out: dict[str, list[Storage]] = {}
+    storages = await Storage.find(
+        Storage.site.id == site.id,
+        Storage.automount_map != None,  # noqa: E711 — beanie operator quirk
+        fetch_links=True,
+        nesting_depth=1,
+    ).to_list()
+    for s in storages:
+        out.setdefault(s.category, []).append(s)
+    return out
+
+
 async def find_volume(site: Site, name: str) -> StorageVolume | None:
     return await StorageVolume.find_one(
         StorageVolume.name == name,

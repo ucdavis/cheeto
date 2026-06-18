@@ -40,9 +40,7 @@ from ..puppet import (
     PuppetUserRecord,
 )
 from ..utils import removed_nones
-from .access_status import resolve_access_names
-from .slurm import user_slurm_at_site
-from .storage import list_automap_storages
+from .storage import list_automap_storages_grouped
 from .user import effective_access_links
 
 logger = logging.getLogger(__name__)
@@ -86,6 +84,21 @@ def _autofs_options(storage: Storage) -> str:
     )
 
 
+def _access_names(links, name_by_id: dict) -> list[str]:
+    """Resolve access-group shorthands from a prebuilt id->access_name map
+    (batched equivalent of `resolve_access_names`, no per-link query). Links
+    already fetched as AccessGroups are read directly; misses are skipped."""
+    names: list[str] = []
+    for link in links:
+        if isinstance(link, AccessGroup):
+            names.append(link.access_name)
+            continue
+        name = name_by_id.get(link_target_id(link))
+        if name is not None:
+            names.append(name)
+    return names
+
+
 async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     """Build a v1-compatible PuppetAccountMap from v2 data at `site`."""
     usis = await UserSiteInfo.find(UserSiteInfo.site.id == site.id).to_list()
@@ -127,14 +140,17 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     group_by_id = {g.id: g for g in candidate_groups}
 
     # Automount-table storage projections (v1 user_to_puppet /
-    # group_to_puppet / share_to_puppet). Depth-1 link fetch resolves
+    # group_to_puppet / share_to_puppet). One query for every category at the
+    # site, bucketed below. Depth-1 link fetch resolves
     # volume/automount_map/owner/group, which is all the blocks need.
+    automap_storages = await list_automap_storages_grouped(site)
+
     home_by_owner: dict = {}
-    for s in await list_automap_storages(site, 'home'):
+    for s in automap_storages.get('home', []):
         home_by_owner.setdefault(link_target_id(s.owner), s)
 
     storages_by_group_id: dict = {}
-    for s in await list_automap_storages(site, 'group'):
+    for s in automap_storages.get('group', []):
         gid = link_target_id(s.group)
         storages_by_group_id.setdefault(gid, []).append(s)
         # v1 exported every SiteGroup; a group whose only site presence is
@@ -146,7 +162,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             candidate_groups.append(s.group)
 
     share_storages = sorted(
-        await list_automap_storages(site, 'share'), key=lambda s: s.name,
+        automap_storages.get('share', []), key=lambda s: s.name,
     )
 
     # Groups with a slurm account at this site are site-present even with
@@ -165,8 +181,30 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             group_by_id[g.id] = g
             candidate_groups.append(g)
 
+    # Batched slurm-account-name resolution. v1's user_to_puppet emitted
+    # `slurmerships` (the user's `_slurmers` groups, now `slurmer`-role edges),
+    # and v1 implemented sticky/global groups via a trigger that added every
+    # site user to those groups as both member AND slurmer — so a sticky group
+    # grants its SlurmAccount too. A user's account list is therefore: the
+    # slurmer-role groups UNION the sticky groups that own a SlurmAccount, PLUS
+    # the site's sticky accounts (`site.slurm.sticky`, migrated from v1
+    # Site.global_slurmers). Plain `member` edges do NOT contribute accounts.
+    account_name_by_group_id = {
+        account.group.id: account.group.name for account in slurm_accounts
+    }
+    sticky_account_ids = {
+        link_target_id(link) for link in site.slurm.sticky
+    }
+    sticky_account_ids.discard(None)
+    sticky_account_names = {
+        account.group.name
+        for account in slurm_accounts
+        if account.id in sticky_account_ids
+    }
+
     member_groups_by_user: dict = {uid: set() for uid in user_ids}
     sudoer_groups_by_user: dict = {uid: set() for uid in user_ids}
+    slurm_groups_by_user: dict = {uid: set() for uid in user_ids}
     sponsor_ids_by_group: dict = {}
     for e in edges:
         gid = link_target_id(e.group)
@@ -179,13 +217,17 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             continue  # member/sudoer rows only matter for at-site users
         if 'member' in e.roles:
             member_groups_by_user[uid].add(gid)
+        if 'slurmer' in e.roles:
+            slurm_groups_by_user[uid].add(gid)
         if 'sudoer' in e.roles:
             sudoer_groups_by_user[uid].add(gid)
-    # Sticky groups: every at-site user is implicitly a member.
+    # Sticky groups: every at-site user is implicitly both a member (posix
+    # groups) and a slurmer (their SlurmAccount), matching v1's sticky trigger.
     for gid in sticky_group_ids:
         if gid in group_by_id:
             for uid in user_ids:
                 member_groups_by_user[uid].add(gid)
+                slurm_groups_by_user[uid].add(gid)
 
     # Identify primary groups for at-site users — excluded from both
     # the user record's `groups` and the top-level `group:` map (matches
@@ -211,12 +253,21 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         ).to_list()
         sponsor_name_by_id.update({u.id: u.name for u in extras})
 
+    # Fetch the special access/status groups once, up front: their shorthands
+    # resolve every user's access tags below (an id->name map replaces a
+    # per-user `resolve_access_names`), and the records themselves are folded
+    # into the group map after the edge-attribution maps (so they never count
+    # toward posix memberships).
+    access_groups = await AccessGroup.find_all().to_list()
+    status_groups = await StatusGroup.find_all().to_list()
+    access_name_by_id = {ag.id: ag.access_name for ag in access_groups}
+
     user_records: dict[str, PuppetUserRecord] = {}
     for u in users:
         usi = usi_by_user_id[u.id]
 
         eff_access_links = effective_access_links(u, usi)
-        access_names = await resolve_access_names(eff_access_links)
+        access_names = _access_names(eff_access_links, access_name_by_id)
 
         member_names = sorted({
             group_by_id[gid].name
@@ -228,8 +279,14 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             for gid in sudoer_groups_by_user[u.id]
         })
 
-        slurm_rows = await user_slurm_at_site(u, site)
-        account_names = sorted({row.group.name for row in slurm_rows})
+        account_names = sorted(
+            {
+                account_name_by_group_id[gid]
+                for gid in slurm_groups_by_user[u.id]
+                if gid in account_name_by_group_id
+            }
+            | sticky_account_names
+        )
 
         home = home_by_owner.get(u.id)
         if home is not None:
@@ -265,12 +322,10 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
 
     # v1 exported the special access/status groups (every site carried
     # their SiteGroups); v2 keeps them as global AccessGroup/StatusGroup
-    # records. Added after the edge-attribution maps so they never count
-    # toward user posix memberships — they render as plain gid records.
-    for g in (
-        await AccessGroup.find_all().to_list()
-        + await StatusGroup.find_all().to_list()
-    ):
+    # records. Folded in here (after the edge-attribution maps) so they never
+    # count toward user posix memberships — they render as plain gid records.
+    # Reuses the lists fetched above for access-tag resolution.
+    for g in access_groups + status_groups:
         if g.id not in group_by_id:
             group_by_id[g.id] = g
             candidate_groups.append(g)

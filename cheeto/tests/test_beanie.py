@@ -2759,6 +2759,62 @@ class TestSiteToPuppetLegacy:
         assert result.user['pl_carol'].slurm is not None
         assert result.user['pl_carol'].slurm.account == ['pl_slurm_grp']
 
+    async def test_user_slurm_accounts_from_slurmer_and_sticky_sources(
+        self, beanie_client,
+    ):
+        """A user's slurm.account list = slurmer-role group accounts UNION
+        sticky-group accounts (v1's sticky trigger adds every site user to
+        global groups as member+slurmer) UNION the site's sticky accounts
+        (site.slurm.sticky). A plain `member` and a `sponsor`-only edge do NOT
+        contribute a slurm account."""
+        from cheeto.queries import site_to_puppet_legacy
+
+        site = Site(name='puppet_slurmedge', fqdn='slurmedge.test')
+        await site.insert()
+
+        user = User(
+            name='pl_eve', email='e@x.test',
+            uid=60007, gid=60007, fullname='Eve',
+            home_directory='/home/e',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'slurm']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+
+        groups = {}
+        for name, gid, roles in (
+            ('pl_acct_member', 61010, ['member']),    # plain member -> excluded
+            ('pl_acct_slurmer', 61011, ['slurmer']),  # slurmer -> included
+            ('pl_acct_sponsor', 61012, ['sponsor']),  # sponsor-only -> excluded
+            ('pl_acct_stickygrp', 61013, []),         # sticky group -> included
+            ('pl_acct_sticky', 61014, []),            # sticky account -> included
+        ):
+            g = Group(name=name, gid=gid)
+            await g.insert()
+            account = SlurmAccount(group=g, site=site)
+            await account.insert()
+            if roles:
+                await GroupMembership(
+                    user=user, group=g, site=site, roles=roles,
+                ).insert()
+            groups[name] = (g, account)
+
+        site.group.sticky = [groups['pl_acct_stickygrp'][0]]
+        site.slurm.sticky = [groups['pl_acct_sticky'][1]]
+        await site.save()
+        site = await Site.find_one(Site.name == 'puppet_slurmedge')
+
+        result = await site_to_puppet_legacy(site)
+        # slurmer + sticky-group + sticky-account surface; the plain-member and
+        # sponsor-only accounts do not.
+        assert result.user['pl_eve'].slurm is not None
+        assert result.user['pl_eve'].slurm.account == [
+            'pl_acct_slurmer', 'pl_acct_sticky', 'pl_acct_stickygrp',
+        ]
+
     async def test_inactive_user_keeps_raw_shell(self, beanie_client):
         """v1 has dead-code shell translation; we match v1 verbatim and
         emit the raw shell even for inactive users."""

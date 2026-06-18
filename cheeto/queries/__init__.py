@@ -30,6 +30,7 @@ from .slurm import (
 )
 from .storage import (
     find_automount_map,
+    list_automap_storages_grouped,
     list_map_storages,
     list_site_automount_maps,
     mount_mechanism_label,
