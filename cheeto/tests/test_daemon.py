@@ -582,6 +582,20 @@ class TestDaemonApi:
                                     headers={'X-API-Key': 'test-api-key'})
         assert resp.status_code == 404
 
+    async def test_endpoint_accepts_fqdn(self, beanie_client, config, rk_site):
+        """`{site}` may be the site name or its fqdn; both resolve to the same
+        canonical site."""
+        api = create_api(config, client=beanie_client)
+        async with _api_client(api) as client:
+            by_name = await client.get('/puppet/root-keys/api-site',
+                                       headers={'X-API-Key': 'test-api-key'})
+            by_fqdn = await client.get('/puppet/root-keys/api.test',
+                                       headers={'X-API-Key': 'test-api-key'})
+        assert by_name.status_code == 200
+        assert by_fqdn.status_code == 200
+        assert by_fqdn.text == by_name.text
+        assert 'REMOTE_SSH_USER=api_admin' in by_fqdn.text
+
     async def test_no_api_key_configured_is_open(
         self, beanie_client, config, rk_site,
     ):

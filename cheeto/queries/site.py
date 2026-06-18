@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from beanie import PydanticObjectId
+from beanie.operators import Or
 
 from ..models.base import link_target_id
 from ..models.site import Site
@@ -16,6 +17,12 @@ from ..models.slurm import (
 
 async def find_site_by_name(name: str) -> Site | None:
     return await Site.find_one(Site.name == name)
+
+
+async def find_site_by_name_or_fqdn(value: str) -> Site | None:
+    """Resolve a site by its canonical `name` or its `fqdn`. Used by the
+    daemon API, where the `{site}` path segment may be either."""
+    return await Site.find_one(Or(Site.name == value, Site.fqdn == value))
 
 
 def _build_site_linked_models() -> list[tuple[str, type]]:

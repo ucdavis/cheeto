@@ -18,6 +18,7 @@ from ..config import Config
 from ..database.base import connect_beanie
 from ..operations.site import ExportRootSSHKeys
 from ..operations.storage import ExportPuppetStorage
+from ..queries.site import find_site_by_name_or_fqdn
 
 _api_key_header = APIKeyHeader(name='X-API-Key', auto_error=False)
 
@@ -52,27 +53,30 @@ def create_api(config: Config, client=None) -> FastAPI:
             raise HTTPException(status_code=401,
                                 detail='invalid or missing API key')
 
+    async def resolved_sitename(site: str) -> str:
+        """Map the `{site}` path segment (a site name OR an fqdn) to the
+        canonical site name the export operations key on; 404 if unknown."""
+        resolved = await find_site_by_name_or_fqdn(site)
+        if resolved is None:
+            raise HTTPException(status_code=404,
+                                detail=f'unknown site {site!r}')
+        return resolved.name
+
     @api.get('/puppet/root-keys/{site}',
              response_class=PlainTextResponse,
              dependencies=[Depends(require_api_key)])
-    async def root_keys(site: str, request: Request) -> str:
-        try:
-            return await ExportRootSSHKeys.run(request.app.state.client,
-                                               None,
-                                               sitename=site)
-        except ValueError:
-            raise HTTPException(status_code=404,
-                                detail=f'unknown site {site!r}')
+    async def root_keys(request: Request,
+                        sitename: str = Depends(resolved_sitename)) -> str:
+        return await ExportRootSSHKeys.run(request.app.state.client,
+                                           None,
+                                           sitename=sitename)
 
     @api.get('/puppet/storage/{site}',
              dependencies=[Depends(require_api_key)])
-    async def puppet_storage(site: str, request: Request) -> dict:
-        try:
-            return await ExportPuppetStorage.run(request.app.state.client,
-                                                 None,
-                                                 sitename=site)
-        except ValueError:
-            raise HTTPException(status_code=404,
-                                detail=f'unknown site {site!r}')
+    async def puppet_storage(request: Request,
+                            sitename: str = Depends(resolved_sitename)) -> dict:
+        return await ExportPuppetStorage.run(request.app.state.client,
+                                             None,
+                                             sitename=sitename)
 
     return api
