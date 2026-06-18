@@ -1239,6 +1239,13 @@ def _old_limits_are_default(old_limits) -> bool:
     )
 
 
+def _is_user_group(group) -> bool:
+    """User (personal) groups never own a SlurmAccount. v1 carried a default
+    SiteSlurmAccount on every group, but for type='user' it was vestigial and
+    ignored by association-building and Slurm syncs."""
+    return group.type == 'user'
+
+
 class MigrateSlurmAccounts(_BulkMigrateOperation):
     op_name = 'migrate_slurm_accounts'
 
@@ -1254,6 +1261,7 @@ class MigrateSlurmAccounts(_BulkMigrateOperation):
         self.migrated = 0
         self.skipped = 0
         self.filtered = 0
+        self.user_groups = 0
 
     async def execute(self, session: AsyncClientSession) -> list[SlurmAccount]:
         total = SiteGroup.objects.count()
@@ -1292,6 +1300,14 @@ class MigrateSlurmAccounts(_BulkMigrateOperation):
                 self.skipped += 1
                 continue
 
+            if _is_user_group(group):
+                self.logger.info(
+                    'Group %s on %s is type=user; not creating a SlurmAccount',
+                    site_group.groupname, site_group.sitename,
+                )
+                self.user_groups += 1
+                continue
+
             existing = await SlurmAccount.find_one(
                 SlurmAccount.group.id == group.id,
                 SlurmAccount.site.id == site.id,
@@ -1324,8 +1340,9 @@ class MigrateSlurmAccounts(_BulkMigrateOperation):
             )
 
         self.logger.info(
-            'MigrateSlurmAccounts done: migrated=%d skipped=%d filtered=%d',
-            self.migrated, self.skipped, self.filtered,
+            'MigrateSlurmAccounts done: migrated=%d skipped=%d '
+            'user_groups=%d filtered=%d',
+            self.migrated, self.skipped, self.user_groups, self.filtered,
         )
         return accounts
 
@@ -1333,6 +1350,7 @@ class MigrateSlurmAccounts(_BulkMigrateOperation):
         return {
             'migrated': self.migrated,
             'skipped': self.skipped,
+            'user_groups': self.user_groups,
             'filtered': self.filtered,
             'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }
@@ -1353,6 +1371,7 @@ class MigrateSlurmAssociations(_BulkMigrateOperation):
         self.migrated = 0
         self.skipped = 0
         self.filtered = 0
+        self.user_groups = 0
 
     async def execute(self, session: AsyncClientSession) -> list[SlurmAssociation]:
         total = SiteSlurmAssociation.objects.count()
@@ -1388,6 +1407,15 @@ class MigrateSlurmAssociations(_BulkMigrateOperation):
                     old_group.groupname,
                 )
                 self.skipped += 1
+                continue
+
+            if _is_user_group(group):
+                self.logger.info(
+                    'Group %s on %s is type=user; no SlurmAccount exists, '
+                    'skipping association',
+                    old_group.groupname, old_assoc.sitename,
+                )
+                self.user_groups += 1
                 continue
 
             account = await SlurmAccount.find_one(
@@ -1454,8 +1482,9 @@ class MigrateSlurmAssociations(_BulkMigrateOperation):
             )
 
         self.logger.info(
-            'MigrateSlurmAssociations done: migrated=%d skipped=%d filtered=%d',
-            self.migrated, self.skipped, self.filtered,
+            'MigrateSlurmAssociations done: migrated=%d skipped=%d '
+            'user_groups=%d filtered=%d',
+            self.migrated, self.skipped, self.user_groups, self.filtered,
         )
         return assocs
 
@@ -1463,6 +1492,7 @@ class MigrateSlurmAssociations(_BulkMigrateOperation):
         return {
             'migrated': self.migrated,
             'skipped': self.skipped,
+            'user_groups': self.user_groups,
             'filtered': self.filtered,
             'sites_filter': sorted(self.sitenames) if self.sitenames else None,
         }

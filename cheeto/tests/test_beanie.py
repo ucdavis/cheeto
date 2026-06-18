@@ -5378,6 +5378,174 @@ class TestMigrateSitesFilter:
             connection.drop_database(cfg.database)
 
 
+class TestMigrateSlurmAccountsUserGroups:
+    """A group of type='user' must never receive a SlurmAccount during
+    migration. v1 carried a default SiteSlurmAccount on every group; for
+    personal user groups it was vestigial and ignored by association-building
+    and Slurm syncs. A non-default embedded limit makes such a group pass the
+    `has_limits` gate, so the type='user' skip is what keeps it out."""
+
+    def _connect_v1(self, dbname: str):
+        from mongoengine import disconnect
+
+        from cheeto.config import MongoConfig
+        from cheeto.database import connect_mongoengine
+
+        disconnect()
+        mongo_cfg = MongoConfig(
+            uri='127.0.0.1', port=MONGODB_PORT, user='', tls=False,
+            password='', database=dbname,
+        )
+        connection = connect_mongoengine(mongo_cfg, quiet=True)
+        connection.drop_database(dbname)
+        return connection, mongo_cfg
+
+    def _seed_v1(self):
+        from cheeto.database.site import Site as OldSite
+        from cheeto.database.user import GlobalUser as OldGlobalUser
+        from cheeto.database.user import SiteUser as OldSiteUser
+        from cheeto.database.group import (
+            GlobalGroup as OldGlobalGroup,
+            SiteGroup as OldSiteGroup,
+            SiteSlurmAccount,
+        )
+        from cheeto.database.slurm import (
+            SiteSlurmAssociation,
+            SiteSlurmPartition,
+            SiteSlurmQOS,
+        )
+
+        OldSite(sitename='site1', fqdn='site1.test').save()
+
+        user = OldGlobalUser(
+            username='ug_user', email='ug@test.com',
+            uid=960001, gid=960001, fullname='UG User',
+            shell='/bin/bash', home_directory='/home/ug_user',
+            type='user', status='active', access=['login-ssh', 'slurm'],
+        )
+        user.save()
+        su = OldSiteUser(
+            username='ug_user', sitename='site1', parent=user, _status='active',
+        )
+        su.save()
+
+        # A normal lab group, carrying a non-default limit -> gets an account.
+        lab = OldGlobalGroup(groupname='labgrp', gid=960100, type='group')
+        lab.save()
+        lab_sg = OldSiteGroup(
+            groupname='labgrp', sitename='site1', parent=lab, _members=[su],
+            slurm=SiteSlurmAccount(max_user_jobs=5),
+        )
+        lab_sg.save()
+
+        # The user's personal group, also carrying a non-default limit so it
+        # passes the has_limits gate -> must still be skipped (type='user').
+        ug = OldGlobalGroup(groupname='ug_user', gid=960001, type='user')
+        ug.save()
+        ug_sg = OldSiteGroup(
+            groupname='ug_user', sitename='site1', parent=ug, _members=[su],
+            slurm=SiteSlurmAccount(max_user_jobs=5),
+        )
+        ug_sg.save()
+
+        # A partition + QOS + an association on *each* group, so the
+        # association migration is exercised for both.
+        part = SiteSlurmPartition(sitename='site1', partitionname='low')
+        part.save()
+        qos = SiteSlurmQOS(sitename='site1', qosname='normal')
+        qos.save()
+        SiteSlurmAssociation(
+            sitename='site1', qos=qos, partition=part, group=lab_sg,
+        ).save()
+        SiteSlurmAssociation(
+            sitename='site1', qos=qos, partition=part, group=ug_sg,
+        ).save()
+
+    async def test_user_group_skipped_for_slurm_account(self, beanie_client):
+        from cheeto.operations import (
+            MigrateGroups,
+            MigrateSites,
+            MigrateSlurmAccounts,
+            MigrateUsers,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_usergroup_acct')
+        try:
+            self._seed_v1()
+
+            await MigrateSites.run(beanie_client, None)
+            await MigrateUsers.run(beanie_client, None)
+            await MigrateGroups.run(beanie_client, None)
+
+            accounts_op = MigrateSlurmAccounts(beanie_client, None)
+            await accounts_op._run()
+
+            assert accounts_op.user_groups == 1
+            assert accounts_op.migrated == 1
+
+            site = await Site.find_one(Site.name == 'site1')
+            lab = await Group.find_one(Group.name == 'labgrp')
+            ug = await Group.find_one(Group.name == 'ug_user')
+            assert ug.type == 'user'
+
+            lab_acct = await SlurmAccount.find_one(
+                SlurmAccount.group.id == lab.id,
+                SlurmAccount.site.id == site.id,
+            )
+            ug_acct = await SlurmAccount.find_one(
+                SlurmAccount.group.id == ug.id,
+                SlurmAccount.site.id == site.id,
+            )
+            assert lab_acct is not None
+            assert ug_acct is None
+        finally:
+            connection.drop_database(cfg.database)
+
+    async def test_user_group_skipped_for_slurm_association(self, beanie_client):
+        from cheeto.operations import (
+            MigrateGroups,
+            MigrateSites,
+            MigrateSlurmAccounts,
+            MigrateSlurmAssociations,
+            MigrateSlurmPartitions,
+            MigrateSlurmQOSes,
+            MigrateUsers,
+        )
+
+        connection, cfg = self._connect_v1('cheeto_migrate_usergroup_assoc')
+        try:
+            self._seed_v1()
+
+            await MigrateSites.run(beanie_client, None)
+            await MigrateUsers.run(beanie_client, None)
+            await MigrateGroups.run(beanie_client, None)
+            await MigrateSlurmPartitions.run(beanie_client, None)
+            await MigrateSlurmQOSes.run(beanie_client, None)
+            await MigrateSlurmAccounts.run(beanie_client, None)
+
+            assoc_op = MigrateSlurmAssociations(beanie_client, None)
+            await assoc_op._run()
+
+            # The user group's association is skipped before the (absent)
+            # account lookup; the lab group's association migrates normally.
+            assert assoc_op.user_groups == 1
+            assert assoc_op.migrated == 1
+
+            site = await Site.find_one(Site.name == 'site1')
+            lab = await Group.find_one(Group.name == 'labgrp')
+            lab_acct = await SlurmAccount.find_one(
+                SlurmAccount.group.id == lab.id,
+                SlurmAccount.site.id == site.id,
+            )
+            assert await SlurmAssociation.find_all().count() == 1
+            lab_assocs = await SlurmAssociation.find(
+                SlurmAssociation.account.id == lab_acct.id,
+            ).to_list()
+            assert len(lab_assocs) == 1
+        finally:
+            connection.drop_database(cfg.database)
+
+
 class TestMigrateTwoPass:
     """`migrate --sites A` followed by `migrate --sites B` must converge:
     users and groups migrated in the first pass still get their
