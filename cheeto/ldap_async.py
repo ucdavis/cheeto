@@ -215,6 +215,13 @@ def _days_to_naive_utc(days: int) -> datetime:
 def entry_to_user(entry: LDAPEntry) -> LDAPUserRecord:
     username = _first(entry, 'uid') or ''
     shadow_expire = _first(entry, 'shadowExpire')
+
+    try:
+        expires_at = _days_to_naive_utc(int(shadow_expire)) if shadow_expire is not None else None
+    except ValueError:
+        logger.error(f'Invalid shadowExpire for user {entry.dn}: {shadow_expire}')
+        expires_at = None
+    
     return LDAPUserRecord(
         username=username,
         email=_first(entry, 'mail') or '',
@@ -227,10 +234,7 @@ def entry_to_user(entry: LDAPEntry) -> LDAPUserRecord:
         ),
         shell=_first(entry, 'loginShell') or '/usr/bin/bash',
         ssh_keys=list(entry.get('sshPublicKey') or ()),
-        expires_at=(
-            _days_to_naive_utc(int(shadow_expire))
-            if shadow_expire is not None else None
-        ),
+        expires_at=expires_at,
     )
 
 
