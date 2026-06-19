@@ -293,8 +293,10 @@ class TestAutomountMapping:
         attrs = automount_to_entry_attrs(record)
         assert attrs['objectClass'] == ['automount']
         assert attrs['automountKey'] == ['alice']
+        # The host carries the ${HOST_SUFFIX} autofs variable (substituted
+        # client-side at mount time) for backwards compatibility.
         assert attrs['automountInformation'] == [
-            '-rw,nosuid nfs.example:/srv/home/alice',
+            '-rw,nosuid nfs.example${HOST_SUFFIX}:/srv/home/alice',
         ]
 
     def test_no_options(self):
@@ -303,4 +305,6 @@ class TestAutomountMapping:
             host='nfs.example', path='/srv/home/alice',
         )
         attrs = automount_to_entry_attrs(record)
-        assert attrs['automountInformation'] == ['nfs.example:/srv/home/alice']
+        assert attrs['automountInformation'] == [
+            'nfs.example${HOST_SUFFIX}:/srv/home/alice',
+        ]
