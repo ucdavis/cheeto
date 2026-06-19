@@ -1,5 +1,6 @@
 from .base import Operation
 from .site import (
+    AddSiteAlias,
     AddStickyGroup,
     AddStickySlurmAccount,
     ClearSiteDefaultSlurmAccount,
@@ -7,6 +8,7 @@ from .site import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
+    RemoveSiteAlias,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,

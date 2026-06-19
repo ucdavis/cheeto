@@ -96,6 +96,7 @@ def _renormalize(settings: BaseModel) -> BaseModel:
 class Site(BaseDocument):
     name: str
     fqdn: str
+    aliases: list[str] = Field(default_factory=list)
     slurm: SiteSlurmSettings = Field(default_factory=SiteSlurmSettings)
     group: SiteGroupSettings = Field(default_factory=SiteGroupSettings)
     storage: SiteStorageSettings = Field(default_factory=SiteStorageSettings)

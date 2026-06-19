@@ -20,8 +20,8 @@ from .group import (
 from .puppet_legacy import site_to_puppet_legacy
 from .site import (
     count_site_dependents,
+    find_site,
     find_site_by_name,
-    find_site_by_name_or_fqdn,
 )
 from .slurm import (
     GroupSlurm,

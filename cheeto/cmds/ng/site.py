@@ -12,6 +12,7 @@ from .. import commands
 from ...log import Console
 from ...models.site import Site
 from ...operations import (
+    AddSiteAlias,
     AddStickyGroup,
     AddStickySlurmAccount,
     ClearSiteDefaultSlurmAccount,
@@ -20,6 +21,7 @@ from ...operations import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     RemoveSite,
+    RemoveSiteAlias,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
     SetSiteDefaultSlurmAccount,
@@ -163,6 +165,7 @@ async def _site_to_dict(site: Site) -> dict:
     return {
         'name': site.name,
         'fqdn': site.fqdn,
+        'aliases': site.aliases,
         'sticky_groups': sticky_groups,
         'sticky_slurm_accounts': sticky_accounts,
         'default_slurm_account': default_account,
@@ -180,6 +183,9 @@ def _render_site_panel(data: dict) -> Panel:
     for key in ('name', 'fqdn', 'created_at', 'updated_at'):
         if data.get(key) is not None:
             table.add_row(key, str(data[key]))
+
+    aliases = data.get('aliases')
+    table.add_row('aliases', ', '.join(aliases) if aliases else '[dim](none)[/]')
 
     groups = data['sticky_groups']
     table.add_row(
@@ -350,6 +356,59 @@ def _(parser: ArgParser):
         '--clear-default', action='store_true', default=False,
         help='Clear site.slurm.default_account if it points at this account',
     )
+
+
+# ---------------------------------------------------------------------------
+# `ng site alias` — manage Site.aliases
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'site', 'alias',
+                   help='Manage a site\'s aliases (extra names it resolves by)')
+def site_alias_cmd(args: Namespace):
+    pass
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'alias', 'add',
+                   help='Add an alias the site resolves by (name/fqdn/alias)')
+async def site_alias_add(args: Namespace):
+    console = Console()
+    try:
+        await AddSiteAlias.run(
+            args.db, args.author, sitename=args.site, alias=args.alias,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(f'Added alias [green]{args.alias}[/] to [bold]{args.site}[/]')
+
+
+@site_alias_add.args()
+def _(parser: ArgParser):
+    parser.add_argument('alias', help='The alias to add')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'alias', 'remove', aliases=['rm'],
+                   help='Remove an alias from a site')
+async def site_alias_remove(args: Namespace):
+    console = Console()
+    try:
+        await RemoveSiteAlias.run(
+            args.db, args.author, sitename=args.site, alias=args.alias,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Removed alias [yellow]{args.alias}[/] from [bold]{args.site}[/]'
+    )
+
+
+@site_alias_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('alias', help='The alias to remove')
 
 
 # ---------------------------------------------------------------------------

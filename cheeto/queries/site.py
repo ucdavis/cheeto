@@ -19,10 +19,14 @@ async def find_site_by_name(name: str) -> Site | None:
     return await Site.find_one(Site.name == name)
 
 
-async def find_site_by_name_or_fqdn(value: str) -> Site | None:
-    """Resolve a site by its canonical `name` or its `fqdn`. Used by the
-    daemon API, where the `{site}` path segment may be either."""
-    return await Site.find_one(Or(Site.name == value, Site.fqdn == value))
+async def find_site(value: str) -> Site | None:
+    """Resolve a site by its canonical `name`, its `fqdn`, or any of its
+    `aliases`. `Site.aliases == value` matches documents whose aliases array
+    contains `value`. Used by the daemon API, where the `{site}` path segment
+    may be any of these."""
+    return await Site.find_one(
+        Or(Site.name == value, Site.fqdn == value, Site.aliases == value)
+    )
 
 
 def _build_site_linked_models() -> list[tuple[str, type]]:

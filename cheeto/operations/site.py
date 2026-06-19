@@ -134,6 +134,76 @@ class RemoveStickyGroup(Operation):
         return {'sitename': self.sitename, 'groupname': self.groupname}
 
 
+class AddSiteAlias(Operation):
+    """Add `alias` to `site.aliases` so the site also resolves by it (via
+    `queries.site.find_site`). Idempotent on re-add; refuses an alias that
+    already resolves to a *different* site, keeping resolution unambiguous."""
+
+    op_name = 'add_site_alias'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        alias: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.alias = alias
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        from ..queries.site import find_site
+
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+        if self.alias in site.aliases:
+            return  # idempotent
+        existing = await find_site(self.alias)
+        if existing is not None and existing.id != site.id:
+            raise ValueError(
+                f'Alias {self.alias!r} already resolves to site '
+                f'{existing.name!r}'
+            )
+        site.aliases.append(self.alias)
+        await site.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {'sitename': self.sitename, 'alias': self.alias}
+
+
+class RemoveSiteAlias(Operation):
+    """Remove `alias` from `site.aliases`. Idempotent."""
+
+    op_name = 'remove_site_alias'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        sitename: str,
+        alias: str,
+    ) -> None:
+        super().__init__(client, author)
+        self.sitename = sitename
+        self.alias = alias
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+        if self.alias not in site.aliases:
+            return  # idempotent
+        site.aliases = [a for a in site.aliases if a != self.alias]
+        await site.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {'sitename': self.sitename, 'alias': self.alias}
+
+
 async def _load_slurm_account_for(
     site: Site, group: Group,
 ) -> SlurmAccount:

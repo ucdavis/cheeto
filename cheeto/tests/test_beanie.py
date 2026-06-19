@@ -86,7 +86,9 @@ from ..operations import (
     ExportPuppetStorage,
     ExportRootSSHKeys,
     ExportSympaEmails,
+    AddSiteAlias,
     RemoveSite,
+    RemoveSiteAlias,
     SyncGroupToLDAP,
     SyncSiteAutomounts,
     SyncSiteLDAP,
@@ -828,6 +830,83 @@ class TestCreateSiteOp:
         with pytest.raises(ValueError, match='already exists'):
             await CreateSite.run(
                 beanie_client, None, name='dup', fqdn='dup2.test',
+            )
+
+
+class TestSiteAliases:
+    """`Site.aliases`, the `find_site` resolver, and the add/remove ops."""
+
+    async def test_default_empty(self, beanie_client):
+        site = await CreateSite.run(
+            beanie_client, None, name='al_site', fqdn='al.test',
+        )
+        assert site.aliases == []
+
+    async def test_find_site_resolves_name_fqdn_and_alias(self, beanie_client):
+        from cheeto.queries import find_site
+
+        site = Site(name='al_a', fqdn='al-a.test', aliases=['short', 'legacy'])
+        await site.insert()
+
+        for value in ('al_a', 'al-a.test', 'short', 'legacy'):
+            resolved = await find_site(value)
+            assert resolved is not None and resolved.name == 'al_a'
+        assert await find_site('nope') is None
+
+    async def test_add_alias_appends_and_idempotent(self, beanie_client):
+        from cheeto.queries import find_site
+
+        await CreateSite.run(beanie_client, None, name='al_b', fqdn='al-b.test')
+        await AddSiteAlias.run(beanie_client, None, sitename='al_b', alias='bee')
+        # re-adding is a no-op, not an error
+        await AddSiteAlias.run(beanie_client, None, sitename='al_b', alias='bee')
+
+        site = await Site.find_one(Site.name == 'al_b')
+        assert site.aliases == ['bee']
+        resolved = await find_site('bee')
+        assert resolved is not None and resolved.name == 'al_b'
+
+    async def test_add_alias_rejects_collision(self, beanie_client):
+        await CreateSite.run(beanie_client, None, name='al_c', fqdn='al-c.test')
+        await CreateSite.run(beanie_client, None, name='al_d', fqdn='al-d.test')
+        await AddSiteAlias.run(beanie_client, None, sitename='al_c', alias='dup')
+
+        # alias already used by al_c
+        with pytest.raises(ValueError, match='already resolves'):
+            await AddSiteAlias.run(
+                beanie_client, None, sitename='al_d', alias='dup',
+            )
+        # alias equal to another site's name / fqdn
+        with pytest.raises(ValueError, match='already resolves'):
+            await AddSiteAlias.run(
+                beanie_client, None, sitename='al_d', alias='al_c',
+            )
+        with pytest.raises(ValueError, match='already resolves'):
+            await AddSiteAlias.run(
+                beanie_client, None, sitename='al_d', alias='al-c.test',
+            )
+
+    async def test_remove_alias_and_idempotent(self, beanie_client):
+        await CreateSite.run(beanie_client, None, name='al_e', fqdn='al-e.test')
+        await AddSiteAlias.run(beanie_client, None, sitename='al_e', alias='eee')
+        await RemoveSiteAlias.run(
+            beanie_client, None, sitename='al_e', alias='eee',
+        )
+        site = await Site.find_one(Site.name == 'al_e')
+        assert site.aliases == []
+        # removing a missing alias is a no-op, not an error
+        await RemoveSiteAlias.run(
+            beanie_client, None, sitename='al_e', alias='eee',
+        )
+
+    async def test_alias_ops_unknown_site_error(self, beanie_client):
+        with pytest.raises(ValueError, match='does not exist'):
+            await AddSiteAlias.run(
+                beanie_client, None, sitename='nope', alias='x',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await RemoveSiteAlias.run(
+                beanie_client, None, sitename='nope', alias='x',
             )
 
 

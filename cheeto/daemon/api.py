@@ -17,7 +17,7 @@ from ..config import Config
 from ..database.base import connect_beanie
 from ..operations.site import ExportRootSSHKeys
 from ..operations.storage import ExportPuppetStorage
-from ..queries.site import find_site_by_name_or_fqdn
+from ..queries.site import find_site
 from ..queries.user import root_ssh_keys
 
 _api_key_header = APIKeyHeader(name='X-API-Key', auto_error=False)
@@ -56,7 +56,7 @@ def create_api(config: Config, client=None) -> FastAPI:
     async def resolved_sitename(site: str) -> str:
         """Map the `{site}` path segment (a site name OR an fqdn) to the
         canonical site name the export operations key on; 404 if unknown."""
-        resolved = await find_site_by_name_or_fqdn(site)
+        resolved = await find_site(site)
         if resolved is None:
             raise HTTPException(status_code=404,
                                 detail=f'unknown site {site!r}')
@@ -70,7 +70,7 @@ def create_api(config: Config, client=None) -> FastAPI:
     async def root_keys(site: str, request: Request) -> dict:
         # Unlike storage, root keys fall back to the global set (every admin
         # with root-ssh) when the site is unknown rather than 404ing.
-        resolved = await find_site_by_name_or_fqdn(site)
+        resolved = await find_site(site)
         sitename = resolved.name if resolved is not None else None
         blocks = await ExportRootSSHKeys.run(request.app.state.client,
                                              None,

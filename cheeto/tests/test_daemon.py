@@ -611,6 +611,19 @@ class TestDaemonApi:
         keys = by_fqdn.json()['root-ssh-public-keys']
         assert any('REMOTE_SSH_USER=api_admin' in k for k in keys)
 
+    async def test_endpoint_accepts_alias(self, beanie_client, config, rk_site):
+        """`{site}` may also be one of the site's aliases."""
+        rk_site.aliases = ['api-alias']
+        await rk_site.save()
+        api = create_api(config, client=beanie_client)
+        async with _api_client(api) as client:
+            by_alias = await client.get('/puppet/root-keys/api-alias',
+                                        headers={'X-API-Key': 'test-api-key'})
+            by_name = await client.get('/puppet/root-keys/api-site',
+                                       headers={'X-API-Key': 'test-api-key'})
+        assert by_alias.status_code == 200
+        assert by_alias.json() == by_name.json()
+
     async def test_no_api_key_configured_is_open(
         self, beanie_client, config, rk_site,
     ):
