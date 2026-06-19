@@ -36,6 +36,7 @@ from ...queries import (
     list_user_ssh_keys,
     resolve_access_names,
     resolve_status_name,
+    user_active_sites,
     user_groups_at_site,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml
@@ -81,6 +82,7 @@ async def _user_to_dict(user: User,
                         site_info: dict | None = None,
                         group_memberships: list[dict] | None = None,
                         slurm_info: list[dict] | None = None,
+                        active_sites: list[str] | None = None,
                         iam_config=None) -> dict:
     data = {
         'name': user.name,
@@ -138,6 +140,8 @@ async def _user_to_dict(user: User,
         data['group_memberships'] = group_memberships
     if slurm_info is not None:
         data['slurm_info'] = slurm_info
+    if active_sites is not None:
+        data['active_sites'] = active_sites
     return data
 
 
@@ -265,6 +269,13 @@ def _render_user_panel(data: dict) -> Panel:
 
     if data.get('iam'):
         table.add_row('iam', _render_user_iam(data['iam']))
+
+    if 'active_sites' in data:
+        sites = data['active_sites']
+        table.add_row(
+            'active on',
+            ', '.join(sites) if sites else '[dim](no active sites)[/]',
+        )
 
     if 'site_info' in data:
         si = data['site_info']
@@ -650,6 +661,7 @@ async def user_show(args: Namespace):
     site_info = None
     slurm_info = None
     group_memberships = None
+    active_sites = None
     if args.site:
         site = await find_site_by_name(args.site)
         if site is None:
@@ -679,11 +691,14 @@ async def user_show(args: Namespace):
             key=lambda d: d['group'],
         )
         slurm_info = await user_slurm_at_site(user, site)
+    else:
+        # No site given: summarize the sites the user is active on.
+        active_sites = await user_active_sites(user)
 
     data = await _user_to_dict(
         user, ssh_keys=ssh_keys, site_info=site_info,
         group_memberships=group_memberships, slurm_info=slurm_info,
-        iam_config=args.config.ucdiam,
+        active_sites=active_sites, iam_config=args.config.ucdiam,
     )
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))

@@ -52,4 +52,5 @@ from .user import (
     root_authorized_keys_text,
     root_key_blocks,
     root_ssh_keys,
+    user_active_sites,
 )

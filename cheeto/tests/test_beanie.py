@@ -2218,6 +2218,72 @@ class TestMigrateAccessStatusGroups:
         assert sg.name == 'paused-users'
 
 
+class TestUserActiveSites:
+    """`user_active_sites` lists the sites where a user is effectively active:
+    the per-site status override if set, else the global `User.status`."""
+
+    async def test_lists_effectively_active_sites(self, beanie_client):
+        from cheeto.queries import user_active_sites
+
+        user = User(
+            name='as_user', email='as@test.com', uid=910001, gid=910001,
+            fullname='AS User', home_directory='/home/as_user',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        # no override -> inherits global active
+        site_a = Site(name='as_a', fqdn='as-a.test')
+        await site_a.insert()
+        await UserSiteInfo(user=user, site=site_a).insert()
+        # explicit active override
+        site_b = Site(name='as_b', fqdn='as-b.test')
+        await site_b.insert()
+        await UserSiteInfo(
+            user=user, site=site_b, status=await status_link('active'),
+        ).insert()
+        # inactive override -> excluded despite global active
+        site_c = Site(name='as_c', fqdn='as-c.test')
+        await site_c.insert()
+        await UserSiteInfo(
+            user=user, site=site_c, status=await status_link('inactive'),
+        ).insert()
+
+        assert await user_active_sites(user) == ['as_a', 'as_b']
+
+    async def test_global_inactive_with_active_override(self, beanie_client):
+        from cheeto.queries import user_active_sites
+
+        user = User(
+            name='as_inact', email='asi@test.com', uid=910002, gid=910002,
+            fullname='AS Inact', home_directory='/home/as_inact',
+            status=await status_link('inactive'),
+        )
+        await user.insert()
+        # no override -> inherits global inactive -> excluded
+        site_x = Site(name='as_x', fqdn='as-x.test')
+        await site_x.insert()
+        await UserSiteInfo(user=user, site=site_x).insert()
+        # active override -> included
+        site_y = Site(name='as_y', fqdn='as-y.test')
+        await site_y.insert()
+        await UserSiteInfo(
+            user=user, site=site_y, status=await status_link('active'),
+        ).insert()
+
+        assert await user_active_sites(user) == ['as_y']
+
+    async def test_no_sites_yields_empty(self, beanie_client):
+        from cheeto.queries import user_active_sites
+
+        user = User(
+            name='as_none', email='asn@test.com', uid=910003, gid=910003,
+            fullname='AS None', home_directory='/home/as_none',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        assert await user_active_sites(user) == []
+
+
 class TestAccessOverrideSemantics:
     """Override (not union) semantics for User.access vs UserSiteInfo.access.
 

@@ -19,6 +19,7 @@ from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
+from .access_status import resolve_status_name
 
 
 Operator = Literal['AND', 'OR']
@@ -37,6 +38,22 @@ def effective_access_links(
 async def list_user_ssh_keys(user: User) -> list[SshKey]:
     """Every SshKey belonging to `user`."""
     return await SshKey.find(SshKey.user.id == user.id).to_list()
+
+
+async def user_active_sites(user: User) -> list[str]:
+    """Names of the sites where `user` is effectively active — the per-site
+    status override (`UserSiteInfo.status`) if set, else the user's global
+    `User.status`. Sorted."""
+    usis = await UserSiteInfo.find(
+        UserSiteInfo.user.id == user.id,
+        fetch_links=True, nesting_depth=1,
+    ).to_list()
+    active: list[str] = []
+    for usi in usis:
+        status = usi.status if usi.status is not None else user.status
+        if await resolve_status_name(status) == 'active':
+            active.append(usi.site.name)
+    return sorted(active)
 
 
 # ---------------------------------------------------------------------------
