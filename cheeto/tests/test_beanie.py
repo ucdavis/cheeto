@@ -3712,6 +3712,38 @@ class TestSyncGroupToLDAPGate:
         r2 = await self._sync(beanie_client, ldap)
         assert r2.outcome == 'skipped_clean'
 
+    async def test_user_group_synced_without_members(self, beanie_client):
+        # A personal group (type='user', same name+gid as its owner) has no
+        # member edges, but must still be projected because its owner is on
+        # the site.
+        user, site = await _seed_gate_site()
+        await Group(name=user.name, gid=user.uid, type='user').insert()
+        ldap = _FakeLDAPManager()
+
+        r1 = await self._sync(beanie_client, ldap, groupname=user.name)
+        assert r1.outcome == 'membership_diffed'
+        assert user.name in ldap.group_writes
+        assert r1.extra['member_count'] == 0
+        # second pass is clean (watermark written)
+        r2 = await self._sync(beanie_client, ldap, groupname=user.name)
+        assert r2.outcome == 'skipped_clean'
+
+    async def test_user_group_skipped_when_owner_absent(self, beanie_client):
+        # A personal group whose owner is NOT on the site is still skipped.
+        await _seed_gate_site()
+        offsite = User(
+            name='offsite_u', email='offsite_u@x.test', uid=74050, gid=74050,
+            fullname='Offsite', home_directory='/home/offsite_u', type='user',
+            status=await status_link('active'),
+        )
+        await offsite.insert()
+        await Group(name='offsite_u', gid=74050, type='user').insert()
+        ldap = _FakeLDAPManager()
+
+        r = await self._sync(beanie_client, ldap, groupname='offsite_u')
+        assert r.outcome == 'skipped_no_members_on_site'
+        assert ldap.group_writes == []
+
     async def test_special_group_no_watermark(self, beanie_client):
         await _seed_gate_site()
         ldap = _FakeLDAPManager()

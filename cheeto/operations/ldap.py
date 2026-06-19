@@ -433,12 +433,20 @@ class SyncGroupToLDAP(Operation):
         member_names = await self._members_at_site(group, site)
 
         if not member_names and not self.force:
-            self._outcome = 'skipped_no_members_on_site'
-            await self._write_watermark(group, watermark, session)
-            return LDAPSyncResult(
-                name=self.groupname, outcome=self._outcome,
-                extra={'member_count': 0},
-            )
+            # A user (personal) group must be projected to every site its
+            # owner is on, even with no member edges (the owner's primary
+            # membership is implicit via passwd gidNumber). Other member-less
+            # groups are not projected here.
+            if not (
+                group.type == 'user'
+                and await self._owner_present_at_site(group, site)
+            ):
+                self._outcome = 'skipped_no_members_on_site'
+                await self._write_watermark(group, watermark, session)
+                return LDAPSyncResult(
+                    name=self.groupname, outcome=self._outcome,
+                    extra={'member_count': 0},
+                )
 
         if self.force:
             await self.ldap.delete_group(self.groupname)
@@ -492,6 +500,18 @@ class SyncGroupToLDAP(Operation):
             return set()
         users = await User.find(In(User.id, present_ids)).to_list()
         return {u.name for u in users}
+
+    async def _owner_present_at_site(self, group: Group, site: Site) -> bool:
+        """A user (personal) group must exist on every site its owner is on.
+        The personal group shares the owner's name and gid (CreateUser)."""
+        owner = await User.find_one(User.name == group.name)
+        if owner is None or owner.gid != group.gid:
+            return False
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == owner.id,
+            UserSiteInfo.site.id == site.id,
+        )
+        return usi is not None
 
     def describe(self) -> dict[str, Any]:
         return {
