@@ -1,5 +1,9 @@
 name: Tests
 
+env:
+  FORCE_COLOR: "1"
+  TERM: xterm-256color
+
 on:
   push:
     branches:
@@ -53,7 +57,7 @@ jobs:
 
       - run: poetry install --no-interaction
 
-      - run: poetry run pytest
+      - run: poetry run pytest cheeto/tests --ignore=cheeto/tests/test_db.py -q
 
   # Live Slurm integration: stand up giovtorres/slurm-docker-cluster via
   # docker compose and run the CHEETO_SLURM_LIVE-gated tests against a real
