@@ -133,6 +133,21 @@ jobs:
           timeout 90 bash -c "until docker exec slurmctld sacctmgr -n list cluster | grep -q linux; do sleep 3; done"
           docker exec slurmctld sacctmgr -n list cluster
 
+      - name: Enable gres/gpu TRES accounting
+        working-directory: slurm-docker-cluster
+        run: |
+          # cheeto renders gres/gpu in TRES strings, but slurmdbd rejects it
+          # ("no TRES known by type gres/gpu") unless slurmctld advertises it
+          # via AccountingStorageTRES. The stock image config omits it, so
+          # append the line (idempotent) and restart slurmctld — the only
+          # daemon that reads it — to register the TRES.
+          docker exec slurmctld bash -c \
+            "grep -q '^AccountingStorageTRES=' /etc/slurm/slurm.conf \
+             || echo 'AccountingStorageTRES=gres/gpu' >> /etc/slurm/slurm.conf"
+          docker compose restart slurmctld
+          timeout 120 bash -c "until docker compose ps slurmctld | grep -q healthy; do sleep 3; done"
+          docker exec slurmctld sacctmgr -n list tres
+
       - name: Run live Slurm integration tests
         env:
           CHEETO_SLURM_LIVE: "1"
