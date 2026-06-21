@@ -178,6 +178,18 @@ class DaemonTasksConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class BrokerSSLConfig(BaseModel):
+    # TLS options for the RabbitMQ (Celery) broker connection. Presence of
+    # this block on the daemon config enables broker TLS; map to Celery's
+    # `broker_use_ssl` in cheeto/daemon/app.py.
+    ca_file: Optional[str] = None      # CA that signed the broker cert (server verification)
+    cert_file: Optional[str] = None    # client cert — mutual TLS only
+    key_file: Optional[str] = None     # client key — mutual TLS only
+    cert_reqs: str = 'required'        # 'none' | 'optional' | 'required'
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class DaemonConfig(BaseModel):
     broker_url: str
     sites: List[str]
@@ -186,6 +198,8 @@ class DaemonConfig(BaseModel):
     beat_schedule_filename: str = '/var/lib/cheeto/celerybeat-schedule'
     task_time_limit: int = 3600
     tasks: DaemonTasksConfig = field(default_factory=DaemonTasksConfig)
+    # When set, the broker connection uses TLS (amqps). See BrokerSSLConfig.
+    broker_use_ssl: Optional[BrokerSSLConfig] = None
 
 
 @require_kwargs

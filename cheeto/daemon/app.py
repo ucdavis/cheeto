@@ -8,13 +8,20 @@
 # Date   : 10.06.2026
 
 import os
+import ssl
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote_plus
 
 from celery import Celery
 
-from ..config import Config, DEFAULT_CONFIG_PATH, MongoConfig, get_config
+from ..config import (
+    BrokerSSLConfig,
+    Config,
+    DEFAULT_CONFIG_PATH,
+    MongoConfig,
+    get_config,
+)
 
 app = Celery('cheeto')
 
@@ -56,6 +63,34 @@ def mongo_result_backend(mongo: MongoConfig) -> tuple[str, dict]:
     return url, settings
 
 
+_CERT_REQS = {
+    'none': ssl.CERT_NONE,
+    'optional': ssl.CERT_OPTIONAL,
+    'required': ssl.CERT_REQUIRED,
+}
+
+
+def broker_use_ssl(cfg: BrokerSSLConfig) -> dict:
+    """Translate our BrokerSSLConfig into celery's `broker_use_ssl` dict (the
+    ssl options handed to the pyamqp/RabbitMQ socket): verify the broker
+    against `ca_file`, optionally present a client cert for mutual TLS."""
+    try:
+        cert_reqs = _CERT_REQS[cfg.cert_reqs]
+    except KeyError:
+        raise ValueError(
+            f'broker_use_ssl.cert_reqs must be one of '
+            f'{sorted(_CERT_REQS)}; got {cfg.cert_reqs!r}'
+        )
+    opts: dict = {'cert_reqs': cert_reqs}
+    if cfg.ca_file:
+        opts['ca_certs'] = cfg.ca_file
+    if cfg.cert_file:
+        opts['certfile'] = cfg.cert_file
+    if cfg.key_file:
+        opts['keyfile'] = cfg.key_file
+    return opts
+
+
 def configure_celery_app(config: Config, celery_app: Celery = app) -> Celery:
     if config.daemon is None:
         raise RuntimeError('config has no daemon block')
@@ -86,6 +121,12 @@ def configure_celery_app(config: Config, celery_app: Celery = app) -> Celery:
         beat_schedule_filename=config.daemon.beat_schedule_filename,
         beat_schedule=build_beat_schedule(config),
     )
+    # TLS for the broker (amqps). Only set when configured so the default
+    # plaintext path is untouched.
+    if config.daemon.broker_use_ssl is not None:
+        celery_app.conf.broker_use_ssl = broker_use_ssl(
+            config.daemon.broker_use_ssl
+        )
     return celery_app
 
 

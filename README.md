@@ -133,6 +133,49 @@ GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
 If `api.api_key` is set in the config, requests must send a matching
 `X-API-Key` header; unknown sites return 404.
 
+### RabbitMQ TLS
+
+The broker connection can run over TLS (`amqps`). It's off by default; add a
+`broker_use_ssl` block to the daemon config to enable it (maps to celery's
+`broker_use_ssl`). The Mongo result backend has its own TLS (`mongo.tls`) and
+is independent.
+
+**Client (cheeto)** — `config.yaml`:
+
+```yaml
+daemon:
+  default:
+    broker_url: amqps://USER:PASS@broker.example.edu:5671//   # amqps + TLS port 5671
+    broker_use_ssl:
+      ca_file: /etc/cheeto/rabbitmq/ca.pem        # verify the broker's cert
+      cert_reqs: required                          # none | optional | required
+      # mutual TLS only — omit unless the broker requires client certs:
+      cert_file: /etc/cheeto/rabbitmq/client.pem
+      key_file:  /etc/cheeto/rabbitmq/client.key
+```
+
+Use the `amqps://` scheme and port 5671; the broker certificate's SAN must
+match the host in `broker_url` (verified against `ca_file` when
+`cert_reqs: required`). Server-only TLS = just `ca_file` + `cert_reqs`. Every
+worker/beat picks this up via `configure_celery_app`.
+
+**Server (RabbitMQ broker)** — `rabbitmq.conf`:
+
+```
+listeners.ssl.default            = 5671
+ssl_options.cacertfile           = /etc/rabbitmq/ca.pem
+ssl_options.certfile             = /etc/rabbitmq/server.pem
+ssl_options.keyfile              = /etc/rabbitmq/server.key
+ssl_options.verify               = verify_peer     # verify_none for server-only TLS
+ssl_options.fail_if_no_peer_cert = true            # true => require client certs (mutual TLS)
+# optional: drop `listeners.tcp.default` to disable plaintext 5672
+```
+
+Provision a CA + server cert/key (SAN = broker FQDN; for mutual TLS, issue
+client certs from the same CA). Restart RabbitMQ and confirm with
+`rabbitmq-diagnostics listeners` (expect `amqp/ssl` on 5671); open the
+firewall for 5671.
+
 ### Container
 
 The `Dockerfile` (base `python:3.13-slim`) builds one image that runs any

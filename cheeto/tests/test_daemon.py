@@ -17,10 +17,13 @@ from beanie import init_beanie
 from celery.schedules import crontab
 from pymongo import AsyncMongoClient
 
-from ..config import MongoConfig, get_config
+import ssl
+
+from ..config import BrokerSSLConfig, DaemonConfig, MongoConfig, get_config
 from ..daemon.api import create_api
 from ..daemon.app import (
     app,
+    broker_use_ssl,
     configure_celery_app,
     daemon_config,
     mongo_result_backend,
@@ -92,6 +95,18 @@ class TestDaemonConfig:
         assert d.broker_url.startswith('amqp://')
         assert d.sites == ['test-site']
         assert d.author == 'cheeto-daemon'
+        assert d.broker_use_ssl is None   # absent by default
+
+    def test_broker_use_ssl_parses(self):
+        d = DaemonConfig.Schema().load({
+            'broker_url': 'amqps://u:p@host:5671//',
+            'sites': ['farm'],
+            'broker_use_ssl': {'ca_file': '/ca.pem', 'cert_reqs': 'required'},
+        })
+        assert d.broker_use_ssl is not None
+        assert d.broker_use_ssl.ca_file == '/ca.pem'
+        assert d.broker_use_ssl.cert_reqs == 'required'
+        assert d.broker_use_ssl.cert_file is None   # mutual-TLS fields optional
 
     def test_schedule_types(self, config):
         tasks = config.daemon.tasks
@@ -320,6 +335,42 @@ class TestCeleryApp:
         # every task name beat schedules must be a registered celery task
         for entry in build_beat_schedule(config).values():
             assert entry['task'] in app.tasks
+
+    def test_broker_use_ssl_maps_paths_and_cert_reqs(self):
+        opts = broker_use_ssl(BrokerSSLConfig(
+            ca_file='/ca.pem', cert_file='/client.pem', key_file='/client.key',
+            cert_reqs='required',
+        ))
+        assert opts == {
+            'cert_reqs': ssl.CERT_REQUIRED,
+            'ca_certs': '/ca.pem',
+            'certfile': '/client.pem',
+            'keyfile': '/client.key',
+        }
+
+    def test_broker_use_ssl_server_only(self):
+        # server verification, no client cert (no mutual TLS)
+        opts = broker_use_ssl(BrokerSSLConfig(ca_file='/ca.pem', cert_reqs='optional'))
+        assert opts == {'cert_reqs': ssl.CERT_OPTIONAL, 'ca_certs': '/ca.pem'}
+
+    def test_broker_use_ssl_bad_cert_reqs_raises(self):
+        with pytest.raises(ValueError, match='cert_reqs'):
+            broker_use_ssl(BrokerSSLConfig(cert_reqs='bogus'))
+
+    def test_configure_sets_broker_use_ssl_when_present(self, config):
+        from celery import Celery
+        ssl_cfg = BrokerSSLConfig(ca_file='/etc/cheeto/ca.pem', cert_reqs='required')
+        cfg = replace(config, daemon=replace(config.daemon, broker_use_ssl=ssl_cfg))
+        configured = configure_celery_app(cfg, Celery('cheeto-ssl-test'))
+        assert configured.conf.broker_use_ssl == {
+            'cert_reqs': ssl.CERT_REQUIRED, 'ca_certs': '/etc/cheeto/ca.pem',
+        }
+
+    def test_configure_no_broker_ssl_by_default(self, config):
+        from celery import Celery
+        assert config.daemon.broker_use_ssl is None
+        configured = configure_celery_app(config, Celery('cheeto-nossl-test'))
+        assert not configured.conf.broker_use_ssl
 
 
 # ---------------------------------------------------------------------------
