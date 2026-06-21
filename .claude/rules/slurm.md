@@ -1,7 +1,7 @@
 # Slurm accounting & sacctmgr
 
-**Scope:** apply when working on `cheeto/slurm.py`, `cheeto/models/slurm.py`,
-`cheeto/operations/slurm.py`, `cheeto/queries/slurm.py`, `cheeto/cmds/slurm.py`,
+**Scope:** apply when working on `cheeto/slurm_sync.py`, `cheeto/models/slurm.py`,
+`cheeto/operations/slurm.py`, `cheeto/queries/slurm.py`,
 `cheeto/cmds/ng/slurm.py`, `cheeto/cmds/ng/_slurm_show.py` (and the Slurm dataclasses in
 `cheeto/puppet.py`).
 
@@ -57,7 +57,7 @@ per-user / per-job. `DenyOnLimit` is our default flag (reject at submit instead 
 
 ## Conventions in this repo
 
-- Build commands through `SAcctMgr`/`SControl` (`cheeto/slurm.py`), which return **baked
+- Build commands through `AsyncSAcctMgr` (`cheeto/slurm_sync.py`), which returns **baked
   `sh.Command` objects** — never shell out by hand. See the `sh` rule for `sh` usage
   (including awaiting commands from async code paths).
 - State is read into dicts (`get_slurm_qos_state`, `get_slurm_association_state`), diffed by

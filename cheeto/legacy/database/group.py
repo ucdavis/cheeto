@@ -19,7 +19,7 @@ from mongoengine import (BooleanField,
                          CASCADE, 
                          PULL)
 
-from ..puppet import PuppetGroupRecord
+from ...puppet import PuppetGroupRecord
 
 from .base import BaseDocument, SyncQuerySet
 from .fields import (POSIXNameField,

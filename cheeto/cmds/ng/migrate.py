@@ -6,8 +6,7 @@ from beanie import Document
 from ponderosa import ArgParser, arggroup
 
 from .. import commands
-from ...database import connect_mongoengine
-from ...database.site import Site as OldSite
+from ...legacy import require_legacy
 from ...log import Console
 from ...models.group import AccessGroup, Group, StatusGroup
 from ...models.site import Site
@@ -27,22 +26,20 @@ from ...models.storage import (
 )
 from ...models.user import SshKey, User
 from ...models.user_site_info import UserSiteInfo
-from ...operations import (
-    MigrateAccessStatusGroups,
-    MigrateAutomountMaps,
-    MigrateGroups,
-    MigrateSiteGlobals,
-    MigrateSites,
-    MigrateSlurmAccounts,
-    MigrateSlurmAssociations,
-    MigrateSlurmPartitions,
-    MigrateSlurmQOSes,
-    MigrateStorageVolumes,
-    MigrateStorages,
-    MigrateUser,
-    MigrateUsers,
-)
 from ._args import user_args
+
+# The v1 (mongoengine) migration ops and the OldSite model live behind the
+# optional `legacy` extra. They are NOT imported at module scope (that would
+# make `cheeto ng` require mongoengine); the common `connect_old_db`
+# postprocessor calls require_legacy() and injects them into module globals
+# before any handler runs — so `OldSite` and the `Migrate*` names below are
+# bound at command time, not import time.
+_LEGACY_MIGRATE_OPS = (
+    'MigrateAccessStatusGroups', 'MigrateAutomountMaps', 'MigrateGroups',
+    'MigrateSiteGlobals', 'MigrateSites', 'MigrateSlurmAccounts',
+    'MigrateSlurmAssociations', 'MigrateSlurmPartitions', 'MigrateSlurmQOSes',
+    'MigrateStorageVolumes', 'MigrateStorages', 'MigrateUser', 'MigrateUsers',
+)
 
 
 @commands.register('ng', 'migrate',
@@ -62,7 +59,17 @@ def migrate_args(parser: ArgParser):
 
 @migrate_args.postprocessor(priority=70)
 def connect_old_db(args: Namespace):
+    # Single chokepoint for every `ng migrate` subcommand: require the legacy
+    # extra, connect the v1 DB, and bind the gated v1 symbols into module
+    # globals so the handlers (which reference OldSite / Migrate* as free
+    # names) resolve them.
+    require_legacy()
+    from ...legacy.database import connect_mongoengine
+    from ...legacy import migrate as _legacy_migrate
+
     connect_mongoengine(args.config.mongo, quiet=args.quiet)
+    for _name in _LEGACY_MIGRATE_OPS:
+        globals()[_name] = getattr(_legacy_migrate, _name)
 
 
 @arggroup('sites filter')
@@ -81,6 +88,7 @@ def _validate_sites_filter(
     before any writes so a misspelled site aborts the whole run."""
     if not sitenames:
         return True
+    from ...legacy.database.site import Site as OldSite
     known = {s.sitename for s in OldSite.objects()}
     unknown = sorted(set(sitenames) - known)
     if unknown:

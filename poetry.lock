@@ -129,9 +129,10 @@ files = [
 name = "blinker"
 version = "1.9.0"
 description = "Fast, simple object-to-object and broadcast signaling"
-optional = false
+optional = true
 python-versions = ">=3.9"
 groups = ["main"]
+markers = "extra == \"legacy\""
 files = [
     {file = "blinker-1.9.0-py3-none-any.whl", hash = "sha256:ba0efaa9080b619ff2f3459d1d500c57bddea4a6b424b60a91141db6fd2f08bc"},
     {file = "blinker-1.9.0.tar.gz", hash = "sha256:b4ce2265a7abece45e7cc896e98dbebe6cead56bcf805a3d23136d145f5445bf"},
@@ -989,9 +990,10 @@ files = [
 name = "mongoengine"
 version = "0.29.0"
 description = "MongoEngine is a Python Object-Document Mapper for working with MongoDB."
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
+markers = "extra == \"legacy\""
 files = []
 develop = false
 
@@ -1958,7 +1960,10 @@ files = [
     {file = "xkcdpass-1.30.0.tar.gz", hash = "sha256:8a3a6b60255da40d0e5c812458280278c82d2c1cb90e48afbd6777dbbf8795c3"},
 ]
 
+[extras]
+legacy = ["blinker", "mongoengine"]
+
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "c62beaf5503e244fd336efbf3bb9017c8903f3cf6af4d2dbe9bdfdff32c06050"
+content-hash = "2e004952e433ab32f91db80d6be7a3987cecb0eaa44f14e23dac08104d974bcb"

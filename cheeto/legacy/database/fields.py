@@ -9,7 +9,7 @@
 
 from mongoengine import IntField, StringField
 
-from ..constants import (DATA_QUOTA_REGEX,
+from ...constants import (DATA_QUOTA_REGEX,
                          DEFAULT_SHELL,
                          GROUP_TYPES,
                          UINT_MAX,
@@ -17,7 +17,7 @@ from ..constants import (DATA_QUOTA_REGEX,
                          USER_STATUSES, 
                          ACCESS_TYPES,
                          SHELLS)
-from ..types import SlurmQOSValidFlags
+from ...types import SlurmQOSValidFlags
 
 
 def POSIXNameField(**kwargs):

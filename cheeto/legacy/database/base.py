@@ -21,10 +21,10 @@ from mongoengine import (
     ListField
 )
 
-from ..config import MongoConfig
-from ..log import Console
-from ..types import is_listlike
-from ..yaml import dumps as dumps_yaml
+from ...config import MongoConfig
+from ...log import Console
+from ...types import is_listlike
+from ...yaml import dumps as dumps_yaml
 
 
 def handler(event):
@@ -108,11 +108,6 @@ class BaseDocument(Document):
                 data[key.lstrip('_') ] = data[key]
                 del data[key]
         return data
-
-    def clean(self):
-        if 'sitename' in self._fields: #type: ignore
-            from .crud import query_site_exists
-            query_site_exists(self.sitename) #type: ignore
 
     def __repr__(self):
         return dumps_yaml(self.to_dict(raw=True, strip_id=False, strip_empty=False))
@@ -212,32 +207,4 @@ def connect_mongoengine(config: MongoConfig, quiet: bool = False):
     if config.user:
         kwargs.update(username=config.user, password=config.password)
     return connect(config.old_database or config.database, **kwargs)
-
-
-async def connect_beanie(config: MongoConfig, quiet: bool = False):
-    from beanie import init_beanie
-    from pymongo import AsyncMongoClient
-
-    from ..models import ALL_MODELS
-
-    if not quiet:
-        _print_config(config)
-    kwargs = dict(
-        tls=config.tls,
-        tlsCAFile=config.tls_ca_file,
-    )
-    if config.user:
-        kwargs.update(username=config.user, password=config.password)
-    client = AsyncMongoClient(f'{config.uri}:{config.port}', **kwargs)
-    await init_beanie(database=client[config.database], document_models=ALL_MODELS)
-    return client
-
-
-async def connect_to_database(config: MongoConfig, quiet: bool = False, odm: str = 'mongoengine'):
-    if odm == 'mongoengine':
-        return connect_mongoengine(config, quiet=quiet)
-    elif odm == 'beanie':
-        return await connect_beanie(config, quiet=quiet)
-    else:
-        raise ValueError(f'Unknown ODM: {odm}')
 

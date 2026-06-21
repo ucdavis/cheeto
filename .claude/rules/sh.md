@@ -1,7 +1,7 @@
 # Running external commands with `sh`
 
-**Scope:** apply when working on `cheeto/slurm.py`, `cheeto/git.py`, `cheeto/mail.py`,
-`cheeto/monitor.py`, `cheeto/cmds/slurm.py` (the modules that shell out via `sh`).
+**Scope:** apply when working on `cheeto/slurm_sync.py`, `cheeto/git_async.py`,
+`cheeto/mail.py`, `cheeto/monitor.py` (the modules that shell out via `sh`).
 
 We invoke external binaries (sacctmgr, scontrol, git, gh, mailx, ipmitool) through the
 [`sh`](https://sh.readthedocs.io/en/latest/usage.html) library, never `subprocess` or raw
@@ -48,8 +48,8 @@ results = await asyncio.gather(cmd_a(...), cmd_b(...))     # run external comman
 - **This matters here:** the async layers (beanie operations, LDAP/IAM sync) run on an event
   loop. Calling a command synchronously (`cmd()` / `cmd(_out=buf)`) blocks that loop for the
   whole subprocess. In any `async def` path that shells out (e.g. a future async sacctmgr
-  sync), **`await` the command** instead of calling it. The synchronous `SAcctMgr`/`cmds/slurm.py`
-  path is fine as-is because it runs outside the loop.
+  sync), **`await` the command** instead of calling it — `cheeto/slurm_sync.py`'s
+  `AsyncSAcctMgr` awaits sacctmgr from the event loop.
 - `_bg=True` is thread-based backgrounding, not asyncio — prefer `await` / `async for` for
   event-loop integration; reserve `_bg` for fire-and-forget in sync code.
 

@@ -17,9 +17,9 @@ from mongoengine import (IntField,
                          EmbeddedDocumentField,
                          CASCADE)
 
-from ..puppet import (SlurmQOSTRES as PuppetSlurmQOSTRES,
+from ...puppet import (SlurmQOSTRES as PuppetSlurmQOSTRES,
                       SlurmQOS as PuppetSlurmQOS)
-from ..utils import size_to_megs
+from ...utils import size_to_megs
 
 from .base import BaseDocument
 from .fields import (POSIXNameField,

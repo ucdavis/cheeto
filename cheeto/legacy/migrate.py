@@ -20,14 +20,14 @@ from mongoengine import DoesNotExist
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
-from ..database.group import GlobalGroup, SiteGroup
-from ..database.site import Site as OldSite
-from ..database.slurm import (
+from .database.group import GlobalGroup, SiteGroup
+from .database.site import Site as OldSite
+from .database.slurm import (
     SiteSlurmAssociation,
     SiteSlurmPartition,
     SiteSlurmQOS,
 )
-from ..database.storage import (
+from .database.storage import (
     Automount as OldAutomount,
     AutomountMap as OldAutomountMap,
     NFSMountSource as OldNFSMountSource,
@@ -36,7 +36,7 @@ from ..database.storage import (
     ZFSMountSource as OldZFSMountSource,
 )
 from ..constants import MIN_SPECIAL_GID, STORAGE_CATEGORIES
-from ..database.user import GlobalUser, SiteUser
+from .database.user import GlobalUser, SiteUser
 from ..models.base import link_target_id
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
@@ -62,7 +62,7 @@ from ..models.storage import (
 )
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
-from .base import Operation
+from ..operations.base import Operation
 
 
 async def _resolve_access_links_for_migration(
@@ -257,7 +257,7 @@ class MigrateAccessStatusGroups(_BulkMigrateOperation):
         # Default LDAP names are not overridable here — the v2 schema's
         # status/access decoupling depends on the canonical mapping (e.g.
         # active=active-users, NOT active=login-ssh-users from v1).
-        from .group import DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS
+        from ..operations.group import DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS
 
         access = dict(DEFAULT_ACCESS_GROUPS)
         access_extras = {

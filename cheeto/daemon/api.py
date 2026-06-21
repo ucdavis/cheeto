@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Securit
 from fastapi.security import APIKeyHeader
 
 from ..config import Config
-from ..database.base import connect_beanie
+from ..db import connect_beanie
 from ..operations.site import ExportRootSSHKeys
 from ..operations.storage import ExportPuppetStorage
 from ..queries.site import find_site

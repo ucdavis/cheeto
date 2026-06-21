@@ -11,7 +11,6 @@ from pymongo import MongoClient
 import pytest
 
 from ..config import get_config
-from ..database import connect_mongoengine
 from ..log import setup as _setup_logging
 from ..types import is_listlike
 
@@ -269,27 +268,20 @@ def hippo_config(config):
     return config.hippo
 
 
-def drop_database(config):
-    conn = connect_mongoengine(config, quiet=True)
-    conn.drop_database(config.database)
-
-
-@pytest.fixture
-def drop_before(db_config):
-    drop_database(db_config)
-
-
-@pytest.fixture
-def drop_after(db_config):
-    yield
-    drop_database(db_config)
-
-
-@pytest.fixture
-def drop_before_after(db_config):
-    drop_database(db_config)
-    yield
-    drop_database(db_config)
+def pytest_collection_modifyitems(config, items):
+    """Skip the v1->v2 migration tests when the optional `legacy` extra
+    (mongoengine) isn't installed. All such tests live in TestMigrate* classes,
+    so their node ids contain 'Migrate'."""
+    try:
+        import mongoengine  # noqa: F401
+        return
+    except ImportError:
+        skip = pytest.mark.skip(
+            reason="needs the optional 'legacy' extra (mongoengine)"
+        )
+        for item in items:
+            if 'Migrate' in item.nodeid:
+                item.add_marker(skip)
 
 
 # ---------------------------------------------------------------------------

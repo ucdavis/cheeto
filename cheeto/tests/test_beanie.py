@@ -51,8 +51,6 @@ from ..operations import (
     AddGroupSudoer,
     AddQOSAllocation,
     EditSlurmQOS,
-    MigrateAccessStatusGroups,
-    MigrateUser,
     ProvisionSlurmAllocation,
     RemoveSlurmAssociation,
     RemoveSlurmPartition,
@@ -96,6 +94,15 @@ from ..operations import (
     SyncUserToLDAP,
 )
 from ..queries.user import root_authorized_keys_text, root_ssh_keys
+
+# v1->v2 migration ops live behind the optional `legacy` extra (mongoengine).
+# Bind the two referenced at module scope only when it's installed; the
+# TestMigrate* classes that use them are skipped otherwise (see conftest).
+try:
+    import mongoengine  # noqa: F401
+    from ..operations import MigrateAccessStatusGroups, MigrateUser
+except ImportError:
+    pass
 
 from .conftest import MONGODB_PORT, access_links, seed_access_status_groups, status_link
 
@@ -2065,7 +2072,7 @@ class TestMigrateAccessStatusGroups:
     ):
         from cheeto.config import MongoConfig
         from cheeto.constants import MIN_SPECIAL_GID
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
         from cheeto.models.group import AccessGroup, StatusGroup
         from cheeto.operations.group import (
             DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS,
@@ -2106,7 +2113,7 @@ class TestMigrateAccessStatusGroups:
 
     async def test_idempotent(self, beanie_client, clean_polymorphic_groups):
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
         from cheeto.models.group import AccessGroup
 
         mongo_cfg = MongoConfig(
@@ -2137,7 +2144,7 @@ class TestMigrateAccessStatusGroups:
         don't apply to special groups so renumbering is safe."""
         from cheeto.config import MongoConfig
         from cheeto.constants import MIN_SPECIAL_GID, MIN_SYSTEM_UID
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
         from cheeto.models.group import AccessGroup, Group
 
         mongo_cfg = MongoConfig(
@@ -2177,7 +2184,7 @@ class TestMigrateAccessStatusGroups:
         self, beanie_client, clean_polymorphic_groups,
     ):
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
         from cheeto.models.group import AccessGroup, StatusGroup
         from cheeto.operations.group import (
             DEFAULT_ACCESS_GROUPS, DEFAULT_STATUS_GROUPS,
@@ -2470,10 +2477,10 @@ class TestMigrateUserAccessFolding:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.user import GlobalUser as OldGlobalUser
-        from cheeto.database.user import SiteUser as OldSiteUser
+        from cheeto.legacy.database import connect_mongoengine
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.user import GlobalUser as OldGlobalUser
+        from cheeto.legacy.database.user import SiteUser as OldSiteUser
 
         # Drop any prior mongoengine alias so we can rebind to a fresh
         # database name without `A different connection ... was already
@@ -5094,7 +5101,7 @@ class TestMigrateStorage:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
 
         disconnect()
         mongo_cfg = MongoConfig(
@@ -5108,9 +5115,9 @@ class TestMigrateStorage:
     @staticmethod
     def _v1_actors(sitename: str):
         """v1 site + GlobalUsers/GlobalGroups needed by source refs."""
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.user import GlobalUser as OldGlobalUser
-        from cheeto.database.group import GlobalGroup as OldGlobalGroup
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.user import GlobalUser as OldGlobalUser
+        from cheeto.legacy.database.group import GlobalGroup as OldGlobalGroup
 
         OldSite(sitename=sitename, fqdn=f'{sitename}.test').save()
         actors = {}
@@ -5147,7 +5154,7 @@ class TestMigrateStorage:
         """The full Farm scenario: home collection w/ defaults, legacy 70T
         group ZFS volume, subdir NFS exports (group + legacy home), a
         new-style collection-resolved home, and the automounts/storages."""
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.storage import (
             Automount as OldAutomount,
             AutomountMap as OldAutomountMap,
             NFSMountSource as OldNFSMountSource,
@@ -5343,7 +5350,7 @@ class TestMigrateStorage:
         """An NFS source with no covering ZFS volume becomes a bare
         unquota'd volume; one whose path equals a ZFS dataset root matches
         it (subpath '')."""
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.storage import (
             NFSMountSource as OldNFSMountSource,
             ZFSMountSource as OldZFSMountSource,
         )
@@ -5401,7 +5408,7 @@ class TestMigrateStorage:
         source must ENRICH it (quota, export config inherited from the
         collection, managed marker) rather than being skipped — and the
         stored host_path must be normalized."""
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.storage import (
             ZFSMountSource as OldZFSMountSource,
             ZFSSourceCollection,
         )
@@ -5457,7 +5464,7 @@ class TestMigrateStorage:
             connection.drop_database(cfg.database)
 
     async def test_missing_owner_skips_storage_not_volume(self, beanie_client):
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.storage import (
             Automount as OldAutomount,
             AutomountMap as OldAutomountMap,
             Storage as OldStorage,
@@ -5510,8 +5517,8 @@ class TestMigrateStorage:
     async def test_cross_site_source(self, beanie_client):
         """v1 mount_source_site shape: source on site A, mount on site B →
         v2 Storage on B, volume on A."""
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.storage import (
             Automount as OldAutomount,
             AutomountMap as OldAutomountMap,
             Storage as OldStorage,
@@ -5573,7 +5580,7 @@ class TestMigrateSitesFilter:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
 
         disconnect()
         mongo_cfg = MongoConfig(
@@ -5585,15 +5592,15 @@ class TestMigrateSitesFilter:
         return connection, mongo_cfg
 
     def _seed_two_sites_v1(self):
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.user import GlobalUser as OldGlobalUser
-        from cheeto.database.user import SiteUser as OldSiteUser
-        from cheeto.database.group import (
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.user import GlobalUser as OldGlobalUser
+        from cheeto.legacy.database.user import SiteUser as OldSiteUser
+        from cheeto.legacy.database.group import (
             GlobalGroup as OldGlobalGroup,
             SiteGroup as OldSiteGroup,
         )
-        from cheeto.database.slurm import SiteSlurmPartition
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.slurm import SiteSlurmPartition
+        from cheeto.legacy.database.storage import (
             Automount as OldAutomount,
             AutomountMap as OldAutomountMap,
             Storage as OldStorage,
@@ -5716,7 +5723,7 @@ class TestMigrateSitesFilter:
             connection.drop_database(cfg.database)
 
     async def test_validate_sites_filter_typo_guard(self, beanie_client):
-        from cheeto.database.site import Site as OldSite
+        from cheeto.legacy.database.site import Site as OldSite
         from cheeto.cmds.ng.migrate import _validate_sites_filter
         from cheeto.log import Console
 
@@ -5742,7 +5749,7 @@ class TestMigrateSlurmAccountsUserGroups:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
 
         disconnect()
         mongo_cfg = MongoConfig(
@@ -5754,15 +5761,15 @@ class TestMigrateSlurmAccountsUserGroups:
         return connection, mongo_cfg
 
     def _seed_v1(self):
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.user import GlobalUser as OldGlobalUser
-        from cheeto.database.user import SiteUser as OldSiteUser
-        from cheeto.database.group import (
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.user import GlobalUser as OldGlobalUser
+        from cheeto.legacy.database.user import SiteUser as OldSiteUser
+        from cheeto.legacy.database.group import (
             GlobalGroup as OldGlobalGroup,
             SiteGroup as OldSiteGroup,
             SiteSlurmAccount,
         )
-        from cheeto.database.slurm import (
+        from cheeto.legacy.database.slurm import (
             SiteSlurmAssociation,
             SiteSlurmPartition,
             SiteSlurmQOS,
@@ -6029,7 +6036,7 @@ class TestMigrateStorageDanglingRefs:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
 
         disconnect()
         mongo_cfg = MongoConfig(
@@ -6041,10 +6048,10 @@ class TestMigrateStorageDanglingRefs:
         return connection, mongo_cfg
 
     async def test_dangling_refs_quarantined(self, beanie_client):
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.user import GlobalUser as OldGlobalUser
-        from cheeto.database.group import GlobalGroup as OldGlobalGroup
-        from cheeto.database.storage import (
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.user import GlobalUser as OldGlobalUser
+        from cheeto.legacy.database.group import GlobalGroup as OldGlobalGroup
+        from cheeto.legacy.database.storage import (
             Automount as OldAutomount,
             AutomountMap as OldAutomountMap,
             Storage as OldStorage,
@@ -6155,7 +6162,7 @@ class TestMigrateSiteGlobalsRerun:
         from mongoengine import disconnect
 
         from cheeto.config import MongoConfig
-        from cheeto.database import connect_mongoengine
+        from cheeto.legacy.database import connect_mongoengine
 
         disconnect()
         mongo_cfg = MongoConfig(
@@ -6167,8 +6174,8 @@ class TestMigrateSiteGlobalsRerun:
         return connection, mongo_cfg
 
     async def test_rerun_with_populated_sticky(self, beanie_client):
-        from cheeto.database.site import Site as OldSite
-        from cheeto.database.group import (
+        from cheeto.legacy.database.site import Site as OldSite
+        from cheeto.legacy.database.group import (
             GlobalGroup as OldGlobalGroup,
             SiteGroup as OldSiteGroup,
         )

@@ -88,18 +88,22 @@ from .storage import (
     SetStorageMount,
     SetVolumeStorageMounts,
 )
-from .migrate import (
-    MigrateAccessStatusGroups,
-    MigrateAutomountMaps,
-    MigrateGroups,
-    MigrateSiteGlobals,
-    MigrateSites,
-    MigrateSlurmAccounts,
-    MigrateSlurmAssociations,
-    MigrateSlurmPartitions,
-    MigrateSlurmQOSes,
-    MigrateStorageVolumes,
-    MigrateStorages,
-    MigrateUser,
-    MigrateUsers,
-)
+
+# The v1 -> v2 migration ops live in cheeto/legacy/migrate.py, behind the
+# optional `legacy` extra. Expose them lazily through this package so
+# `from cheeto.operations import MigrateX` keeps working, while plain
+# `import cheeto.operations` stays mongoengine-free (the import only happens
+# on first access to a Migrate* name, where require_legacy() also fires).
+_LEGACY_MIGRATE_OPS = frozenset({
+    'MigrateAccessStatusGroups', 'MigrateAutomountMaps', 'MigrateGroups',
+    'MigrateSiteGlobals', 'MigrateSites', 'MigrateSlurmAccounts',
+    'MigrateSlurmAssociations', 'MigrateSlurmPartitions', 'MigrateSlurmQOSes',
+    'MigrateStorageVolumes', 'MigrateStorages', 'MigrateUser', 'MigrateUsers',
+})
+
+
+def __getattr__(name):
+    if name in _LEGACY_MIGRATE_OPS:
+        from ..legacy import migrate
+        return getattr(migrate, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

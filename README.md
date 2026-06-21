@@ -19,8 +19,9 @@ cheeto/daemon/      persistent services: celery worker/beat tasks, FastAPI app
 cheeto/operations/  write path: Operation classes (one per mutation/export),
                     transactional, recorded in the History collection
 cheeto/queries/     read path: pure query helpers over the models
-cheeto/models/      beanie (async MongoDB ODM) documents — the v2 data model
-cheeto/database/    v1 mongoengine documents + CRUD (legacy, kept until cutover)
+cheeto/models/      beanie (async MongoDB ODM) documents — the data model
+cheeto/legacy/      v1 mongoengine models + migration, behind the optional
+                    `legacy` extra (used only for the v1->v2 migration)
 ```
 
 External integration modules:
@@ -28,8 +29,8 @@ External integration modules:
 - `cheeto/hippoapi/`, `cheeto/iamapi/` — generated httpx clients for the
   HiPPO and UC Davis IAM APIs (do not hand-edit).
 - `cheeto/ldap_async.py` — bonsai-based async LDAP client/pool.
-- `cheeto/slurm.py` — `sacctmgr`/`scontrol` wrappers built on `sh`
-  (awaitable from async code).
+- `cheeto/slurm_sync.py` — async `sacctmgr` driver + reconcile, built on `sh`.
+- `cheeto/git_async.py` — async git wrapper (used by the puppet sync).
 
 ### Data model (v2, `cheeto/models/`)
 
@@ -49,9 +50,10 @@ External integration modules:
 - **History**: every Operation records an audit entry (author, op name,
   describe() payload).
 
-The v1 mongoengine model (`cheeto/database/`, `cheeto db ...` commands)
-remains operational in parallel; `cheeto ng migrate ...` migrates v1 data
-into the v2 collections.
+The v1 mongoengine model now lives in `cheeto/legacy/`, behind the optional
+`legacy` extra (`poetry install --extras legacy`). It exists only so
+`cheeto ng migrate ...` can migrate v1 data into the v2 collections; the v1
+`cheeto db` CLI has been removed.
 
 ### Operations vs queries
 
@@ -68,8 +70,7 @@ Entry point: `cheeto` (`cheeto.cmds.__main__:main`). Top-level groups:
 ```
 cheeto config            show/write configuration
 cheeto daemon            persistent services: celery worker/beat and REST API
-cheeto db                v1 (mongoengine) database operations
-cheeto ng                v2 (beanie/async) operations:
+cheeto ng                beanie/async operations:
   site | user | group | slurm | storage | history | migrate | hippo | iam | ldap
 cheeto puppet            legacy puppet YAML validation/merging
 cheeto nocloud           cloud-init nocloud template rendering

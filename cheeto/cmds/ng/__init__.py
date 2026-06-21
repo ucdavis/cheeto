@@ -4,7 +4,7 @@ from argparse import Namespace
 from ponderosa import ArgParser
 
 from .. import commands
-from ...database.base import connect_beanie
+from ...db import connect_beanie
 from ...models import User
 
 

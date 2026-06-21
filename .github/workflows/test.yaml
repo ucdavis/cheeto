@@ -52,10 +52,10 @@ jobs:
           path: .venv
           key: pydeps-${{ hashFiles('**/poetry.lock') }}
 
-      - run: poetry install --no-interaction --no-root
+      - run: poetry install --no-interaction --no-root -E legacy
         if: steps.cache-deps.outputs.cache-hit != 'true'
 
-      - run: poetry install --no-interaction
+      - run: poetry install --no-interaction -E legacy
 
       - run: poetry run pytest cheeto/tests --ignore=cheeto/tests/test_db.py -q
 

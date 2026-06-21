@@ -16,7 +16,7 @@ from pymongo import AsyncMongoClient
 
 from .app import app, daemon_config
 from ..config import Config
-from ..database.base import connect_beanie
+from ..db import connect_beanie
 from ..hippo import email_notifier
 from ..iam_async import AsyncIAMAPI
 from ..ldap_async import AsyncLDAPManager
