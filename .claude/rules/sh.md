@@ -1,0 +1,70 @@
+# Running external commands with `sh`
+
+**Scope:** apply when working on `cheeto/slurm_sync.py`, `cheeto/git_async.py`,
+`cheeto/mail.py`, `cheeto/monitor.py` (the modules that shell out via `sh`).
+
+We invoke external binaries (sacctmgr, scontrol, git, gh, mailx, ipmitool) through the
+[`sh`](https://sh.readthedocs.io/en/latest/usage.html) library, never `subprocess` or raw
+shell strings. `sh` runs commands directly (no shell), so there is no quoting/injection
+surface — pass each argument as its own value.
+
+## Core usage
+
+- Resolve a binary explicitly when its presence isn't guaranteed: `sh.which('sacctmgr')`,
+  then `sh.Command(path)`. Plain `from sh import git` works for always-present tools.
+- **`.bake(...)`** pre-binds arguments and returns a new command (currying). This is the
+  backbone of our wrappers — e.g. `SAcctMgr` bakes `-iQ`, then `add = cmd.bake('add')`, then
+  `add.bake('qos', name, *qos.to_slurm())`. Baked commands don't run until *called*.
+- Calling the command runs it: `cmd()` executes and returns a `RunningCommand`
+  (`str(result)` for text, `.stdout`/`.stderr` for bytes, `.exit_code`).
+- Positional args are positional; **keyword args become flags** (`foo(l=True)` → `foo -l`,
+  underscores → dashes). Note: many CLIs here take `key=value` *positional* tokens
+  (sacctmgr `account=foo`), so we pass those as plain strings, not kwargs.
+
+## Special `_`-prefixed kwargs we use
+
+- `_out=` — redirect stdout to a file-like object; we capture into a `StringIO` then
+  `seek(0)` and parse (see `get_slurm_qos_state`).
+- `_in=` — feed stdin (e.g. `mailx` message body).
+- `_cwd=` — working directory (git/gh operations).
+- `_env=` — environment overrides (gh auth).
+- `_iter=True` — iterate output line-by-line as it streams.
+- Others available when needed: `_bg`, `_timeout`, `_ok_code`.
+
+## Async (asyncio)
+
+`sh` ≥ 2.0 (we pin `^2.0.7`) integrates with asyncio. When a command is *called inside a
+running event loop*, the returned `RunningCommand` is awaitable and async-iterable — no
+separate flag is needed in this version (the docs also describe an explicit `_async=True`).
+
+```python
+out = await sh.Command("sacctmgr")("show", "-P", "qos")   # awaits completion, returns output
+async for line in cmd(_iter=True):                        # stream stdout without blocking
+    ...
+results = await asyncio.gather(cmd_a(...), cmd_b(...))     # run external commands concurrently
+```
+
+- Awaiting still raises `sh.ErrorReturnCode` on a bad exit — catch it the same way.
+- **This matters here:** the async layers (beanie operations, LDAP/IAM sync) run on an event
+  loop. Calling a command synchronously (`cmd()` / `cmd(_out=buf)`) blocks that loop for the
+  whole subprocess. In any `async def` path that shells out (e.g. a future async sacctmgr
+  sync), **`await` the command** instead of calling it — `cheeto/slurm_sync.py`'s
+  `AsyncSAcctMgr` awaits sacctmgr from the event loop.
+- `_bg=True` is thread-based backgrounding, not asyncio — prefer `await` / `async for` for
+  event-loop integration; reserve `_bg` for fire-and-forget in sync code.
+
+## Errors
+
+A non-zero exit raises `sh.ErrorReturnCode` (and per-code subclasses like
+`sh.ErrorReturnCode_1`). Catch the specific subclass when a known exit code is expected
+(the slurm sync loop catches `sh.ErrorReturnCode_1` and reports it without aborting the
+batch); let unexpected codes propagate. `e.stdout` / `e.stderr` carry the captured output.
+
+## Conventions in this repo
+
+- Wrap a tool in a small class that bakes its base invocation and exposes one method per
+  subcommand returning a baked command (`SAcctMgr`, `SControl`, `Git`, `Gh`, `Mailx`).
+  Callers decide when to execute.
+- Thread `sudo` via `sh.sudo.bake(binary, ...)` rather than embedding `sudo` in arg lists.
+- Keep command construction (returns a baked `sh.Command`) separate from execution, so
+  commands can be previewed/logged before they run.

@@ -18,7 +18,6 @@ import sys
 from bson import ObjectId
 from bson.int64 import Int64
 from mergedeep import merge, Strategy
-from mongoengine.dereference import DBRef
 from rich.syntax import Syntax
 
 from ruamel import yaml as ryaml
@@ -41,10 +40,6 @@ def objectid_representer(dumper, data):
     return dumper.represent_scalar('tag:yaml.org,2002:str', repr(data))
 
 
-def dbref_representer(dumper, data):
-    return dumper.represent_scalar('tag:yaml.org,2002:str', repr(data))
-
-
 def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper = ryaml.YAML()
     dumper.width = sys.maxsize
@@ -53,7 +48,6 @@ def dumps(obj: Any, *args, many: bool | None = None, **kwargs) -> str:
     dumper.Representer.add_representer(str, str_representer)
     dumper.Representer.add_representer(Int64, RoundTripRepresenter.represent_int)
     dumper.Representer.add_representer(ObjectId, objectid_representer)
-    dumper.Representer.add_representer(DBRef, dbref_representer)
     dumper.Representer.add_representer(set, RoundTripRepresenter.represent_list)
     stream = StringIO()
     dumper.dump(obj, stream, **kwargs)

@@ -5,38 +5,7 @@ ldap:
     searchbase: dc=hpc,dc=ucdavis,dc=edu
     login_dn: cn=admin,dc=hpc,dc=ucdavis,dc=edu
     password: test-password
-    user_status_groups:
-      active: login-ssh-users
-      inactive: inactive-users
-      disabled: disabled-users
-    user_access_groups:
-      login-ssh: login-ssh-users
-      compute-ssh: compute-ssh-users
-      root-ssh: root-ssh-users
-      sudo: sudo-users
-    user_classes:
-      - inetOrgPerson
-      - posixAccount
-      - ldapPublicKey
-    user_attrs:
-      username: uid
-      email: mail
-      uid: uidNumber
-      gid: gidNumber
-      fullname: displayName
-      surname: sn
-      home_directory: homeDirectory
-      shell: loginShell
-      ssh_keys: sshPublicKey
-      #password: userPassword
     user_base: ou=users,dc=hpc,dc=ucdavis,dc=edu
-    group_classes:
-      - posixGroup
-      - groupOfMembers
-    group_attrs:
-      groupname: cn
-      gid: gidNumber
-      members: memberUid
 hippo:
   api_key: ''
   site_aliases:
@@ -54,3 +23,30 @@ mongo:
     user: ''
     password: ''
     database: hpccf
+daemon:
+  default:
+    broker_url: amqp://guest:guest@127.0.0.1:5672//
+    author: cheeto-daemon
+    sites:
+    - test-site
+    tasks:
+      hippo:
+        schedule: 300
+      iam_sync:
+        schedule: 0 2 * * *
+        concurrency: 2
+      slurm_sync:
+        schedule: 600
+        max_deletions: 10
+      sympa:
+        schedule: 3600
+        output_dir: /tmp/cheeto-test-sympa
+      puppet_sync:
+        schedule: 1800
+        repo: /tmp/cheeto-test-puppet
+      # ldap_sync and reap intentionally absent: disabled
+api:
+  default:
+    host: 127.0.0.1
+    port: 8810
+    api_key: test-api-key

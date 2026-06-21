@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 11.10.2024
 
+from dataclasses import field
 import logging
 import pathlib
 from typing import List, Optional, Union, Mapping
@@ -30,19 +31,17 @@ class LDAPConfig(BaseModel):
     servers: List[str]
     searchbase: str
 
-    user_status_groups: Mapping[str, str]
-    user_access_groups: Mapping[str, str]
-
-    user_classes: List[str]
-    user_attrs: Mapping[str, str]
     user_base: Optional[str] = None
-
     login_dn: Optional[str] = None
     password: Optional[str] = None
 
-    group_classes: Optional[List[str]] = None
-    group_attrs: Optional[Mapping[str, str]] = None
-
+    request_timeout_seconds: float = 10.0
+    pool_max_connections: int = 5
+    pool_idle_connections: int = 2
+    use_tls: bool = False
+    auth_mechanism: str = 'SIMPLE'   # 'SIMPLE' | 'GSSAPI' (only SIMPLE wired today)
+    gssapi_keytab: Optional[str] = None
+    gssapi_realm: Optional[str] = None
 
 
 @require_kwargs
@@ -54,8 +53,8 @@ class MongoConfig(BaseModel):
     tls: bool
     password: str
     database: str
+    old_database: Optional[str] = None
     tls_ca_file: Optional[str] = None
-
 
 
 @require_kwargs
@@ -72,6 +71,9 @@ class HippoConfig(BaseModel):
 class IAMConfig(BaseModel):
     api_key: str
     base_url: str
+    grace_days: int = 0
+    expiry_offset_days: int = 30
+    request_timeout_seconds: float = 30.0
 
 
 @require_kwargs
@@ -81,6 +83,137 @@ class SlurmConfig(BaseModel):
     qos_attrs: Mapping[str, str]
 
 
+# A task schedule: int/float seconds interval, a 5-field crontab string, or
+# None/absent to disable the task. int must precede str in the Union so
+# numeric YAML values don't deserialize as strings.
+ScheduleT = Optional[Union[int, str]]
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class HippoTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    post_back: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class IAMSyncTaskConfig(BaseModel):
+    # grace_days / expiry_offset_days come from IAMConfig
+    schedule: ScheduleT = None
+    concurrency: int = 1
+    types: Optional[List[str]] = None
+    max_users: Optional[int] = None
+    # Email users when they are flipped into offboarding.
+    notify: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class LDAPSyncTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    concurrency: int = 1
+    max_deletions: int = 50
+    prune: bool = True
+    force: bool = False
+    # Bypass the incremental gate (sync all records via the normal upsert
+    # path; force additionally delete-recreates).
+    full: bool = False
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SlurmSyncTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    apply: bool = True
+    sudo: bool = False
+    concurrency: int = 8
+    max_deletions: int = 50
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class ReapTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    # Email users when their account is deactivated at the end of offboarding.
+    notify: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class SympaTaskConfig(BaseModel):
+    schedule: ScheduleT = None
+    output_dir: str = '/var/lib/cheeto/sympa'
+    sites: Optional[List[str]] = None
+    ignore: Optional[List[str]] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class PuppetSyncTaskConfig(BaseModel):
+    # Path to the puppet.hpc repo clone on the hub host (deploy step —
+    # the daemon never clones).
+    repo: str
+    schedule: ScheduleT = None
+    sites: Optional[List[str]] = None
+    base_branch: str = 'main'
+    push: bool = True
+    write_keys: bool = True
+    delete_branch: bool = True
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class DaemonTasksConfig(BaseModel):
+    hippo: Optional[HippoTaskConfig] = None
+    iam_sync: Optional[IAMSyncTaskConfig] = None
+    ldap_sync: Optional[LDAPSyncTaskConfig] = None
+    slurm_sync: Optional[SlurmSyncTaskConfig] = None
+    reap: Optional[ReapTaskConfig] = None
+    sympa: Optional[SympaTaskConfig] = None
+    puppet_sync: Optional[PuppetSyncTaskConfig] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class BrokerSSLConfig(BaseModel):
+    # TLS options for the RabbitMQ (Celery) broker connection. Presence of
+    # this block on the daemon config enables broker TLS; map to Celery's
+    # `broker_use_ssl` in cheeto/daemon/app.py.
+    ca_file: Optional[str] = None      # CA that signed the broker cert (server verification)
+    cert_file: Optional[str] = None    # client cert — mutual TLS only
+    key_file: Optional[str] = None     # client key — mutual TLS only
+    cert_reqs: str = 'required'        # 'none' | 'optional' | 'required'
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class DaemonConfig(BaseModel):
+    broker_url: str
+    sites: List[str]
+    author: str = 'cheeto-daemon'
+    timezone: str = 'America/Los_Angeles'
+    beat_schedule_filename: str = '/var/lib/cheeto/celerybeat-schedule'
+    task_time_limit: int = 3600
+    tasks: DaemonTasksConfig = field(default_factory=DaemonTasksConfig)
+    # When set, the broker connection uses TLS (amqps). See BrokerSSLConfig.
+    broker_use_ssl: Optional[BrokerSSLConfig] = None
+
+
+@require_kwargs
+@dataclass(frozen=True)
+class ApiConfig(BaseModel):
+    host: str = '127.0.0.1'
+    port: int = 8000
+    api_key: Optional[str] = None
+    root_path: str = ''
+    # Path prefix the routes are mounted under (e.g. '/cheeto'); normalized
+    # to a leading-slash, no-trailing-slash form when the router is built.
+    prefix: str = ''
+
+
 @require_kwargs
 @dataclass(frozen=True)
 class _Config(BaseModel):
@@ -88,6 +221,8 @@ class _Config(BaseModel):
     hippo: HippoConfig
     ucdiam: IAMConfig
     mongo: Mapping[str, MongoConfig]
+    daemon: Optional[Mapping[str, DaemonConfig]] = None
+    api: Optional[Mapping[str, ApiConfig]] = None
 
 
 @require_kwargs
@@ -97,6 +232,16 @@ class Config(BaseModel):
     hippo: HippoConfig
     ucdiam: IAMConfig
     mongo: MongoConfig
+    daemon: Optional[DaemonConfig] = None
+    api: Optional[ApiConfig] = None
+
+
+def _profiled(section: Optional[Mapping], profile: str):
+    """Resolve a profiled config section, falling back to 'default'; None if
+    the section is absent from the config file."""
+    if not section:
+        return None
+    return section.get(profile, section.get('default'))
 
 
 def get_config(config_path: Optional[pathlib.Path] = None,
@@ -115,8 +260,10 @@ def get_config(config_path: Optional[pathlib.Path] = None,
         return None
     else:
         return Config(
-            ldap = config.ldap[profile],
-            mongo = config.mongo.get(profile, config.mongo[list(config.mongo.keys())[0]]),
+            ldap = config.ldap.get(profile, config.ldap['default']),
+            mongo = config.mongo.get(profile, config.mongo['default']),
             hippo = config.hippo,
-            ucdiam = config.ucdiam
+            ucdiam = config.ucdiam,
+            daemon = _profiled(config.daemon, profile),
+            api = _profiled(config.api, profile)
         )

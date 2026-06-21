@@ -1,0 +1,72 @@
+from argparse import Namespace
+
+from ponderosa import ArgParser
+from rich.table import Table
+
+from .. import commands
+from ...log import Console
+from ...models.history import History
+from ...models.user import User
+from ._args import user_args
+
+
+@user_args.apply()
+@commands.register('ng', 'history',
+                   help='Query operation history')
+async def history_cmd(args: Namespace):
+    console = Console()
+
+    filters = []
+    if args.op:
+        filters.append(History.op == args.op)
+    if args.user:
+        author = await User.find_one(User.name == args.user)
+        if author is None:
+            console.print(f'[red]User {args.user} not found[/]')
+            return 1
+        filters.append(History.author.id == author.id)
+
+    # fetch_links=True resolves History.author in the initial aggregation —
+    # without it we'd pay N extra round-trips in the render loop to fetch each
+    # entry's author one at a time.
+    query = (
+        History.find(*filters, fetch_links=True, nesting_depth=1)
+        .sort('-timestamp')
+        .limit(args.limit)
+    )
+    entries = await query.to_list()
+
+    if not entries:
+        console.print('[dim]No history entries found[/]')
+        return 0
+
+    table = Table(title='Operation History')
+    table.add_column('Timestamp', style='cyan')
+    table.add_column('Operation', style='green')
+    table.add_column('Author', style='yellow')
+    table.add_column('Changes')
+
+    for entry in entries:
+        # entry.author is a resolved User when the link still points at a
+        # live record, None when it was never set, or an unresolved Link
+        # when the target was dropped (e.g. collections wiped) — fetch_links
+        # leaves the raw Link in place rather than raising.
+        if isinstance(entry.author, User):
+            author_name = entry.author.name
+        elif entry.author is None:
+            author_name = ''
+        else:
+            author_name = 'Unknown'
+        ts = entry.timestamp.strftime('%Y-%m-%d %H:%M:%S')
+        changes = ', '.join(f'{k}={v}' for k, v in entry.changes.items())
+        table.add_row(ts, entry.op, author_name, changes)
+
+    console.print(table)
+
+
+@history_cmd.args()
+def _(parser: ArgParser):
+    parser.add_argument('--op', default=None,
+                        help='Filter by operation name (e.g., create_user)')
+    parser.add_argument('--limit', '-n', type=int, default=50,
+                        help='Maximum entries to show (default: 50)')

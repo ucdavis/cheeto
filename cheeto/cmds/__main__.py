@@ -11,12 +11,11 @@ import sys
 
 from . import (commands,
                config,
-               database,
-               hippo,
+               daemon,
                monitor,
+               ng,
                nocloud,
                puppet,
-               slurm,
                ipython)
 
 

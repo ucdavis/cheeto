@@ -35,7 +35,8 @@ from .constants import (UINT_MAX,
                         USER_TYPES, 
                         USER_STATUSES, 
                         ACCESS_TYPES, 
-                        QOS_TRES_REGEX)
+                        QOS_TRES_REGEX,
+                        SHELLS)
 
 def is_listlike(obj):
     return isinstance(obj, (Sequence, set)) and not isinstance(obj, (str, bytes, bytearray))
@@ -234,20 +235,12 @@ LinuxGID = UInt32
 # TODO: Needs to actually be "x" or "min length"
 LinuxPassword = Annotated[str, mf.String(validate=mv.Length(min=0))]
 
-Shell = Annotated[str, mf.String(validate=mv.OneOf(ENABLED_SHELLS | DISABLED_SHELLS))]
+Shell = Annotated[str, mf.String(validate=mv.OneOf(SHELLS))]
 
 DataQuota = Annotated[str, mf.String(validate=mv.Regexp(r'[+-]?([0-9]*[.])?[0-9]+[MmGgTtPp]'))]
 
-SlurmQOSValidFlags = ("DenyOnLimit",
-                      "EnforceUsageThreshold",
-                      "NoDecay",
-                      "NoReserve",
-                      "OverPartQOS",
-                      "PartitionMaxNodes",
-                      "PartitionMinNodes",
-                      "PartitionTimeLimit",
-                      "RequiresReservation",
-                      "UsageFactorSafe")
+from .constants import SLURM_QOS_VALID_FLAGS
+SlurmQOSValidFlags = SLURM_QOS_VALID_FLAGS
 
 SlurmQOSFlag = Annotated[str, mf.String(validate=mv.OneOf(SlurmQOSValidFlags))]
 

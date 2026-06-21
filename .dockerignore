@@ -1,0 +1,23 @@
+# Keep the build context small and free of secrets / local cruft.
+.git
+.gitignore
+.github
+.venv
+**/__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+dist
+build
+*.egg-info
+
+# Local/dev-only material that must never reach the image
+scripts
+*.md
+!README.md
+config.yaml
+config*.yaml
+.env
+.cursor
+.claude

@@ -168,3 +168,37 @@ class RemovedFromGroupEmail(Email):
     @property
     def header(self) -> str:
         return 'You have been removed from a group'
+
+
+class AccountOffboardingEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'offboarding-warning.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        return 'UCD HPC: Account Scheduled for Deactivation'
+
+    @property
+    def header(self) -> str:
+        return 'Your account has been marked for offboarding'
+
+
+class AccountDeactivatedEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'account-deactivated.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        return 'UCD HPC: Account Deactivated'
+
+    @property
+    def header(self) -> str:
+        return 'Your account has been deactivated'
