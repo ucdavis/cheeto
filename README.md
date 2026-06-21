@@ -132,6 +132,40 @@ GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
 If `api.api_key` is set in the config, requests must send a matching
 `X-API-Key` header; unknown sites return 404.
 
+### Container
+
+The `Dockerfile` (base `python:3.13-slim`) builds one image that runs any
+daemon role; pick the role as the command. Mount the config at
+`/etc/cheeto/config.yaml` (or set `CHEETO_CONFIG`):
+
+```
+docker build -t cheeto .
+docker run --rm -v /etc/cheeto/config.yaml:/etc/cheeto/config.yaml:ro \
+    cheeto daemon worker          # hub worker (also: beat | api --host 0.0.0.0)
+```
+
+The image deliberately does **not** bundle a Slurm client — Slurm's RPC is
+only compatible across a few major releases, so the **site worker** binds the
+head node's own Slurm install (matching the cluster's version) plus the
+shared munge key. Mount the key at `/run/munge.key` (read-only is fine); the
+entrypoint copies it into place and starts `munged` whenever it is present:
+
+```
+docker run --rm --network host \
+    -v /etc/cheeto/config.yaml:/etc/cheeto/config.yaml:ro \
+    -v /etc/munge/munge.key:/run/munge.key:ro \
+    -v /usr/bin/sacctmgr:/usr/bin/sacctmgr:ro \
+    -v /usr/bin/scontrol:/usr/bin/scontrol:ro \
+    -v /usr/lib64/slurm:/usr/lib64/slurm:ro \
+    -v /etc/slurm/slurm.conf:/etc/slurm/slurm.conf:ro \
+    cheeto daemon worker --site <name>
+```
+
+Slurm install paths vary by head-node distro (the example is RHEL-style);
+adjust the binary/lib mounts and `LD_LIBRARY_PATH` to match, and ensure
+`libslurm.so.*` is reachable. The hub worker, beat, and api need none of the
+Slurm/munge mounts.
+
 ## Configuration
 
 YAML at `~/.config/cheeto/config.yaml` (override with `--config`).
