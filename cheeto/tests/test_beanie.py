@@ -4491,6 +4491,31 @@ class TestExportRootSSHKeys:
         scoped = await ExportRootSSHKeys.run(beanie_client, None, sitename='g1')
         assert [b.name for b in scoped] == ['g_a']
 
+    async def test_skip_history_suppresses_insert(self, beanie_client):
+        from cheeto.models.history import History
+
+        site = Site(name='rkhist', fqdn='rkhist.test')
+        await site.insert()
+        await self._admin(
+            'rk_h', 80010, access=['login-ssh', 'root-ssh'], site=site,
+            keys=['ssh-ed25519 AAAAh h@host'],
+        )
+
+        # skip_history=True: still returns the blocks, writes no History row.
+        blocks = await ExportRootSSHKeys.run(
+            beanie_client, None, sitename='rkhist', skip_history=True,
+        )
+        assert blocks  # admin with a key -> non-empty
+        assert await History.find_one(
+            History.op == 'export_root_ssh_keys',
+        ) is None
+
+        # Default: the History row is written (the flag is opt-in).
+        await ExportRootSSHKeys.run(beanie_client, None, sitename='rkhist')
+        assert await History.find_one(
+            History.op == 'export_root_ssh_keys',
+        ) is not None
+
 
 class TestLDAPUserRecordSshKeys:
     """The LDAP user projection prefixes every SSH key with the same

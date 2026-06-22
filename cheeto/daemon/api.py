@@ -74,7 +74,8 @@ def create_api(config: Config, client=None) -> FastAPI:
         sitename = resolved.name if resolved is not None else None
         blocks = await ExportRootSSHKeys.run(request.app.state.client,
                                              None,
-                                             sitename=sitename)
+                                             sitename=sitename,
+                                             skip_history=True)
         return {'root-ssh-public-keys': root_ssh_keys(blocks)}
 
     @router.get('/puppet/storage/{site}')
@@ -82,7 +83,8 @@ def create_api(config: Config, client=None) -> FastAPI:
                             sitename: str = Depends(resolved_sitename)) -> dict:
         return await ExportPuppetStorage.run(request.app.state.client,
                                              None,
-                                             sitename=sitename)
+                                             sitename=sitename,
+                                             skip_history=True)
 
     api.include_router(router, prefix=_router_prefix(config))
     return api
