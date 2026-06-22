@@ -49,6 +49,10 @@ class Operation(ABC):
     def __init__(self, client: AsyncMongoClient, author: User | None) -> None:
         self.client = client
         self.author = author
+        # Set per-run via run(skip_history=...). When True, _execute_and_log
+        # skips the History insert but still logs — for frequently-hit
+        # read-only ops (e.g. the API exports) that would otherwise spam it.
+        self.skip_history = False
         self.logger = logging.getLogger(
             f'{__name__}.{self.__class__.__name__}'
         )
@@ -63,12 +67,13 @@ class Operation(ABC):
 
     async def _execute_and_log(self, session: AsyncClientSession) -> Any:
         result = await self.execute(session)
-        await History(
-            op=self.op_name,
-            author=self.author,
-            changes=self.describe(),
-            timestamp=datetime.now(timezone.utc),
-        ).insert(session=session)
+        if not self.skip_history:
+            await History(
+                op=self.op_name,
+                author=self.author,
+                changes=self.describe(),
+                timestamp=datetime.now(timezone.utc),
+            ).insert(session=session)
         self.logger.info(
             '%s by %s: %s',
             self.op_name,
@@ -90,6 +95,8 @@ class Operation(ABC):
                 return await self._execute_and_log(session)
 
     @classmethod
-    async def run(cls, client: AsyncMongoClient, author: User | None, **kwargs: Any) -> Any:
+    async def run(cls, client: AsyncMongoClient, author: User | None,
+                  *, skip_history: bool = False, **kwargs: Any) -> Any:
         op = cls(client, author, **kwargs)
+        op.skip_history = skip_history
         return await op._run()

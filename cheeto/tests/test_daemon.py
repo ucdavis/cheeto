@@ -685,6 +685,26 @@ class TestDaemonApi:
         assert resp.status_code == 200
         assert 'api_admin' in resp.text
 
+    async def test_export_endpoints_skip_history(
+        self, beanie_client, config, rk_site,
+    ):
+        """The read-only export endpoints must not spam the History collection
+        (they pass skip_history=True)."""
+        api = create_api(config, client=beanie_client)
+        async with _api_client(api) as client:
+            rk = await client.get('/puppet/root-keys/api-site',
+                                  headers={'X-API-Key': 'test-api-key'})
+            st = await client.get('/puppet/storage/api-site',
+                                  headers={'X-API-Key': 'test-api-key'})
+        assert rk.status_code == 200
+        assert st.status_code == 200
+        assert await History.find_one(
+            History.op == 'export_root_ssh_keys',
+        ) is None
+        assert await History.find_one(
+            History.op == 'export_puppet_storage',
+        ) is None
+
     async def test_router_prefix_mounts_routes(
         self, beanie_client, config, rk_site,
     ):
