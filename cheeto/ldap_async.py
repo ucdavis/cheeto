@@ -308,6 +308,11 @@ class LDAPClientFactory:
         self.config = config
 
     def build_client(self) -> LDAPClient:
+        # Process-global: enables libldap's C-library debug output (TLS/connect
+        # diagnostics) before any connection is opened. Idempotent, so calling
+        # it per client build is harmless.
+        if self.config.debug:
+            bonsai.set_debug(True, self.config.debug_level)
         # bonsai accepts only one URL per client; we use the first today.
         cli = LDAPClient(self.config.servers[0], tls=self.config.use_tls)
         if self.config.auth_mechanism == 'SIMPLE':

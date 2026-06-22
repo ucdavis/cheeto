@@ -43,6 +43,13 @@ class LDAPConfig(BaseModel):
     gssapi_keytab: Optional[str] = None
     gssapi_realm: Optional[str] = None
 
+    # Turn on bonsai's debug mode + the underlying libldap C library debug
+    # output (TLS handshake, connection setup, etc.). debug_level maps to
+    # libldap's LDAP_OPT_DEBUG_LEVEL; -1 enables everything (level 0 prints
+    # nothing from the C library, so it must be non-zero to be useful).
+    debug: bool = False
+    debug_level: int = -1
+
 
 @require_kwargs
 @dataclass(frozen=True)
