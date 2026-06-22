@@ -51,10 +51,13 @@ RUN poetry install --only main
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim-bookworm
 
-# git + openssh-client drive the puppet repo sync (cheeto/git_async.py pushes
-# over SSH); git only *Recommends* openssh-client, which --no-install-recommends
-# skips, so name it explicitly.
+# ca-certificates provides the public CA bundle libldap verifies the LDAPS
+# server cert against — bonsai sets no CA of its own, so without it the TLS
+# handshake fails as LDAP_SERVER_DOWN. git + openssh-client drive the puppet
+# repo sync (cheeto/git_async.py pushes over SSH); git only *Recommends*
+# openssh-client, which --no-install-recommends skips, so name it explicitly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
         libldap-2.5-0 \
         libsasl2-2 \
         libkrb5-3 \
