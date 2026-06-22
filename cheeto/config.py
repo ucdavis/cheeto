@@ -43,6 +43,16 @@ class LDAPConfig(BaseModel):
     gssapi_keytab: Optional[str] = None
     gssapi_realm: Optional[str] = None
 
+    # Explicit TLS trust for libldap. Debian builds OpenLDAP against GnuTLS,
+    # which (unlike the OpenSSL build) does NOT fall back to the system CA
+    # store — it only verifies against TLS_CACERT. Outside hosts that ship an
+    # /etc/ldap/ldap.conf (e.g. slim containers) ca_file must point at the CA
+    # bundle, e.g. /etc/ssl/certs/ca-certificates.crt, or verification fails as
+    # "peer cert untrusted". cert_policy maps to bonsai.set_cert_policy:
+    # 'demand'/'try' verify (default), 'allow'/'never' skip (debug only).
+    ca_file: Optional[str] = None
+    cert_policy: Optional[str] = None
+
     # Turn on bonsai's debug mode + the underlying libldap C library debug
     # output (TLS handshake, connection setup, etc.). debug_level maps to
     # libldap's LDAP_OPT_DEBUG_LEVEL; -1 enables everything (level 0 prints

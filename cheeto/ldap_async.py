@@ -315,6 +315,12 @@ class LDAPClientFactory:
             bonsai.set_debug(True, self.config.debug_level)
         # bonsai accepts only one URL per client; we use the first today.
         cli = LDAPClient(self.config.servers[0], tls=self.config.use_tls)
+        # Debian's libldap uses GnuTLS, which won't use the system CA store
+        # implicitly; point it at an explicit bundle (TLS_CACERT) when set.
+        if self.config.ca_file:
+            cli.set_ca_cert(self.config.ca_file)
+        if self.config.cert_policy:
+            cli.set_cert_policy(self.config.cert_policy)
         if self.config.auth_mechanism == 'SIMPLE':
             cli.set_credentials(
                 'SIMPLE',
