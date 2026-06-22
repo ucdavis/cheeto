@@ -28,4 +28,4 @@ print "cheeto: bumped ${old} -> ${new}; committing, tagging v${new}, and pushing
 git add pyproject.toml cheeto/__init__.py
 git commit -m v$new
 git tag v$new
-git push --atomic v$new
+git push --atomic origin $(git rev-parse --abbrev-ref HEAD) v$new
