@@ -8,8 +8,10 @@
 # too old for a modern slurmdbd, so the per-site Slurm worker bind-mounts the
 # head node's own sacctmgr/scontrol + libs + slurm.conf at runtime (version
 # always matches the cluster). munge is installed here; the shared key is
-# mounted and munged is started by the entrypoint. See the README "Container"
-# section for the runtime mount/env contract.
+# mounted and munged is started by the entrypoint. git + openssh-client are
+# installed for the hub worker's puppet repo sync; its deploy key is mounted and
+# the entrypoint wires GIT_SSH_COMMAND. See the README "Container" section for
+# the runtime mount/env contract.
 
 # ---------------------------------------------------------------------------
 # Builder: compile C-extension deps (python-ldap, gssapi, bonsai, pyescrypt)
@@ -49,6 +51,9 @@ RUN poetry install --only main
 # ---------------------------------------------------------------------------
 FROM python:3.13-slim-bookworm
 
+# git + openssh-client drive the puppet repo sync (cheeto/git_async.py pushes
+# over SSH); git only *Recommends* openssh-client, which --no-install-recommends
+# skips, so name it explicitly.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libldap-2.5-0 \
         libsasl2-2 \
@@ -56,6 +61,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libgssapi-krb5-2 \
         libgomp1 \
         munge \
+        git \
+        openssh-client \
     && rm -rf /var/lib/apt/lists/* \
     # Drop any key the package may have generated: the entrypoint starts
     # munged only when a key is *mounted*, so non-Slurm roles never run it.
@@ -70,6 +77,16 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     LD_LIBRARY_PATH="/usr/lib64:/usr/lib64/slurm" \
     SLURM_CONF="/etc/slurm/slurm.conf" \
     CHEETO_CONFIG="/etc/cheeto/config.yaml"
+
+# GitHub's published SSH host keys (https://api.github.com/meta .ssh_keys), baked
+# so the puppet-sync git push verifies the host without a TOFU prompt. The
+# entrypoint points UserKnownHostsFile at this file (plus an optional mounted
+# augment). Refresh on rebuild if GitHub rotates its host keys.
+COPY <<-"EOF" /etc/cheeto/ssh/known_hosts.github
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+EOF
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh

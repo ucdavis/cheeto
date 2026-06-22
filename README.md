@@ -210,6 +210,32 @@ adjust the binary/lib mounts and `LD_LIBRARY_PATH` to match, and ensure
 `libslurm.so.*` is reachable. The hub worker, beat, and api need none of the
 Slurm/munge mounts.
 
+The **hub worker** runs `puppet_sync`, which commits and pushes to the puppet.hpc
+repo over SSH. The image bundles `git` + `openssh-client` and bakes GitHub's
+published host keys; supply a deploy key (and, if you cloned it elsewhere, the
+repo) at runtime:
+
+```
+docker run --rm \
+    -v /etc/cheeto/config.yaml:/etc/cheeto/config.yaml:ro \
+    -v /etc/cheeto/puppet-deploy-key:/run/cheeto/git-ssh-key:ro \
+    -v /var/lib/cheeto/puppet.hpc:/var/lib/cheeto/puppet.hpc \
+    -e GIT_AUTHOR_NAME="cheeto-daemon" \
+    -e GIT_AUTHOR_EMAIL="cheeto-daemon@hpc.ucdavis.edu" \
+    cheeto daemon worker          # hub worker
+```
+
+When the deploy key is present at `/run/cheeto/git-ssh-key` (override the path
+with `GIT_SSH_KEY`), the entrypoint copies it to a private `0400` location and
+exports `GIT_SSH_COMMAND` so `git` uses it with verified host keys — the SSH
+user is always `git` (from the `git@github.com:…` remote), so no SSH `User`
+config is needed. The repo at `daemon.tasks.puppet_sync.repo` must be **cloned
+out-of-band** with a `git@github.com:…` (SSH) origin and mounted read-write; the
+daemon never clones. `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` set the commit
+identity (without them git can't commit). To verify a host key beyond GitHub's
+baked set (e.g. during a key rotation), mount an extra file at
+`/run/cheeto/known_hosts:ro` — it augments, not replaces, the baked keys.
+
 ## Configuration
 
 YAML at `~/.config/cheeto/config.yaml` (override with `--config`).
