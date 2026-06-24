@@ -21,7 +21,7 @@ from ...operations import (
     SetStorageMount,
     SetVolumeStorageMounts,
 )
-from ...queries import find_site_by_name
+from ...queries import find_group_by_name, find_site_by_name, find_user_by_name
 from ...queries.storage import (
     find_automount_map,
     find_volume,
@@ -33,7 +33,7 @@ from ...queries.storage import (
     list_site_volumes,
     mount_mechanism_label,
 )
-from ._args import site_args, user_args
+from ._args import group_args, site_args, user_args
 
 
 @commands.register('ng', 'storage',
@@ -101,20 +101,51 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@user_args.apply()
+@group_args.apply()
 @commands.register('ng', 'storage', 'list',
-                   help='List storage records at a site')
+                   help='List storage records at a site, optionally filtered '
+                        'by owner (--user), group, and/or category')
 async def storage_list(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
         console.print(f'[red]Site {args.site} not found[/]')
         return 1
-    storages = await list_site_storages(site, category=args.category)
-    table = Table(title=f'Storages on {args.site} (count={len(storages)})')
+
+    owner_id = group_id = None
+    if args.user:
+        owner = await find_user_by_name(args.user)
+        if owner is None:
+            console.print(f'[red]User {args.user} not found[/]')
+            return 1
+        owner_id = owner.id
+    if args.group:
+        group = await find_group_by_name(args.group)
+        if group is None:
+            console.print(f'[red]Group {args.group} not found[/]')
+            return 1
+        group_id = group.id
+
+    storages = await list_site_storages(
+        site, category=args.category, owner_id=owner_id, group_id=group_id,
+    )
+
+    desc = []
+    if args.user:
+        desc.append(f'owner={args.user}')
+    if args.group:
+        desc.append(f'group={args.group}')
+    if args.category:
+        desc.append(f'category={args.category}')
+    desc.append(f'count={len(storages)}')
+    table = Table(title=f'Storages on {args.site} ({", ".join(desc)})')
     table.add_column('name', style='green', no_wrap=True)
     table.add_column('category', style='cyan')
     table.add_column('owner')
+    table.add_column('group')
     table.add_column('volume', style='magenta')
+    table.add_column('host')
     table.add_column('subpath', style='dim')
     table.add_column('mount', style='yellow')
     table.add_column('type', style='blue')
@@ -125,8 +156,9 @@ async def storage_list(args: Namespace):
         except ValueError as e:
             mount = f'[red]{e}[/]'
         table.add_row(
-            s.name, s.category, s.owner.name, s.volume.name,
-            s.subpath or '—', mount, mount_mechanism_label(s), s.quota or '—',
+            s.name, s.category, s.owner.name, s.group.name, s.volume.name,
+            s.host, s.subpath or '—', mount, mount_mechanism_label(s),
+            s.quota or '—',
         )
     console.print(table)
 

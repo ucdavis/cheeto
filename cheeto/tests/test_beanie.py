@@ -5693,6 +5693,50 @@ class TestVolumeAllocationOps:
             )
 
 
+class TestListSiteStorages:
+    """list_site_storages filtering by owner / group / category (AND)."""
+
+    async def _seed(self, beanie_client):
+        from cheeto.queries import find_group_by_name
+        site = Site(name='ls_site', fqdn='ls.test')
+        await site.insert()
+        alice, _ = await CreateUser.run(
+            beanie_client, None, name='alice', email='a@t.com',
+            uid=80001, fullname='Alice',
+        )
+        bob, _ = await CreateUser.run(
+            beanie_client, None, name='bob', email='b@t.com',
+            uid=80002, fullname='Bob',
+        )
+        alice_grp = await find_group_by_name('alice')
+        bob_grp = await find_group_by_name('bob')
+        vol = await _seed_volume(site, name='vol1', host='nas01',
+                                 host_path='/nas01/vol1')
+        # alice owns a home (group alice) and a share whose group is bob's
+        await Storage(name='alice', site=site, category='home',
+                      owner=alice, group=alice_grp, volume=vol).insert()
+        await Storage(name='bob', site=site, category='home',
+                      owner=bob, group=bob_grp, volume=vol).insert()
+        await Storage(name='shared1', site=site, category='share',
+                      owner=alice, group=bob_grp, volume=vol).insert()
+        return site, alice, bob, alice_grp, bob_grp
+
+    async def test_filters(self, beanie_client):
+        from cheeto.queries.storage import list_site_storages
+        site, alice, bob, alice_grp, bob_grp = await self._seed(beanie_client)
+
+        async def names(**kw):
+            return {s.name for s in await list_site_storages(site, **kw)}
+
+        assert await names() == {'alice', 'bob', 'shared1'}
+        assert await names(owner_id=alice.id) == {'alice', 'shared1'}
+        assert await names(group_id=bob_grp.id) == {'bob', 'shared1'}
+        assert await names(category='home') == {'alice', 'bob'}
+        assert await names(owner_id=alice.id, category='home') == {'alice'}
+        assert await names(owner_id=alice.id,
+                           group_id=bob_grp.id) == {'shared1'}
+
+
 class TestMigrateStorage:
     """v1 storage (collections + NFS/ZFS sources + automounts) → v2
     (StorageVolume + Storage + AutomountMap), incl. the Farm legacy acid
