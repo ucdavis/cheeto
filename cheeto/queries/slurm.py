@@ -34,6 +34,13 @@ from .group import group_members_at_site, user_groups_at_site
 from .user import find_users
 
 
+def _slurm_sticky_account_ids(site: Site) -> set[PydanticObjectId]:
+    """Ids of the SlurmAccounts in `site.slurm.sticky` — the accounts every
+    at-site user implicitly has access to. Mirrors `_sticky_group_ids` in
+    `queries/group.py` (the group-membership sticky list)."""
+    return {link_target_id(link) for link in site.slurm.sticky}
+
+
 def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
     """Sum cpus/gpus/mem across a list of SlurmAllocations into a single SlurmTRES.
 
@@ -127,9 +134,7 @@ async def user_slurm_at_site(user: User, site: Site) -> list[UserGroupSlurm]:
             UserSiteInfo.site.id == site.id,
         )
         if usi is not None:
-            sticky_account_ids = {
-                link_target_id(link) for link in site.slurm.sticky
-            }
+            sticky_account_ids = _slurm_sticky_account_ids(site)
 
     if not group_roles and not sticky_account_ids:
         return []
@@ -509,18 +514,25 @@ async def build_desired_slurm_state(site: Site):
         )
 
     # Associations: each (group, partition, qos) × eligible members/slurmers.
+    # Accounts in `site.slurm.sticky` are available to every at-site user, so
+    # their roster is every slurm-eligible user (sticky ∩ eligible == eligible)
+    # rather than just the group's members/slurmers.
+    sticky_account_ids = _slurm_sticky_account_ids(site)
     roster_cache: dict[PydanticObjectId, set[str]] = {}
     used_groups: set[str] = set()
     for assoc in await list_associations_at_site(site):
         group = assoc.account.group          # resolved at nesting_depth=2
         partition_name = assoc.partition.name
         qos_name = assoc.qos.name
-        if group.id not in roster_cache:
-            roster = await group_members_at_site(group, site)
-            roster_cache[group.id] = (
-                set(roster['members']) | set(roster['slurmers'])
-            )
-        members = roster_cache[group.id] & eligible
+        if assoc.account.id in sticky_account_ids:
+            members = eligible
+        else:
+            if group.id not in roster_cache:
+                roster = await group_members_at_site(group, site)
+                roster_cache[group.id] = (
+                    set(roster['members']) | set(roster['slurmers'])
+                )
+            members = roster_cache[group.id] & eligible
         if members:
             used_groups.add(group.name)
         for username in members:
