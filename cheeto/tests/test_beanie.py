@@ -73,6 +73,8 @@ from ..operations import (
     RemoveGroupMember,
     RemoveSiteUser,
     RemoveUserAccess,
+    ClearOffboardingSiteStatuses,
+    ClearRedundantSiteStatuses,
     SetUserPassword,
     SetUserShell,
     SetUserStatus,
@@ -1013,6 +1015,81 @@ class TestUserMutationOps:
         assert fetched.status is not None
         assert fetched.status.status_name == 'inactive'
         assert any('status=inactive' in c for c in fetched.comments)
+
+    async def _site_with_usi(self, user, *, usi_status):
+        site = Site(name='mut_site', fqdn='mut.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link(usi_status) if usi_status else None,
+        ).insert()
+        return site
+
+    async def test_set_user_status_site_redundant_cleared(
+        self, beanie_client, user,
+    ):
+        # Global status is 'active'; setting the per-site status to 'active'
+        # too is redundant, so it should be stored as None (fall back).
+        site = await self._site_with_usi(user, usi_status='inactive')
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='active', reason='r', site='mut_site',
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        assert usi.status is None
+
+    async def test_set_user_status_site_divergent_kept(
+        self, beanie_client, user,
+    ):
+        # A per-site status that differs from the global one is a real
+        # override and must be stored.
+        site = await self._site_with_usi(user, usi_status='active')
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='disabled', reason='r', site='mut_site',
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+            fetch_links=True, nesting_depth=1,
+        )
+        assert usi.status is not None
+        assert usi.status.status_name == 'disabled'
+
+    async def test_set_user_status_site_reset(self, beanie_client, user):
+        from datetime import datetime as _dt
+        site = await self._site_with_usi(user, usi_status='disabled')
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
+        usi.expires_at = _dt(2030, 1, 1)
+        await usi.save()
+
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', reason='r', site='mut_site', reset=True,
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        assert usi.status is None
+        assert usi.expires_at is None
+
+    async def test_set_user_status_reset_requires_site(
+        self, beanie_client, user,
+    ):
+        with pytest.raises(ValueError, match='reset requires a site'):
+            await SetUserStatus.run(
+                beanie_client, None,
+                name='mutuser', reason='r', reset=True,
+            )
+
+    async def test_set_user_status_requires_status_without_reset(
+        self, beanie_client, user,
+    ):
+        with pytest.raises(ValueError, match='status is required'):
+            await SetUserStatus.run(
+                beanie_client, None, name='mutuser', reason='r',
+            )
 
     async def test_set_user_type(self, beanie_client, user):
         await SetUserType.run(
@@ -2291,6 +2368,120 @@ class TestUserActiveSites:
         assert await user_active_sites(user) == []
 
 
+class TestUserSiteOverrides:
+    """`user_site_overrides` reports per-site status/access overrides, with
+    None/[] marking 'inherit from global'."""
+
+    async def test_overrides_and_inherit(self, beanie_client):
+        from cheeto.queries import user_site_overrides
+
+        user = User(
+            name='so_user', email='so@test.com', uid=911001, gid=911001,
+            fullname='SO User', home_directory='/home/so_user',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        # divergent overrides
+        site_a = Site(name='so_a', fqdn='so-a.test')
+        await site_a.insert()
+        await UserSiteInfo(
+            user=user, site=site_a,
+            status=await status_link('disabled'),
+            access=await access_links(['login-ssh', 'compute-ssh']),
+        ).insert()
+        # no overrides -> inherit
+        site_b = Site(name='so_b', fqdn='so-b.test')
+        await site_b.insert()
+        await UserSiteInfo(user=user, site=site_b).insert()
+
+        rows = await user_site_overrides(user)
+        assert rows == [
+            {'site': 'so_a', 'status': 'disabled',
+             'access': ['login-ssh', 'compute-ssh']},
+            {'site': 'so_b', 'status': None, 'access': []},
+        ]
+
+    async def test_empty_when_no_sites(self, beanie_client):
+        from cheeto.queries import user_site_overrides
+
+        user = User(
+            name='so_none', email='son@test.com', uid=911002, gid=911002,
+            fullname='SO None', home_directory='/home/so_none',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        assert await user_site_overrides(user) == []
+
+
+class TestOperationRegistry:
+    """The op_name -> Operation registry populated via __init_subclass__."""
+
+    async def test_lookup_and_names(self):
+        from cheeto.operations import get_operation, operation_names
+        names = operation_names()
+        assert 'set_user_status' in names
+        assert 'create_user' in names
+        assert get_operation('set_user_status') is SetUserStatus
+        assert get_operation('does_not_exist') is None
+
+    async def test_op_names_unique_and_consistent(self):
+        from cheeto.operations.base import OPERATIONS, Operation
+
+        def subclasses(cls):
+            for sub in cls.__subclasses__():
+                yield sub
+                yield from subclasses(sub)
+
+        seen: dict[str, str] = {}
+        for cls in subclasses(Operation):
+            op_name = cls.__dict__.get('op_name')
+            if not op_name:
+                continue
+            assert op_name not in seen, (
+                f'{op_name!r} on both {seen[op_name]} and {cls.__name__}'
+            )
+            seen[op_name] = cls.__name__
+        # every own-op_name class is in the registry under its own name
+        for op_name, name in seen.items():
+            assert OPERATIONS[op_name].__name__ == name
+
+
+class TestFindHistory:
+    """`find_history` filtering by op / date range / limit, newest first."""
+
+    async def _seed(self):
+        from datetime import datetime, timezone
+        from cheeto.models.history import History
+        await History(op='create_user', changes={},
+                      timestamp=datetime(2026, 1, 15, tzinfo=timezone.utc)).insert()
+        await History(op='set_user_status', changes={},
+                      timestamp=datetime(2026, 6, 15, tzinfo=timezone.utc)).insert()
+        await History(op='set_user_status', changes={},
+                      timestamp=datetime(2026, 12, 15, tzinfo=timezone.utc)).insert()
+
+    async def test_newest_first_and_op_filter(self, beanie_client):
+        from cheeto.queries import find_history
+        await self._seed()
+        all_entries = await find_history()
+        assert [e.timestamp.month for e in all_entries] == [12, 6, 1]
+        sus = await find_history(op='set_user_status')
+        assert {e.op for e in sus} == {'set_user_status'}
+        assert len(sus) == 2
+
+    async def test_date_bounds_and_limit(self, beanie_client):
+        from datetime import datetime, timezone
+        from cheeto.queries import find_history
+        await self._seed()
+        since = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        assert [e.timestamp.month for e in await find_history(since=since)] == [12, 6]
+        assert [e.timestamp.month for e in await find_history(until=until)] == [6, 1]
+        windowed = await find_history(since=since, until=until)
+        assert [e.timestamp.month for e in windowed] == [6]
+        assert len(await find_history(limit=1)) == 1
+
+
 class TestAccessOverrideSemantics:
     """Override (not union) semantics for User.access vs UserSiteInfo.access.
 
@@ -3392,6 +3583,126 @@ class TestSyncUserToLDAPMembership:
 
         assert result.extra['removed_groups'] == ['oldgrp']
         assert 'labgrp' not in result.extra['removed_groups']
+
+    async def test_per_site_status_override_projected(self, beanie_client):
+        # Global status 'active', per-site override 'disabled' → the user must
+        # project into disabled-users, not active-users (the bug: the status
+        # group came from the global User.status, ignoring the override).
+        user, site, lab = await self._seed_user_on_site()
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        usi.status = await status_link('disabled')
+        await usi.save()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users', 'active-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert 'disabled-users' in result.extra['added_groups']
+        assert 'active-users' in result.extra['removed_groups']
+
+    async def test_status_falls_back_to_global_without_override(
+        self, beanie_client,
+    ):
+        # No per-site override → effective status is the global one.
+        user, site, lab = await self._seed_user_on_site()
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        usi.status = None
+        await usi.save()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert 'active-users' in result.extra['added_groups']
+
+
+class TestSiteStatusMaintenance:
+    """ClearOffboardingSiteStatuses backfill, plus the redundant per-site
+    status query/clear (`find_redundant_site_statuses` /
+    ClearRedundantSiteStatuses)."""
+
+    async def _user(self, name, uid, *, status, site, usi_status):
+        user = User(
+            name=name, email=f'{name}@x.test', uid=uid, gid=uid,
+            fullname=name, home_directory=f'/home/{name}',
+            status=await status_link(status),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link(usi_status) if usi_status else None,
+        ).insert()
+        return user
+
+    async def test_clear_offboarding_clears_only_offboarding(
+        self, beanie_client,
+    ):
+        site = Site(name='ssm_site', fqdn='ssm.test')
+        await site.insert()
+        # offboarding user with a stale per-site 'active' override
+        off = await self._user('ssm_off', 95001, status='offboarding',
+                               site=site, usi_status='active')
+        # active user with an 'active' override — must be untouched
+        act = await self._user('ssm_act', 95002, status='active',
+                               site=site, usi_status='active')
+
+        result = await ClearOffboardingSiteStatuses.run(beanie_client, None)
+        assert result == {'users': 1, 'cleared': 1}
+
+        off_usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == off.id)
+        act_usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == act.id)
+        assert off_usi.status is None
+        assert act_usi.status is not None
+
+    async def test_redundant_lists_and_clears_only_duplicates(
+        self, beanie_client,
+    ):
+        from cheeto.queries import find_redundant_site_statuses
+
+        site_a = Site(name='ssm_a', fqdn='ssm_a.test')
+        site_b = Site(name='ssm_b', fqdn='ssm_b.test')
+        await site_a.insert()
+        await site_b.insert()
+        user = User(
+            name='ssm_r', email='r@x.test', uid=95003, gid=95003,
+            fullname='R', home_directory='/home/ssm_r',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        # redundant: per-site 'active' == global 'active'
+        await UserSiteInfo(user=user, site=site_a,
+                           status=await status_link('active')).insert()
+        # divergent: per-site 'disabled' != global 'active' (like test-user)
+        await UserSiteInfo(user=user, site=site_b,
+                           status=await status_link('disabled')).insert()
+
+        rows = await find_redundant_site_statuses()
+        assert ('ssm_r', 'ssm_a', 'active') in rows
+        assert all(sitename != 'ssm_b' for _, sitename, _ in rows)
+
+        result = await ClearRedundantSiteStatuses.run(beanie_client, None)
+        assert result == {'cleared': 1}
+
+        a_usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site_a.id,
+        )
+        b_usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site_b.id,
+        )
+        assert a_usi.status is None       # redundant cleared
+        assert b_usi.status is not None   # divergent preserved
 
 
 # ---------------------------------------------------------------------------

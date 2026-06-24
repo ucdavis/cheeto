@@ -13,13 +13,16 @@ from ..constants import (
     UINT_MAX,
 )
 from ..encrypt import get_mcf_hasher, hash_yescrypt
+from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.user import SshKey, User
+from ..models.user_site_info import UserSiteInfo
 from ..queries.access_status import (
     find_access_group,
     find_status_group,
     resolve_status_name,
 )
+from ..queries.user import find_redundant_site_statuses, find_users
 from .base import Operation
 
 
@@ -50,6 +53,23 @@ async def _resolve_access_links(names: list[str]) -> list[AccessGroup]:
             )
         out.append(ag)
     return out
+
+
+async def clear_user_site_statuses(
+    user: User, session: AsyncClientSession | None = None,
+) -> int:
+    """Set every per-site status override for `user` to None (fall back to
+    `User.status`). Writes only the USIs that currently carry an override;
+    returns the number cleared. Each save fires `mark_user_ldap_dirty`, so
+    the user re-syncs to LDAP under the now-effective global status."""
+    usis = await UserSiteInfo.find(UserSiteInfo.user.id == user.id).to_list()
+    cleared = 0
+    for usi in usis:
+        if usi.status is not None:
+            usi.status = None
+            await usi.save(session=session)
+            cleared += 1
+    return cleared
 
 
 async def _get_next_id(min_id: int, max_id: int = UINT_MAX) -> int:
@@ -282,22 +302,27 @@ class SetUserStatus(Operation):
         author: User | None,
         *,
         name: str,
-        status: str,
+        status: str | None = None,
         reason: str,
         site: str | None = None,
+        reset: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.name = name
         self.status = status
         self.reason = reason
         self.site = site
+        self.reset = reset
 
     async def execute(self, session: AsyncClientSession) -> None:
+        if self.reset and self.site is None:
+            raise ValueError('SetUserStatus: reset requires a site')
+        if not self.reset and self.status is None:
+            raise ValueError('SetUserStatus: status is required unless reset')
+
         user = await User.find_one(User.name == self.name)
         if user is None:
             raise ValueError(f'User {self.name} does not exist')
-
-        status_link = await _resolve_status_link(self.status)
 
         if self.site is None:
             # Clear the pending offboarding expiry when reactivating, so the
@@ -307,7 +332,7 @@ class SetUserStatus(Operation):
                 and await resolve_status_name(user.status) == 'offboarding'
             ):
                 user.expires_at = None
-            user.status = status_link
+            user.status = await _resolve_status_link(self.status)
         else:
             from ..models.site import Site
             from ..models.user_site_info import UserSiteInfo
@@ -321,16 +346,29 @@ class SetUserStatus(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
-            if (
-                self.status == 'active'
-                and await resolve_status_name(usi.status) == 'offboarding'
-            ):
+            if self.reset:
+                # Drop the per-site override entirely; the site falls back to
+                # the global User.status. The per-site expiry goes with it.
+                usi.status = None
                 usi.expires_at = None
-            usi.status = status_link
+            else:
+                if (
+                    self.status == 'active'
+                    and await resolve_status_name(usi.status) == 'offboarding'
+                ):
+                    usi.expires_at = None
+                status_link = await _resolve_status_link(self.status)
+                # A per-site status equal to the global one is redundant
+                # (effective status is unchanged): store None so it falls
+                # back to User.status instead of shadowing it.
+                if link_target_id(status_link) == link_target_id(user.status):
+                    usi.status = None
+                else:
+                    usi.status = status_link
             await usi.save(session=session)
 
         comment = (
-            f'status={self.status}, '
+            f'status={"reset" if self.reset else self.status}, '
             f'scope={self.site or "global"}, '
             f'reason={self.reason}'
         )
@@ -343,6 +381,7 @@ class SetUserStatus(Operation):
             'status': self.status,
             'reason': self.reason,
             'site': self.site,
+            'reset': self.reset,
         }
 
 
@@ -636,3 +675,64 @@ class AddUserComment(Operation):
 
     def describe(self) -> dict[str, Any]:
         return {'username': self.name, 'comment': self.comment}
+
+
+class ClearOffboardingSiteStatuses(Operation):
+    """One-time backfill: clear every per-site status override for users
+    whose global status is `offboarding`, so the effective status falls back
+    to the global `offboarding` and they project into `offboarding-users`.
+
+    Non-transactional: it touches hundreds of users / thousands of USIs,
+    which would exceed the server transaction limits; each USI save is its
+    own atomic write."""
+
+    op_name = 'clear_offboarding_site_statuses'
+    transactional = False
+
+    def __init__(self, client: AsyncMongoClient, author: User | None) -> None:
+        super().__init__(client, author)
+        self._users = 0
+        self._cleared = 0
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        users = await find_users(status='offboarding')
+        self._users = len(users)
+        for user in users:
+            self._cleared += await clear_user_site_statuses(user, session)
+        return {'users': self._users, 'cleared': self._cleared}
+
+    def describe(self) -> dict[str, Any]:
+        return {'users': self._users, 'cleared': self._cleared}
+
+
+class ClearRedundantSiteStatuses(Operation):
+    """Maintenance: clear per-site status overrides that merely duplicate the
+    user's global status (migration noise). Divergent overrides — a per-site
+    status that differs from the global one (e.g. a `disabled` Farm override
+    on a globally-`active` user) — are left untouched.
+
+    Non-transactional for the same reason as `ClearOffboardingSiteStatuses`."""
+
+    op_name = 'clear_redundant_site_statuses'
+    transactional = False
+
+    def __init__(self, client: AsyncMongoClient, author: User | None) -> None:
+        super().__init__(client, author)
+        self._cleared = 0
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        users = await User.find_all().to_list()
+        global_status = {u.id: link_target_id(u.status) for u in users}
+        usis = await UserSiteInfo.find_all().to_list()
+        for usi in usis:
+            if usi.status is None:
+                continue
+            uid = link_target_id(usi.user)
+            if global_status.get(uid) == link_target_id(usi.status):
+                usi.status = None
+                await usi.save(session=session)
+                self._cleared += 1
+        return {'cleared': self._cleared}
+
+    def describe(self) -> dict[str, Any]:
+        return {'cleared': self._cleared}

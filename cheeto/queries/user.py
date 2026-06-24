@@ -19,7 +19,7 @@ from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
-from .access_status import resolve_status_name
+from .access_status import resolve_access_names, resolve_status_name
 
 
 Operator = Literal['AND', 'OR']
@@ -33,6 +33,15 @@ def effective_access_links(
     if usi is not None and usi.access:
         return list(usi.access)
     return list(user.access)
+
+
+def effective_status_link(user: User, usi: UserSiteInfo | None):
+    """The status that applies for `user` at the site of `usi`: the per-site
+    override (`usi.status`) if set, else the global `user.status`. Mirrors
+    `effective_access_links`."""
+    if usi is not None and usi.status is not None:
+        return usi.status
+    return user.status
 
 
 async def list_user_ssh_keys(user: User) -> list[SshKey]:
@@ -50,10 +59,29 @@ async def user_active_sites(user: User) -> list[str]:
     ).to_list()
     active: list[str] = []
     for usi in usis:
-        status = usi.status if usi.status is not None else user.status
+        status = effective_status_link(user, usi)
         if await resolve_status_name(status) == 'active':
             active.append(usi.site.name)
     return sorted(active)
+
+
+async def user_site_overrides(user: User) -> list[dict]:
+    """Per-site status/access overrides for every site the user has a
+    UserSiteInfo on. `status` is the per-site StatusGroup name, or None when
+    there's no override (inherit from `User.status`); `access` is the per-site
+    access names, or `[]` (inherit from `User.access`). Sorted by site name."""
+    usis = await UserSiteInfo.find(
+        UserSiteInfo.user.id == user.id, fetch_links=True, nesting_depth=1,
+    ).to_list()
+    rows = [
+        {
+            'site': usi.site.name,
+            'status': await resolve_status_name(usi.status),
+            'access': await resolve_access_names(usi.access),
+        }
+        for usi in usis
+    ]
+    return sorted(rows, key=lambda r: r['site'])
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +290,47 @@ async def find_users(
     return await User.find(
         In(User.id, list(ids)),
     ).sort('+name').to_list()
+
+
+async def find_redundant_site_statuses() -> list[tuple[str, str, str]]:
+    """Per-site status overrides that merely duplicate the user's global
+    status (`usi.status` and `user.status` point at the same StatusGroup).
+    Returns `(username, sitename, status_name)` rows, sorted. Batched: four
+    queries regardless of population size."""
+    users = await User.find_all().to_list()
+    global_status = {u.id: link_target_id(u.status) for u in users}
+    user_name = {u.id: u.name for u in users}
+
+    usis = await UserSiteInfo.find_all().to_list()
+    matched = [
+        usi for usi in usis
+        if usi.status is not None
+        and global_status.get(link_target_id(usi.user))
+        == link_target_id(usi.status)
+    ]
+    if not matched:
+        return []
+
+    site_ids = {link_target_id(usi.site) for usi in matched}
+    site_name = {
+        s.id: s.name
+        for s in await Site.find(In(Site.id, list(site_ids))).to_list()
+    }
+    sg_ids = {link_target_id(usi.status) for usi in matched}
+    sg_name = {
+        sg.id: sg.status_name
+        for sg in await StatusGroup.find(
+            In(StatusGroup.id, list(sg_ids)),
+        ).to_list()
+    }
+    return sorted(
+        (
+            user_name.get(link_target_id(usi.user), '?'),
+            site_name.get(link_target_id(usi.site), '?'),
+            sg_name.get(link_target_id(usi.status), '?'),
+        )
+        for usi in matched
+    )
 
 
 # ---------------------------------------------------------------------------

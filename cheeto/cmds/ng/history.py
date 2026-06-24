@@ -1,13 +1,25 @@
 from argparse import Namespace
+from datetime import timezone
 
+from dateutil import parser as dateparser
 from ponderosa import ArgParser
 from rich.table import Table
 
 from .. import commands
 from ...log import Console
-from ...models.history import History
 from ...models.user import User
+from ...operations import operation_names
+from ...queries import find_history
 from ._args import user_args
+
+
+def _parse_dt(value: str):
+    """Parse a date or datetime string; a naive value is taken as UTC to match
+    how History timestamps are stored and displayed."""
+    dt = dateparser.parse(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 @user_args.apply()
@@ -16,25 +28,28 @@ from ._args import user_args
 async def history_cmd(args: Namespace):
     console = Console()
 
-    filters = []
-    if args.op:
-        filters.append(History.op == args.op)
+    author_id = None
     if args.user:
         author = await User.find_one(User.name == args.user)
         if author is None:
             console.print(f'[red]User {args.user} not found[/]')
             return 1
-        filters.append(History.author.id == author.id)
+        author_id = author.id
 
-    # fetch_links=True resolves History.author in the initial aggregation —
-    # without it we'd pay N extra round-trips in the render loop to fetch each
-    # entry's author one at a time.
-    query = (
-        History.find(*filters, fetch_links=True, nesting_depth=1)
-        .sort('-timestamp')
-        .limit(args.limit)
+    since = until = None
+    try:
+        if args.since:
+            since = _parse_dt(args.since)
+        if args.until:
+            until = _parse_dt(args.until)
+    except (ValueError, OverflowError) as e:
+        console.print(f'[red]Could not parse date/time: {e}[/]')
+        return 1
+
+    entries = await find_history(
+        op=args.op, author_id=author_id,
+        since=since, until=until, limit=args.limit,
     )
-    entries = await query.to_list()
 
     if not entries:
         console.print('[dim]No history entries found[/]')
@@ -66,7 +81,14 @@ async def history_cmd(args: Namespace):
 
 @history_cmd.args()
 def _(parser: ArgParser):
-    parser.add_argument('--op', default=None,
+    parser.add_argument('--op', default=None, choices=sorted(operation_names()),
                         help='Filter by operation name (e.g., create_user)')
+    parser.add_argument('--since', default=None,
+                        help='Only entries at/after this date or datetime '
+                             '(e.g. 2026-06-01 or "2026-06-01 14:00"); '
+                             'naive values are UTC')
+    parser.add_argument('--until', default=None,
+                        help='Only entries at/before this date or datetime '
+                             '(inclusive; naive values are UTC)')
     parser.add_argument('--limit', '-n', type=int, default=50,
-                        help='Maximum entries to show (default: 50)')
+                        help='Maximum entries to show (default: 50; 0 for unlimited)')

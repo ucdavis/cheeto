@@ -445,10 +445,12 @@ class TestSyncUserIAM:
         assert fetched.status is None
 
     async def test_miss_offboarding(self, beanie_client, make_user):
+        from ..models.site import Site
         from ..models.user import UCDIAMInfo
+        from ..models.user_site_info import UserSiteInfo
         now = datetime(2026, 5, 1)
         first_missed = now - timedelta(days=20)
-        await make_user(
+        user = await make_user(
             status='active',
             iam=UCDIAMInfo(
                 iam_status='missing',
@@ -456,6 +458,12 @@ class TestSyncUserIAM:
                 first_missing_at=first_missed,
             ),
         )
+        # A stale per-site 'active' override that must be cleared on offboard.
+        site = Site(name='offb_site', fqdn='offb.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
 
         handler = make_iam_handler(person_status=404)
         async with make_iam_api(handler) as api:
@@ -473,6 +481,9 @@ class TestSyncUserIAM:
         assert fetched.status is not None
         assert fetched.status.status_name == 'offboarding'
         assert fetched.iam.first_missing_at == first_missed
+        # Per-site override cleared → effective status falls back to global.
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
+        assert usi.status is None
 
     async def test_miss_already_expiring(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo

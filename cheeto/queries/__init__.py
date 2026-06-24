@@ -6,6 +6,7 @@ from .access_status import (
     resolve_status_ldapname,
     resolve_status_name,
 )
+from .history import find_history
 from .group import (
     GroupRole,
     UserGroupRoles,
@@ -43,6 +44,8 @@ from .storage import (
 from .user import (
     RootKeyBlock,
     effective_access_links,
+    effective_status_link,
+    find_redundant_site_statuses,
     find_user,
     find_user_by_email,
     find_user_by_name,
@@ -53,4 +56,5 @@ from .user import (
     root_key_blocks,
     root_ssh_keys,
     user_active_sites,
+    user_site_overrides,
 )

@@ -52,7 +52,12 @@ from ..queries.access_status import (
     resolve_status_ldapname,
 )
 from ..queries.group import effective_group_members, effective_user_groups
-from ..queries.user import effective_access_links, root_key_blocks, root_ssh_keys
+from ..queries.user import (
+    effective_access_links,
+    effective_status_link,
+    root_key_blocks,
+    root_ssh_keys,
+)
 from .base import Operation
 
 logger = logging.getLogger(__name__)
@@ -268,7 +273,9 @@ class SyncUserToLDAP(Operation):
 
         access_links = effective_access_links(user, usi)
         target_groups = set(await resolve_access_ldapnames(access_links))
-        status_ldapname = await resolve_status_ldapname(user.status)
+        status_ldapname = await resolve_status_ldapname(
+            effective_status_link(user, usi)
+        )
         if status_ldapname is not None:
             target_groups.add(status_ldapname)
 
