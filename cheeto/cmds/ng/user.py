@@ -17,6 +17,8 @@ from ...operations import (
     AddUserAccess,
     AddUserComment,
     AddUserSshKey,
+    ClearOffboardingSiteStatuses,
+    ClearRedundantSiteStatuses,
     CreateClassUser,
     CreateSharedUser,
     CreateSystemUser,
@@ -30,6 +32,7 @@ from ...operations import (
 )
 from ...queries import (
     effective_access_links,
+    find_redundant_site_statuses,
     find_site_by_name,
     find_user,
     find_users,
@@ -825,3 +828,50 @@ def _(parser: ArgParser):
                         help='Show extra columns (fullname, email)')
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML')
+
+
+@commands.register('ng', 'user', 'clear-offboarding-site-statuses',
+                   help='Clear per-site status overrides for all users whose '
+                        'global status is offboarding (one-time backfill)')
+async def user_clear_offboarding_site_statuses(args: Namespace):
+    console = Console()
+    result = await ClearOffboardingSiteStatuses.run(args.db, args.author)
+    console.print(
+        f'Cleared [yellow]{result["cleared"]}[/] per-site status override(s) '
+        f'across [green]{result["users"]}[/] offboarding user(s)'
+    )
+
+
+@commands.register('ng', 'user', 'redundant-site-statuses',
+                   help='List per-site status overrides that duplicate the '
+                        'user\'s global status; --clear removes them')
+async def user_redundant_site_statuses(args: Namespace):
+    console = Console()
+    if args.clear:
+        result = await ClearRedundantSiteStatuses.run(args.db, args.author)
+        console.print(
+            f'Cleared [yellow]{result["cleared"]}[/] redundant per-site '
+            f'status override(s)'
+        )
+        return
+    rows = await find_redundant_site_statuses()
+    if not rows:
+        console.print('No redundant per-site status overrides.')
+        return
+    table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column('user', style='green')
+    table.add_column('site', style='cyan')
+    table.add_column('status', style='yellow')
+    for username, sitename, status_name in rows:
+        table.add_row(username, sitename, status_name)
+    console.print(table)
+    console.print(
+        f'[dim]{len(rows)} redundant override(s); rerun with --clear to '
+        f'remove[/]'
+    )
+
+
+@user_redundant_site_statuses.args()
+def _(parser: ArgParser):
+    parser.add_argument('--clear', action='store_true', default=False,
+                        help='Clear the redundant overrides (set to None)')

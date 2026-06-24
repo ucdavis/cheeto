@@ -73,6 +73,8 @@ from ..operations import (
     RemoveGroupMember,
     RemoveSiteUser,
     RemoveUserAccess,
+    ClearOffboardingSiteStatuses,
+    ClearRedundantSiteStatuses,
     SetUserPassword,
     SetUserShell,
     SetUserStatus,
@@ -3392,6 +3394,126 @@ class TestSyncUserToLDAPMembership:
 
         assert result.extra['removed_groups'] == ['oldgrp']
         assert 'labgrp' not in result.extra['removed_groups']
+
+    async def test_per_site_status_override_projected(self, beanie_client):
+        # Global status 'active', per-site override 'disabled' → the user must
+        # project into disabled-users, not active-users (the bug: the status
+        # group came from the global User.status, ignoring the override).
+        user, site, lab = await self._seed_user_on_site()
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        usi.status = await status_link('disabled')
+        await usi.save()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users', 'active-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert 'disabled-users' in result.extra['added_groups']
+        assert 'active-users' in result.extra['removed_groups']
+
+    async def test_status_falls_back_to_global_without_override(
+        self, beanie_client,
+    ):
+        # No per-site override → effective status is the global one.
+        user, site, lab = await self._seed_user_on_site()
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        usi.status = None
+        await usi.save()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert 'active-users' in result.extra['added_groups']
+
+
+class TestSiteStatusMaintenance:
+    """ClearOffboardingSiteStatuses backfill, plus the redundant per-site
+    status query/clear (`find_redundant_site_statuses` /
+    ClearRedundantSiteStatuses)."""
+
+    async def _user(self, name, uid, *, status, site, usi_status):
+        user = User(
+            name=name, email=f'{name}@x.test', uid=uid, gid=uid,
+            fullname=name, home_directory=f'/home/{name}',
+            status=await status_link(status),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link(usi_status) if usi_status else None,
+        ).insert()
+        return user
+
+    async def test_clear_offboarding_clears_only_offboarding(
+        self, beanie_client,
+    ):
+        site = Site(name='ssm_site', fqdn='ssm.test')
+        await site.insert()
+        # offboarding user with a stale per-site 'active' override
+        off = await self._user('ssm_off', 95001, status='offboarding',
+                               site=site, usi_status='active')
+        # active user with an 'active' override — must be untouched
+        act = await self._user('ssm_act', 95002, status='active',
+                               site=site, usi_status='active')
+
+        result = await ClearOffboardingSiteStatuses.run(beanie_client, None)
+        assert result == {'users': 1, 'cleared': 1}
+
+        off_usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == off.id)
+        act_usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == act.id)
+        assert off_usi.status is None
+        assert act_usi.status is not None
+
+    async def test_redundant_lists_and_clears_only_duplicates(
+        self, beanie_client,
+    ):
+        from cheeto.queries import find_redundant_site_statuses
+
+        site_a = Site(name='ssm_a', fqdn='ssm_a.test')
+        site_b = Site(name='ssm_b', fqdn='ssm_b.test')
+        await site_a.insert()
+        await site_b.insert()
+        user = User(
+            name='ssm_r', email='r@x.test', uid=95003, gid=95003,
+            fullname='R', home_directory='/home/ssm_r',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        # redundant: per-site 'active' == global 'active'
+        await UserSiteInfo(user=user, site=site_a,
+                           status=await status_link('active')).insert()
+        # divergent: per-site 'disabled' != global 'active' (like test-user)
+        await UserSiteInfo(user=user, site=site_b,
+                           status=await status_link('disabled')).insert()
+
+        rows = await find_redundant_site_statuses()
+        assert ('ssm_r', 'ssm_a', 'active') in rows
+        assert all(sitename != 'ssm_b' for _, sitename, _ in rows)
+
+        result = await ClearRedundantSiteStatuses.run(beanie_client, None)
+        assert result == {'cleared': 1}
+
+        a_usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site_a.id,
+        )
+        b_usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site_b.id,
+        )
+        assert a_usi.status is None       # redundant cleared
+        assert b_usi.status is not None   # divergent preserved
 
 
 # ---------------------------------------------------------------------------

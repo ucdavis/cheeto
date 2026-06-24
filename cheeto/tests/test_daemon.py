@@ -464,6 +464,12 @@ class TestTaskBodies:
             expires_at=datetime(2020, 1, 1),
         )
         await expired.insert()
+        # A lingering per-site override that reaping must clear.
+        site = Site(name='dm_reap_site', fqdn='reap.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=expired, site=site, status=await status_link('active'),
+        ).insert()
 
         reaped = await _reap(config, beanie_client, None)
         assert reaped == ['dm_expired']
@@ -471,6 +477,8 @@ class TestTaskBodies:
         fetched = await User.find_one(User.name == 'dm_expired',
                                       fetch_links=True, nesting_depth=1)
         assert fetched.status.status_name == 'inactive'
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == expired.id)
+        assert usi.status is None
 
     @staticmethod
     async def _origin_show(origin: Path, path: str) -> str:

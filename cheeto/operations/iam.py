@@ -41,6 +41,7 @@ from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail, Email
 from ..models.user import UCDIAMInfo, User
 from ..queries.access_status import find_status_group, resolve_status_name
 from .base import Operation
+from .user import clear_user_site_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,9 @@ class SyncUserIAM(Operation):
                 current_status = await resolve_status_name(user.status)
                 if current_status == 'active':
                     user.status = await find_status_group('offboarding')
+                    # Drop per-site status overrides so the effective status
+                    # (per-site else global) falls back to global offboarding.
+                    await clear_user_site_statuses(user, session)
                 self._outcome = 'miss_offboarding'
             else:
                 self._outcome = 'miss_already_expiring'
@@ -477,6 +481,9 @@ class ReapOffboardedUsers(Operation):
         for user in users:
             user.status = inactive_sg
             await user.save(session=session)
+            # Drop any lingering per-site status overrides so the effective
+            # status falls back to global inactive.
+            await clear_user_site_statuses(user, session)
             self._reaped.append(user.name)
             logger.info(
                 'reaped offboarded user %s (expires_at=%s)',

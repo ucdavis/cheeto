@@ -18,6 +18,8 @@ from .user import (
     AddUserAccess,
     AddUserComment,
     AddUserSshKey,
+    ClearOffboardingSiteStatuses,
+    ClearRedundantSiteStatuses,
     CreateClassUser,
     CreateSharedUser,
     CreateSystemUser,
@@ -28,6 +30,7 @@ from .user import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    clear_user_site_statuses,
 )
 from .user_site import AddSiteUser, RemoveSiteUser
 from .group import (
