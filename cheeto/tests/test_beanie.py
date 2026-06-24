@@ -4021,13 +4021,16 @@ class TestBackfillLDAPInfo:
         assert r2.outcome == 'skipped_clean'
 
 
-async def _seed_slurm_site(with_default=False, partition_name='hi'):
+async def _seed_slurm_site(with_default=False, partition_name='hi',
+                           extra_sticky_user=False):
     """Seed a site with one group, a slurm account, partition, QOS, and an
     association, plus a slurm-eligible member (alice) and an ineligible one
     (bob, no slurm access). When `with_default`, mark the account sticky and
-    set it as the site's default account. `partition_name` lets the live
-    integration test use a partition the controller actually has (e.g. 'cpu').
-    Returns the Site."""
+    set it as the site's default account. When `extra_sticky_user`, also add
+    `sl_carol`: at the site and slurm-eligible, but NOT a member of the group —
+    so she can only reach the account via `site.slurm.sticky`. `partition_name`
+    lets the live integration test use a partition the controller actually has
+    (e.g. 'cpu'). Returns the Site."""
     site = Site(name='slsite', fqdn='sl.test')
     await site.insert()
 
@@ -4051,6 +4054,17 @@ async def _seed_slurm_site(with_default=False, partition_name='hi'):
     for u in (alice, bob):
         await UserSiteInfo(user=u, site=site, status=await status_link('active')).insert()
         await GroupMembership(user=u, group=group, site=site, roles=['member']).insert()
+
+    if extra_sticky_user:
+        carol = User(
+            name='sl_carol', email='c@sl.test', uid=72003, gid=72003,
+            fullname='Carol', home_directory='/home/c',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh', 'slurm']),
+        )
+        await carol.insert()
+        # USI at the site (so she's "present") but no GroupMembership edge.
+        await UserSiteInfo(user=carol, site=site, status=await status_link('active')).insert()
 
     account = SlurmAccount(group=group, site=site)
     await account.insert()
@@ -4105,6 +4119,30 @@ class TestBuildDesiredSlurmState:
         # the default account resolves to its owning group name, set for
         # every at-site eligible user (alice; bob has no association)
         assert state.default_accounts == {'sl_alice': 'sllab'}
+
+    async def test_sticky_slurm_account_associates_non_member(self, beanie_client):
+        """A slurm-eligible at-site user gets a sticky account's associations
+        even without a group membership (regression: build_desired_slurm_state
+        ignored site.slurm.sticky and only saw group_members_at_site)."""
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(with_default=True, extra_sticky_user=True)
+        state = await build_desired_slurm_state(site)
+        # carol is not a member of sllab, but sllab is sticky → she gets it
+        assert ('sl_carol', 'sllab', 'hi') in state.associations
+        assert state.associations[('sl_carol', 'sllab', 'hi')] == 'sllab-q'
+        # and the sticky default account
+        assert state.default_accounts['sl_carol'] == 'sllab'
+
+    async def test_non_sticky_account_excludes_non_member(self, beanie_client):
+        """Without sticky, an at-site eligible non-member gets nothing — the
+        sticky branch must not leak into the plain-membership path."""
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(with_default=False, extra_sticky_user=True)
+        state = await build_desired_slurm_state(site)
+        assert not any(user == 'sl_carol' for (user, _, _) in state.associations)
+        assert 'sl_carol' not in state.default_accounts
 
 
 class _FakeSAcctMgr:
