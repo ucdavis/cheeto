@@ -98,6 +98,7 @@ collection via celery's mongodb result backend.
 | hub worker | `cheeto daemon worker` | hub host; consumes the `cheeto` queue |
 | site worker | `cheeto daemon worker --site <name>` | each cluster head node; consumes `slurm.<name>` |
 | api | `cheeto daemon api` | hub host (uvicorn) |
+| flower | `cheeto daemon flower` | hub host (monitoring UI, default :5555) |
 
 Task → queue topology: the hub worker runs HiPPO event processing, IAM
 sync, LDAP sync, account reaping, Sympa list exports, and the legacy
@@ -132,6 +133,29 @@ GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
 
 If `api.api_key` is set in the config, requests must send a matching
 `X-API-Key` header; unknown sites return 404.
+
+### Monitoring (Flower)
+
+`cheeto daemon flower` launches [Flower](https://flower.readthedocs.io/), the
+celery monitoring UI, on the configured celery app — so it inherits the
+`broker_url`, `broker_use_ssl` (TLS), and mongodb result backend without extra
+flags:
+
+```
+cheeto daemon flower                       # http://127.0.0.1:5555
+cheeto daemon flower --basic-auth user:pass --address 0.0.0.0
+cheeto daemon flower -- --max_tasks=10000  # pass extra flags through to flower
+```
+
+It binds `127.0.0.1:5555` by default; gate it with `--basic-auth` and/or a
+reverse proxy (`--url-prefix`) before exposing it. In the container, run it as
+the `flower` role and publish 5555:
+
+```
+docker run --rm -p 5555:5555 \
+    -v /etc/cheeto/config.yaml:/etc/cheeto/config.yaml:ro \
+    cheeto daemon flower --address 0.0.0.0
+```
 
 ### RabbitMQ TLS
 

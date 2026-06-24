@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.06.2026
 
+import argparse
 import os
 from argparse import Namespace
 from pathlib import Path
@@ -154,6 +155,43 @@ def _(parser: ArgParser):
     parser.add_argument('--timeout', type=float, default=3600,
                         help='Per-task wait timeout in seconds with --wait '
                              '(default 3600)')
+
+
+@commands.register('daemon', 'flower',
+                   help='Run Flower to monitor celery workers/tasks')
+def daemon_flower(args: Namespace):
+    from ..daemon.app import app, configure_celery_app
+    # Launch flower on the configured app so it inherits broker_url,
+    # broker_use_ssl (TLS), and the mongodb result backend.
+    configure_celery_app(args.config)
+    argv = ['flower',
+            f'--address={args.address}',
+            f'--port={args.port}']
+    if args.basic_auth:
+        argv.append(f'--basic_auth={args.basic_auth}')
+    if args.url_prefix:
+        argv.append(f'--url_prefix={args.url_prefix}')
+    # Trailing args after `--` pass straight through to flower
+    # (e.g. --persistent, --broker_api=…, --max_tasks=…).
+    extra = args.flower_args[1:] if args.flower_args[:1] == ['--'] \
+        else args.flower_args
+    argv.extend(extra)
+    app.start(argv)
+
+
+@daemon_flower.args()
+def _(parser: ArgParser):
+    parser.add_argument('--address', default='127.0.0.1',
+                        help='Bind address (default 127.0.0.1; use 0.0.0.0 '
+                             'in a container)')
+    parser.add_argument('--port', type=int, default=5555,
+                        help='Bind port (default 5555)')
+    parser.add_argument('--basic-auth', default=None,
+                        help='Restrict access: user:pass[,user:pass…]')
+    parser.add_argument('--url-prefix', default=None,
+                        help='Mount Flower under a path prefix (reverse-proxy)')
+    parser.add_argument('flower_args', nargs=argparse.REMAINDER,
+                        help='Extra flower flags, after `--`')
 
 
 @commands.register('daemon', 'api',

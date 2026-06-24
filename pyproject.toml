@@ -61,6 +61,7 @@ bonsai = "^1.5.0"
 celery = {version = "^5.6", extras = ["mongodb"]}
 fastapi = "^0.115"
 uvicorn = "^0.34"
+flower = "^2.0"   # celery monitoring UI (cheeto daemon flower)
 
 [tool.poetry.extras]
 # v1 mongoengine support, for running the v1 -> v2 migration only.
