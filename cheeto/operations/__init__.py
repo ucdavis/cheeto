@@ -83,11 +83,15 @@ from .ldap import (
 )
 from .puppet import SyncOldPuppet
 from .storage import (
+    AddVolumeAllocation,
     CreateAutomountMap,
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
+    EditVolumeAllocation,
     ExportPuppetStorage,
+    RehomeUser,
+    RemoveVolumeAllocation,
     SetStorageMount,
     SetVolumeStorageMounts,
 )

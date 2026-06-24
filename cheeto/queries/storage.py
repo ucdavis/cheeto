@@ -166,13 +166,19 @@ async def get_storage(
 
 
 async def list_site_storages(
-    site: Site, category: str | None = None,
+    site: Site, category: str | None = None, *,
+    owner_id=None, group_id=None,
 ) -> list[Storage]:
     """All Storage records at a site, fully resolved (depth 2) so
-    mount_path works for both automount and static mounts."""
+    mount_path works for both automount and static mounts. Optionally
+    filtered (AND) by category and/or owner/group document id."""
     filters = [Storage.site.id == site.id]
     if category is not None:
         filters.append(Storage.category == category)
+    if owner_id is not None:
+        filters.append(Storage.owner.id == owner_id)
+    if group_id is not None:
+        filters.append(Storage.group.id == group_id)
     return await Storage.find(
         *filters,
         fetch_links=True,

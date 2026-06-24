@@ -59,10 +59,14 @@ from ..operations import (
     EditSlurmAllocation,
     AddUserAccess,
     AddUserComment,
+    AddVolumeAllocation,
     CreateAutomountMap,
     CreateGroup,
     CreateGroupFromSponsor,
     CreateHomeStorage,
+    EditVolumeAllocation,
+    RehomeUser,
+    RemoveVolumeAllocation,
     CreateSite,
     CreateSlurmAssociation,
     CreateSlurmPartition,
@@ -2418,12 +2422,24 @@ class TestOperationRegistry:
     """The op_name -> Operation registry populated via __init_subclass__."""
 
     async def test_lookup_and_names(self):
-        from cheeto.operations import get_operation, operation_names
+        from cheeto.operations import (
+            AddVolumeAllocation,
+            EditVolumeAllocation,
+            RehomeUser,
+            RemoveVolumeAllocation,
+            get_operation,
+            operation_names,
+        )
         names = operation_names()
         assert 'set_user_status' in names
         assert 'create_user' in names
         assert get_operation('set_user_status') is SetUserStatus
         assert get_operation('does_not_exist') is None
+        assert get_operation('rehome_user') is RehomeUser
+        assert get_operation('add_volume_allocation') is AddVolumeAllocation
+        assert get_operation('remove_volume_allocation') \
+            is RemoveVolumeAllocation
+        assert get_operation('edit_volume_allocation') is EditVolumeAllocation
 
     async def test_op_names_unique_and_consistent(self):
         from cheeto.operations.base import OPERATIONS, Operation
@@ -5463,6 +5479,262 @@ class TestCreateHomeStorageOp:
                 beanie_client, None,
                 user_name='hsuser', site_name='hs_site',
             )
+
+
+class TestRehomeUser:
+    """RehomeUser: remove a home on a non-default volume and recreate it from
+    the site defaults; the old volume record is left in place."""
+
+    async def _seed(self, beanie_client):
+        """Site with a default home volume + automount + a second 'oldhome'
+        parent, and user 'rhuser' whose home lives under 'oldhome' (NOT on
+        the site default)."""
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name='rh_site', fqdn='rh.test')
+        await site.insert()
+        await _seed_volume(site, name='home', host='flash01',
+                           host_path='/flash/export/home')
+        await _seed_volume(site, name='oldhome', host='oldnas',
+                           host_path='/old/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home',
+                            options=['fstype=nfs'])
+        await amap.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='rh_site',
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        await CreateUser.run(
+            beanie_client, None, name='rhuser', email='rh@test.com',
+            uid=74100, fullname='RH User',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='rhuser', site_name='rh_site',
+            parent_volume='oldhome', quota='5G',
+        )
+        return await Site.find_one(Site.name == 'rh_site')
+
+    async def test_rehomes_to_default(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        site = await self._seed(beanie_client)
+        default_id = link_target_id(site.storage.default_home_volume)
+
+        new_storage = await RehomeUser.run(
+            beanie_client, None, user_name='rhuser', site_name='rh_site',
+        )
+        assert new_storage.volume.name == 'home/rhuser'
+
+        # the persisted home Storage now points at the default-parented volume
+        fetched = await Storage.find_one(
+            Storage.name == 'rhuser', Storage.category == 'home',
+            fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.volume.name == 'home/rhuser'
+        assert link_target_id(fetched.volume.parent) == default_id
+        assert fetched.quota == '20G'   # reset to the site default quota
+
+        # exactly one home Storage remains for the user
+        homes = await Storage.find(
+            Storage.name == 'rhuser', Storage.category == 'home',
+        ).to_list()
+        assert len(homes) == 1
+
+        # the old backing volume is left in place (not deleted)
+        old = await StorageVolume.find_one(
+            StorageVolume.name == 'oldhome/rhuser',
+        )
+        assert old is not None
+
+    async def test_already_on_default_errors(self, beanie_client):
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name='rh2', fqdn='rh2.test')
+        await site.insert()
+        await _seed_volume(site, name='home', host='flash01',
+                           host_path='/flash/export/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='rh2',
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        await CreateUser.run(beanie_client, None, name='rh2u',
+                             email='r@t.com', uid=74110, fullname='x')
+        await CreateHomeStorage.run(beanie_client, None,
+                                    user_name='rh2u', site_name='rh2')
+        with pytest.raises(ValueError, match='already on the site default'):
+            await RehomeUser.run(beanie_client, None,
+                                 user_name='rh2u', site_name='rh2')
+
+    async def test_no_home_errors(self, beanie_client):
+        site = Site(name='rh3', fqdn='rh3.test')
+        await site.insert()
+        await CreateUser.run(beanie_client, None, name='rh3u',
+                             email='r@t.com', uid=74120, fullname='x')
+        with pytest.raises(ValueError, match='No home storage'):
+            await RehomeUser.run(beanie_client, None,
+                                 user_name='rh3u', site_name='rh3')
+
+    async def test_no_default_errors_and_keeps_home(self, beanie_client):
+        site = Site(name='rh4', fqdn='rh4.test')
+        await site.insert()
+        await CreateUser.run(beanie_client, None, name='rh4u',
+                             email='r@t.com', uid=74130, fullname='x')
+        # standalone home via the escape hatch; site has no home defaults
+        await CreateHomeStorage.run(beanie_client, None,
+                                    user_name='rh4u', site_name='rh4',
+                                    host='nas9', quota='5G')
+        with pytest.raises(ValueError, match='no default home volume'):
+            await RehomeUser.run(beanie_client, None,
+                                 user_name='rh4u', site_name='rh4')
+        # the existing home was not deleted (error raised before any delete)
+        still = await Storage.find_one(
+            Storage.name == 'rh4u', Storage.category == 'home',
+        )
+        assert still is not None
+
+
+class TestVolumeAllocationOps:
+    """add/remove/edit a volume's embedded quota allocations (by index)."""
+
+    async def _seed_vol(self, allocations):
+        site = Site(name='alloc_site', fqdn='a.test')
+        await site.insert()
+        await _seed_volume(site, name='vol1', host='nas01',
+                           host_path='/nas01/vol1', allocations=allocations)
+
+    async def test_add_appends_and_sums(self, beanie_client):
+        await self._seed_vol([StorageAllocation(quota='1T', comment='base')])
+        await AddVolumeAllocation.run(
+            beanie_client, None, site_name='alloc_site', volume_name='vol1',
+            quota='2T', comment='extra',
+        )
+        volume = await StorageVolume.find_one(StorageVolume.name == 'vol1')
+        assert len(volume.allocations) == 2
+        assert volume.allocations[1].quota == '2T'
+        assert volume.allocations[1].comment == 'extra'
+        assert volume.quota == '3T'
+
+    async def test_edit_changes_quota_keeps_comment(self, beanie_client):
+        await self._seed_vol([
+            StorageAllocation(quota='1T', comment='base'),
+            StorageAllocation(quota='2T', comment='extra'),
+        ])
+        await EditVolumeAllocation.run(
+            beanie_client, None, site_name='alloc_site', volume_name='vol1',
+            index=0, quota='5T',
+        )
+        volume = await StorageVolume.find_one(StorageVolume.name == 'vol1')
+        assert volume.allocations[0].quota == '5T'
+        assert volume.allocations[0].comment == 'base'   # preserved
+        assert volume.quota == '7T'
+
+    async def test_edit_relabels_with_comment(self, beanie_client):
+        await self._seed_vol([StorageAllocation(quota='1T', comment='base')])
+        await EditVolumeAllocation.run(
+            beanie_client, None, site_name='alloc_site', volume_name='vol1',
+            index=0, quota='2T', comment='relabeled',
+        )
+        volume = await StorageVolume.find_one(StorageVolume.name == 'vol1')
+        assert volume.allocations[0].comment == 'relabeled'
+        assert volume.allocations[0].quota == '2T'
+
+    async def test_remove_drops_allocation(self, beanie_client):
+        await self._seed_vol([
+            StorageAllocation(quota='1T', comment='base'),
+            StorageAllocation(quota='2T', comment='extra'),
+        ])
+        await RemoveVolumeAllocation.run(
+            beanie_client, None, site_name='alloc_site', volume_name='vol1',
+            index=0,
+        )
+        volume = await StorageVolume.find_one(StorageVolume.name == 'vol1')
+        assert len(volume.allocations) == 1
+        assert volume.allocations[0].comment == 'extra'
+        assert volume.quota == '2T'
+
+    async def test_remove_last_leaves_no_quota(self, beanie_client):
+        await self._seed_vol([StorageAllocation(quota='1T', comment='base')])
+        await RemoveVolumeAllocation.run(
+            beanie_client, None, site_name='alloc_site', volume_name='vol1',
+            index=0,
+        )
+        volume = await StorageVolume.find_one(StorageVolume.name == 'vol1')
+        assert volume.allocations == []
+        assert volume.quota is None
+
+    async def test_index_out_of_range_errors(self, beanie_client):
+        await self._seed_vol([StorageAllocation(quota='1T', comment='base')])
+        with pytest.raises(ValueError, match='no index 5'):
+            await RemoveVolumeAllocation.run(
+                beanie_client, None, site_name='alloc_site',
+                volume_name='vol1', index=5,
+            )
+
+    async def test_invalid_quota_errors(self, beanie_client):
+        await self._seed_vol([StorageAllocation(quota='1T', comment='base')])
+        with pytest.raises(ValueError, match='Invalid quota'):
+            await AddVolumeAllocation.run(
+                beanie_client, None, site_name='alloc_site',
+                volume_name='vol1', quota='banana',
+            )
+        # regex-passing garbage is also rejected (fails the size parse)
+        with pytest.raises(ValueError, match='Invalid quota'):
+            await EditVolumeAllocation.run(
+                beanie_client, None, site_name='alloc_site',
+                volume_name='vol1', index=0, quota='10Tx',
+            )
+
+    async def test_missing_volume_errors(self, beanie_client):
+        site = Site(name='alloc_site', fqdn='a.test')
+        await site.insert()
+        with pytest.raises(ValueError, match='does not exist'):
+            await AddVolumeAllocation.run(
+                beanie_client, None, site_name='alloc_site',
+                volume_name='nope', quota='1T',
+            )
+
+
+class TestListSiteStorages:
+    """list_site_storages filtering by owner / group / category (AND)."""
+
+    async def _seed(self, beanie_client):
+        from cheeto.queries import find_group_by_name
+        site = Site(name='ls_site', fqdn='ls.test')
+        await site.insert()
+        alice, _ = await CreateUser.run(
+            beanie_client, None, name='alice', email='a@t.com',
+            uid=80001, fullname='Alice',
+        )
+        bob, _ = await CreateUser.run(
+            beanie_client, None, name='bob', email='b@t.com',
+            uid=80002, fullname='Bob',
+        )
+        alice_grp = await find_group_by_name('alice')
+        bob_grp = await find_group_by_name('bob')
+        vol = await _seed_volume(site, name='vol1', host='nas01',
+                                 host_path='/nas01/vol1')
+        # alice owns a home (group alice) and a share whose group is bob's
+        await Storage(name='alice', site=site, category='home',
+                      owner=alice, group=alice_grp, volume=vol).insert()
+        await Storage(name='bob', site=site, category='home',
+                      owner=bob, group=bob_grp, volume=vol).insert()
+        await Storage(name='shared1', site=site, category='share',
+                      owner=alice, group=bob_grp, volume=vol).insert()
+        return site, alice, bob, alice_grp, bob_grp
+
+    async def test_filters(self, beanie_client):
+        from cheeto.queries.storage import list_site_storages
+        site, alice, bob, alice_grp, bob_grp = await self._seed(beanie_client)
+
+        async def names(**kw):
+            return {s.name for s in await list_site_storages(site, **kw)}
+
+        assert await names() == {'alice', 'bob', 'shared1'}
+        assert await names(owner_id=alice.id) == {'alice', 'shared1'}
+        assert await names(group_id=bob_grp.id) == {'bob', 'shared1'}
+        assert await names(category='home') == {'alice', 'bob'}
+        assert await names(owner_id=alice.id, category='home') == {'alice'}
+        assert await names(owner_id=alice.id,
+                           group_id=bob_grp.id) == {'shared1'}
 
 
 class TestMigrateStorage:
