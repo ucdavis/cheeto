@@ -7,12 +7,17 @@ from rich.table import Table
 from .. import commands
 from ...constants import MOUNT_FSTYPES, STORAGE_BACKENDS, STORAGE_CATEGORIES
 from ...log import Console
+from ...models.base import link_target_id
 from ...models.storage import StaticMount, Storage, StorageVolume
 from ...operations import (
+    AddVolumeAllocation,
     CreateAutomountMap,
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
+    EditVolumeAllocation,
+    RehomeUser,
+    RemoveVolumeAllocation,
     SetStorageMount,
     SetVolumeStorageMounts,
 )
@@ -154,6 +159,15 @@ def _prop(fn):
         return f'[red]{e}[/]'
 
 
+def _alloc_lines(volume: StorageVolume) -> str:
+    """One line per allocation, prefixed with its 0-based index — the key
+    used by `storage volume alloc remove/edit`."""
+    return '\n'.join(
+        f'[cyan]\\[{i}][/] {a.quota}  [dim]{a.comment}[/]'
+        for i, a in enumerate(volume.allocations)
+    )
+
+
 def _render_volume_subtable(volume: StorageVolume) -> Table:
     vt = _kv_table()
     vt.add_row('name', volume.name)
@@ -164,9 +178,7 @@ def _render_volume_subtable(volume: StorageVolume) -> Table:
     if volume.parent is not None:
         vt.add_row('parent', getattr(volume.parent, 'name', '[dim](unfetched)[/]'))
     if volume.allocations:
-        vt.add_row('allocations', '\n'.join(
-            f'{a.quota}  [dim]{a.comment}[/]' for a in volume.allocations
-        ))
+        vt.add_row('allocations', _alloc_lines(volume))
     if volume.zfs is not None:
         vt.add_row('zfs dataset', volume.zfs.dataset_name or '[dim](unset)[/]')
     if volume.quobyte is not None:
@@ -335,6 +347,91 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
+# `ng storage rehome`
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply(required=True)
+@user_args.apply(required=True)
+@commands.register('ng', 'storage', 'rehome',
+                   help="Move a user's home storage onto the site default "
+                        'home volume (removes the current home record and '
+                        'recreates it from the site defaults)')
+async def storage_rehome(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+
+    storage = await get_storage(site, args.user, 'home')
+    if storage is None:
+        console.print(f'[red]No home storage for {args.user} on {args.site}[/]')
+        return 1
+
+    default_id = link_target_id(site.storage.default_home_volume)
+    if default_id is None:
+        console.print(
+            f'[red]Site {args.site} has no default home volume; set one with '
+            f'`ng site storage set-defaults`[/]'
+        )
+        return 1
+
+    if link_target_id(storage.volume.parent) == default_id:
+        console.print(
+            f"[green]{args.user}[/]'s home on {args.site} is already on the "
+            f'site default home volume; nothing to do'
+        )
+        return 0
+
+    default_volume = await StorageVolume.get(default_id)
+    console.print(_render_storage_panel(storage))
+    new_name = (f'{default_volume.name}/{args.user}'
+                if default_volume is not None else '[red](default dangling)[/]')
+    console.print(
+        f'[bold]Rehome plan:[/] volume [magenta]{storage.volume.name}[/] '
+        f'-> [magenta]{new_name}[/]; quota -> '
+        f'{site.storage.default_home_quota or "[dim](none)[/]"} (site default)'
+    )
+    console.print(
+        '[yellow]The old volume record is left in place and files on disk are '
+        'NOT moved; this only changes where the home is provisioned.[/]'
+    )
+
+    if not args.force:
+        try:
+            answer = input(
+                f'Rehome {args.user} on {args.site}? [y/N]: '
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[red]Aborted.[/]')
+            return 1
+        if answer != 'y':
+            console.print('[red]Aborted.[/]')
+            return 1
+
+    try:
+        new_storage = await RehomeUser.run(
+            args.db, args.author,
+            user_name=args.user, site_name=args.site,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Rehomed [green]{args.user}[/] on {args.site}: '
+        f'[magenta]{storage.volume.name}[/] -> '
+        f'[magenta]{new_storage.volume.name}[/] (old volume left in place)'
+    )
+
+
+@storage_rehome.args()
+def _(parser: ArgParser):
+    parser.add_argument('--force', '-f', action='store_true', default=False,
+                        help='Skip the confirmation prompt')
+
+
+# ---------------------------------------------------------------------------
 # `ng storage volume ...`
 # ---------------------------------------------------------------------------
 
@@ -435,10 +532,7 @@ async def storage_volume_show(args: Namespace):
     table.add_row('host_path', volume.host_path)
     table.add_row('quota', volume.quota or '[dim](none)[/]')
     if volume.allocations:
-        allocs = '\n'.join(
-            f'{a.quota}  [dim]{a.comment}[/]' for a in volume.allocations
-        )
-        table.add_row('allocations', allocs)
+        table.add_row('allocations', _alloc_lines(volume))
     if volume.nfs_export is not None:
         table.add_row('export_options',
                       volume.nfs_export.export_options or '[dim](none)[/]')
@@ -498,6 +592,120 @@ def _(parser: ArgParser):
                       help='Attach all to this static mount')
     mech.add_argument('--no-mount', action='store_true', default=False,
                       help='Clear the mount mechanism on all')
+
+
+# ---------------------------------------------------------------------------
+# `ng storage volume alloc ...`
+# ---------------------------------------------------------------------------
+
+
+@commands.register('ng', 'storage', 'volume', 'alloc',
+                   help="Manage a volume's quota allocations")
+def storage_volume_alloc_cmd(args: Namespace):
+    pass
+
+
+def _print_allocs(console: Console, volume: StorageVolume) -> None:
+    if volume.allocations:
+        console.print(_alloc_lines(volume))
+        console.print(
+            f'volume [magenta]{volume.name}[/] quota: [bold]{volume.quota}[/] '
+            f'across {len(volume.allocations)} allocation(s)'
+        )
+    else:
+        console.print(
+            f'volume [magenta]{volume.name}[/] now has '
+            f'[dim]no allocations (no quota)[/]'
+        )
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'storage', 'volume', 'alloc', 'add',
+                   help='Add a quota allocation to a volume')
+async def storage_volume_alloc_add(args: Namespace):
+    console = Console()
+    try:
+        volume = await AddVolumeAllocation.run(
+            args.db, args.author,
+            site_name=args.site, volume_name=args.name,
+            quota=args.quota, comment=args.comment,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Added allocation [green]{args.quota}[/] to [magenta]{args.name}[/] '
+        f'on {args.site}'
+    )
+    _print_allocs(console, volume)
+
+
+@storage_volume_alloc_add.args()
+def _(parser: ArgParser):
+    parser.add_argument('name', help='Volume name')
+    parser.add_argument('--quota', required=True,
+                        help='Allocation quota (e.g. 1T)')
+    parser.add_argument('--comment', default='',
+                        help='Allocation comment / label')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'storage', 'volume', 'alloc', 'remove',
+                   help='Remove a quota allocation from a volume by index')
+async def storage_volume_alloc_remove(args: Namespace):
+    console = Console()
+    try:
+        volume = await RemoveVolumeAllocation.run(
+            args.db, args.author,
+            site_name=args.site, volume_name=args.name, index=args.index,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Removed allocation [yellow]\\[{args.index}][/] from '
+        f'[magenta]{args.name}[/] on {args.site}'
+    )
+    _print_allocs(console, volume)
+
+
+@storage_volume_alloc_remove.args()
+def _(parser: ArgParser):
+    parser.add_argument('name', help='Volume name')
+    parser.add_argument('--index', type=int, required=True,
+                        help='0-based allocation index (see `volume show`)')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'storage', 'volume', 'alloc', 'edit',
+                   help="Edit a quota allocation's quota (and optionally its "
+                        'comment) by index')
+async def storage_volume_alloc_edit(args: Namespace):
+    console = Console()
+    try:
+        volume = await EditVolumeAllocation.run(
+            args.db, args.author,
+            site_name=args.site, volume_name=args.name, index=args.index,
+            quota=args.quota, comment=args.comment,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Edited allocation [green]\\[{args.index}][/] on '
+        f'[magenta]{args.name}[/] on {args.site}'
+    )
+    _print_allocs(console, volume)
+
+
+@storage_volume_alloc_edit.args()
+def _(parser: ArgParser):
+    parser.add_argument('name', help='Volume name')
+    parser.add_argument('--index', type=int, required=True,
+                        help='0-based allocation index (see `volume show`)')
+    parser.add_argument('--quota', required=True, help='New quota (e.g. 2T)')
+    parser.add_argument('--comment', default=None,
+                        help='Optionally relabel the allocation')
 
 
 # ---------------------------------------------------------------------------
