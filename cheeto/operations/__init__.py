@@ -1,4 +1,4 @@
-from .base import Operation
+from .base import OPERATIONS, Operation, get_operation, operation_names
 from .site import (
     AddSiteAlias,
     AddStickyGroup,

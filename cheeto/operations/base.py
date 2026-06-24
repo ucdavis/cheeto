@@ -29,6 +29,23 @@ class _UnsetType:
 UNSET: Final = _UnsetType()
 
 
+# Registry of concrete Operation subclasses keyed by op_name, populated
+# automatically via Operation.__init_subclass__. Lets callers discover/look up
+# ops by name (e.g. the `cheeto ng history --op` choices). Fully populated once
+# `cheeto.operations` is imported — its __init__ imports every op module.
+OPERATIONS: dict[str, type['Operation']] = {}
+
+
+def operation_names() -> list[str]:
+    """Sorted op_names of every registered Operation subclass."""
+    return sorted(OPERATIONS)
+
+
+def get_operation(op_name: str) -> type['Operation'] | None:
+    """The Operation subclass registered under `op_name`, or None."""
+    return OPERATIONS.get(op_name)
+
+
 class Operation(ABC):
     """Base class for all database write operations.
 
@@ -38,6 +55,21 @@ class Operation(ABC):
     """
 
     op_name: str
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        # Register each concrete op by its own op_name (not one inherited from
+        # a parent op). Fires for subclasses at any depth, so ops that extend
+        # other ops register too.
+        super().__init_subclass__(**kwargs)
+        op_name = cls.__dict__.get('op_name')
+        if op_name:
+            existing = OPERATIONS.get(op_name)
+            if existing is not None and existing is not cls:
+                raise ValueError(
+                    f'duplicate Operation op_name {op_name!r}: '
+                    f'{existing.__name__} and {cls.__name__}'
+                )
+            OPERATIONS[op_name] = cls
 
     # Whether _run wraps execute() + the History insert in a Mongo
     # transaction. Operations whose side effects are external and

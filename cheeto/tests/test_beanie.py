@@ -2368,6 +2368,120 @@ class TestUserActiveSites:
         assert await user_active_sites(user) == []
 
 
+class TestUserSiteOverrides:
+    """`user_site_overrides` reports per-site status/access overrides, with
+    None/[] marking 'inherit from global'."""
+
+    async def test_overrides_and_inherit(self, beanie_client):
+        from cheeto.queries import user_site_overrides
+
+        user = User(
+            name='so_user', email='so@test.com', uid=911001, gid=911001,
+            fullname='SO User', home_directory='/home/so_user',
+            status=await status_link('active'),
+            access=await access_links(['login-ssh']),
+        )
+        await user.insert()
+        # divergent overrides
+        site_a = Site(name='so_a', fqdn='so-a.test')
+        await site_a.insert()
+        await UserSiteInfo(
+            user=user, site=site_a,
+            status=await status_link('disabled'),
+            access=await access_links(['login-ssh', 'compute-ssh']),
+        ).insert()
+        # no overrides -> inherit
+        site_b = Site(name='so_b', fqdn='so-b.test')
+        await site_b.insert()
+        await UserSiteInfo(user=user, site=site_b).insert()
+
+        rows = await user_site_overrides(user)
+        assert rows == [
+            {'site': 'so_a', 'status': 'disabled',
+             'access': ['login-ssh', 'compute-ssh']},
+            {'site': 'so_b', 'status': None, 'access': []},
+        ]
+
+    async def test_empty_when_no_sites(self, beanie_client):
+        from cheeto.queries import user_site_overrides
+
+        user = User(
+            name='so_none', email='son@test.com', uid=911002, gid=911002,
+            fullname='SO None', home_directory='/home/so_none',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        assert await user_site_overrides(user) == []
+
+
+class TestOperationRegistry:
+    """The op_name -> Operation registry populated via __init_subclass__."""
+
+    async def test_lookup_and_names(self):
+        from cheeto.operations import get_operation, operation_names
+        names = operation_names()
+        assert 'set_user_status' in names
+        assert 'create_user' in names
+        assert get_operation('set_user_status') is SetUserStatus
+        assert get_operation('does_not_exist') is None
+
+    async def test_op_names_unique_and_consistent(self):
+        from cheeto.operations.base import OPERATIONS, Operation
+
+        def subclasses(cls):
+            for sub in cls.__subclasses__():
+                yield sub
+                yield from subclasses(sub)
+
+        seen: dict[str, str] = {}
+        for cls in subclasses(Operation):
+            op_name = cls.__dict__.get('op_name')
+            if not op_name:
+                continue
+            assert op_name not in seen, (
+                f'{op_name!r} on both {seen[op_name]} and {cls.__name__}'
+            )
+            seen[op_name] = cls.__name__
+        # every own-op_name class is in the registry under its own name
+        for op_name, name in seen.items():
+            assert OPERATIONS[op_name].__name__ == name
+
+
+class TestFindHistory:
+    """`find_history` filtering by op / date range / limit, newest first."""
+
+    async def _seed(self):
+        from datetime import datetime, timezone
+        from cheeto.models.history import History
+        await History(op='create_user', changes={},
+                      timestamp=datetime(2026, 1, 15, tzinfo=timezone.utc)).insert()
+        await History(op='set_user_status', changes={},
+                      timestamp=datetime(2026, 6, 15, tzinfo=timezone.utc)).insert()
+        await History(op='set_user_status', changes={},
+                      timestamp=datetime(2026, 12, 15, tzinfo=timezone.utc)).insert()
+
+    async def test_newest_first_and_op_filter(self, beanie_client):
+        from cheeto.queries import find_history
+        await self._seed()
+        all_entries = await find_history()
+        assert [e.timestamp.month for e in all_entries] == [12, 6, 1]
+        sus = await find_history(op='set_user_status')
+        assert {e.op for e in sus} == {'set_user_status'}
+        assert len(sus) == 2
+
+    async def test_date_bounds_and_limit(self, beanie_client):
+        from datetime import datetime, timezone
+        from cheeto.queries import find_history
+        await self._seed()
+        since = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        until = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        assert [e.timestamp.month for e in await find_history(since=since)] == [12, 6]
+        assert [e.timestamp.month for e in await find_history(until=until)] == [6, 1]
+        windowed = await find_history(since=since, until=until)
+        assert [e.timestamp.month for e in windowed] == [6]
+        assert len(await find_history(limit=1)) == 1
+
+
 class TestAccessOverrideSemantics:
     """Override (not union) semantics for User.access vs UserSiteInfo.access.
 

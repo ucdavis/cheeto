@@ -39,8 +39,8 @@ from ...queries import (
     list_user_ssh_keys,
     resolve_access_names,
     resolve_status_name,
-    user_active_sites,
     user_groups_at_site,
+    user_site_overrides,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml
 from ._args import (
@@ -85,7 +85,7 @@ async def _user_to_dict(user: User,
                         site_info: dict | None = None,
                         group_memberships: list[dict] | None = None,
                         slurm_info: list[dict] | None = None,
-                        active_sites: list[str] | None = None,
+                        sites: list[dict] | None = None,
                         iam_config=None) -> dict:
     data = {
         'name': user.name,
@@ -143,8 +143,8 @@ async def _user_to_dict(user: User,
         data['group_memberships'] = group_memberships
     if slurm_info is not None:
         data['slurm_info'] = slurm_info
-    if active_sites is not None:
-        data['active_sites'] = active_sites
+    if sites is not None:
+        data['sites'] = sites
     return data
 
 
@@ -180,6 +180,19 @@ def _render_user_groups(memberships: list[dict]) -> Table:
     table.add_column('roles', style='yellow')
     for entry in memberships:
         table.add_row(entry['group'], ', '.join(entry['roles']))
+    return table
+
+
+def _render_user_sites(sites: list[dict]) -> Table:
+    table = Table(show_header=True, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column('site', style='green')
+    table.add_column('status', style='yellow')
+    table.add_column('access', style='cyan')
+    inherit = '[dim](inherit)[/]'
+    for s in sites:
+        status = s['status'] if s['status'] is not None else inherit
+        access = ', '.join(s['access']) if s['access'] else inherit
+        table.add_row(s['site'], status, access)
     return table
 
 
@@ -273,12 +286,12 @@ def _render_user_panel(data: dict) -> Panel:
     if data.get('iam'):
         table.add_row('iam', _render_user_iam(data['iam']))
 
-    if 'active_sites' in data:
-        sites = data['active_sites']
-        table.add_row(
-            'active on',
-            ', '.join(sites) if sites else '[dim](no active sites)[/]',
-        )
+    if 'sites' in data:
+        sites = data['sites']
+        if not sites:
+            table.add_row('sites', '[dim](not on any site)[/]')
+        else:
+            table.add_row('sites', _render_user_sites(sites))
 
     if 'site_info' in data:
         si = data['site_info']
@@ -684,7 +697,7 @@ async def user_show(args: Namespace):
     site_info = None
     slurm_info = None
     group_memberships = None
-    active_sites = None
+    sites = None
     if args.site:
         site = await find_site_by_name(args.site)
         if site is None:
@@ -715,13 +728,13 @@ async def user_show(args: Namespace):
         )
         slurm_info = await user_slurm_at_site(user, site)
     else:
-        # No site given: summarize the sites the user is active on.
-        active_sites = await user_active_sites(user)
+        # No site given: summarize the user's per-site status/access overrides.
+        sites = await user_site_overrides(user)
 
     data = await _user_to_dict(
         user, ssh_keys=ssh_keys, site_info=site_info,
         group_memberships=group_memberships, slurm_info=slurm_info,
-        active_sites=active_sites, iam_config=args.config.ucdiam,
+        sites=sites, iam_config=args.config.ucdiam,
     )
     if args.yaml:
         console.print(highlight_yaml(dumps_yaml(data)))

@@ -19,7 +19,7 @@ from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
-from .access_status import resolve_status_name
+from .access_status import resolve_access_names, resolve_status_name
 
 
 Operator = Literal['AND', 'OR']
@@ -63,6 +63,25 @@ async def user_active_sites(user: User) -> list[str]:
         if await resolve_status_name(status) == 'active':
             active.append(usi.site.name)
     return sorted(active)
+
+
+async def user_site_overrides(user: User) -> list[dict]:
+    """Per-site status/access overrides for every site the user has a
+    UserSiteInfo on. `status` is the per-site StatusGroup name, or None when
+    there's no override (inherit from `User.status`); `access` is the per-site
+    access names, or `[]` (inherit from `User.access`). Sorted by site name."""
+    usis = await UserSiteInfo.find(
+        UserSiteInfo.user.id == user.id, fetch_links=True, nesting_depth=1,
+    ).to_list()
+    rows = [
+        {
+            'site': usi.site.name,
+            'status': await resolve_status_name(usi.status),
+            'access': await resolve_access_names(usi.access),
+        }
+        for usi in usis
+    ]
+    return sorted(rows, key=lambda r: r['site'])
 
 
 # ---------------------------------------------------------------------------

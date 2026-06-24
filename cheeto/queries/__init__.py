@@ -6,6 +6,7 @@ from .access_status import (
     resolve_status_ldapname,
     resolve_status_name,
 )
+from .history import find_history
 from .group import (
     GroupRole,
     UserGroupRoles,
@@ -55,4 +56,5 @@ from .user import (
     root_key_blocks,
     root_ssh_keys,
     user_active_sites,
+    user_site_overrides,
 )
