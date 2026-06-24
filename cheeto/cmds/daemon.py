@@ -8,6 +8,7 @@
 # Date   : 10.06.2026
 
 import argparse
+import logging
 import os
 from argparse import Namespace
 from pathlib import Path
@@ -164,9 +165,25 @@ def daemon_flower(args: Namespace):
     # Launch flower on the configured app so it inherits broker_url,
     # broker_use_ssl (TLS), and the mongodb result backend.
     configure_celery_app(args.config)
+    logger = logging.getLogger(__name__)
+
+    # Flower is sensitive to broker url format; have to convert amqps to amqp and add ssl=true
+    broker_url = app.conf.broker_url
+    if broker_url.startswith('amqps://'):
+        broker_url = broker_url.replace('amqps://', 'amqp://')
+        broker_url = f'{broker_url}?ssl=true'
+
+    app.conf.update(broker_url=broker_url)
+
+    # now derive to rabbitmq API url
+    _, _, broker_base_url = broker_url.partition('//')
+    broker_base_url, _, _ = broker_base_url.rpartition(':')
+    broker_api_url = f'https://{broker_base_url}:15671/api/'
+
     argv = ['flower',
             f'--address={args.address}',
-            f'--port={args.port}']
+            f'--port={args.port}',
+            f'--broker-api={broker_api_url}']
     if args.basic_auth:
         argv.append(f'--basic_auth={args.basic_auth}')
     if args.url_prefix:
@@ -176,6 +193,7 @@ def daemon_flower(args: Namespace):
     extra = args.flower_args[1:] if args.flower_args[:1] == ['--'] \
         else args.flower_args
     argv.extend(extra)
+    logger.info(f'Starting flower with argv: {argv}')
     app.start(argv)
 
 
