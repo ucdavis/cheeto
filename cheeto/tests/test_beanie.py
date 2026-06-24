@@ -1016,6 +1016,81 @@ class TestUserMutationOps:
         assert fetched.status.status_name == 'inactive'
         assert any('status=inactive' in c for c in fetched.comments)
 
+    async def _site_with_usi(self, user, *, usi_status):
+        site = Site(name='mut_site', fqdn='mut.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            status=await status_link(usi_status) if usi_status else None,
+        ).insert()
+        return site
+
+    async def test_set_user_status_site_redundant_cleared(
+        self, beanie_client, user,
+    ):
+        # Global status is 'active'; setting the per-site status to 'active'
+        # too is redundant, so it should be stored as None (fall back).
+        site = await self._site_with_usi(user, usi_status='inactive')
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='active', reason='r', site='mut_site',
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        assert usi.status is None
+
+    async def test_set_user_status_site_divergent_kept(
+        self, beanie_client, user,
+    ):
+        # A per-site status that differs from the global one is a real
+        # override and must be stored.
+        site = await self._site_with_usi(user, usi_status='active')
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='disabled', reason='r', site='mut_site',
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+            fetch_links=True, nesting_depth=1,
+        )
+        assert usi.status is not None
+        assert usi.status.status_name == 'disabled'
+
+    async def test_set_user_status_site_reset(self, beanie_client, user):
+        from datetime import datetime as _dt
+        site = await self._site_with_usi(user, usi_status='disabled')
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
+        usi.expires_at = _dt(2030, 1, 1)
+        await usi.save()
+
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', reason='r', site='mut_site', reset=True,
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        assert usi.status is None
+        assert usi.expires_at is None
+
+    async def test_set_user_status_reset_requires_site(
+        self, beanie_client, user,
+    ):
+        with pytest.raises(ValueError, match='reset requires a site'):
+            await SetUserStatus.run(
+                beanie_client, None,
+                name='mutuser', reason='r', reset=True,
+            )
+
+    async def test_set_user_status_requires_status_without_reset(
+        self, beanie_client, user,
+    ):
+        with pytest.raises(ValueError, match='status is required'):
+            await SetUserStatus.run(
+                beanie_client, None, name='mutuser', reason='r',
+            )
+
     async def test_set_user_type(self, beanie_client, user):
         await SetUserType.run(
             beanie_client, None, name='mutuser', type='admin',

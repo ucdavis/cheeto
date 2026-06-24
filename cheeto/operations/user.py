@@ -302,22 +302,27 @@ class SetUserStatus(Operation):
         author: User | None,
         *,
         name: str,
-        status: str,
+        status: str | None = None,
         reason: str,
         site: str | None = None,
+        reset: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.name = name
         self.status = status
         self.reason = reason
         self.site = site
+        self.reset = reset
 
     async def execute(self, session: AsyncClientSession) -> None:
+        if self.reset and self.site is None:
+            raise ValueError('SetUserStatus: reset requires a site')
+        if not self.reset and self.status is None:
+            raise ValueError('SetUserStatus: status is required unless reset')
+
         user = await User.find_one(User.name == self.name)
         if user is None:
             raise ValueError(f'User {self.name} does not exist')
-
-        status_link = await _resolve_status_link(self.status)
 
         if self.site is None:
             # Clear the pending offboarding expiry when reactivating, so the
@@ -327,7 +332,7 @@ class SetUserStatus(Operation):
                 and await resolve_status_name(user.status) == 'offboarding'
             ):
                 user.expires_at = None
-            user.status = status_link
+            user.status = await _resolve_status_link(self.status)
         else:
             from ..models.site import Site
             from ..models.user_site_info import UserSiteInfo
@@ -341,16 +346,29 @@ class SetUserStatus(Operation):
             )
             if usi is None:
                 raise ValueError(f'User {self.name} not on site {self.site}')
-            if (
-                self.status == 'active'
-                and await resolve_status_name(usi.status) == 'offboarding'
-            ):
+            if self.reset:
+                # Drop the per-site override entirely; the site falls back to
+                # the global User.status. The per-site expiry goes with it.
+                usi.status = None
                 usi.expires_at = None
-            usi.status = status_link
+            else:
+                if (
+                    self.status == 'active'
+                    and await resolve_status_name(usi.status) == 'offboarding'
+                ):
+                    usi.expires_at = None
+                status_link = await _resolve_status_link(self.status)
+                # A per-site status equal to the global one is redundant
+                # (effective status is unchanged): store None so it falls
+                # back to User.status instead of shadowing it.
+                if link_target_id(status_link) == link_target_id(user.status):
+                    usi.status = None
+                else:
+                    usi.status = status_link
             await usi.save(session=session)
 
         comment = (
-            f'status={self.status}, '
+            f'status={"reset" if self.reset else self.status}, '
             f'scope={self.site or "global"}, '
             f'reason={self.reason}'
         )
@@ -363,6 +381,7 @@ class SetUserStatus(Operation):
             'status': self.status,
             'reason': self.reason,
             'site': self.site,
+            'reset': self.reset,
         }
 
 

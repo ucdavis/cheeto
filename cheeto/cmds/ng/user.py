@@ -425,18 +425,38 @@ async def user_new_shared(args: Namespace):
                    help='Set user status')
 async def user_status(args: Namespace):
     console = Console()
+    if args.reset:
+        if args.site is None:
+            console.print('[red]--reset requires --site[/]')
+            return 1
+        if args.status is not None:
+            console.print('[red]--reset cannot be combined with --status[/]')
+            return 1
+    elif args.status is None:
+        console.print('[red]--status is required (or use --reset with --site)[/]')
+        return 1
+
     await SetUserStatus.run(
         args.db, args.author,
         name=args.user, status=args.status,
-        reason=args.reason, site=args.site,
+        reason=args.reason, site=args.site, reset=args.reset,
     )
-    scope = args.site or 'global'
-    console.print(f'Set [green]{args.user}[/] status to [yellow]{args.status}[/] ({scope})')
+    if args.reset:
+        console.print(
+            f'Reset [green]{args.user}[/] per-site status override ({args.site})'
+        )
+    else:
+        scope = args.site or 'global'
+        console.print(f'Set [green]{args.user}[/] status to [yellow]{args.status}[/] ({scope})')
 
 
 @user_status.args()
 def _(parser: ArgParser):
-    parser.add_argument('--status', required=True, choices=list(USER_STATUSES))
+    parser.add_argument('--status', default=None, choices=list(USER_STATUSES),
+                        help='New status (required unless --reset)')
+    parser.add_argument('--reset', action='store_true', default=False,
+                        help='Clear the per-site status override (requires '
+                             '--site)')
     parser.add_argument('--reason', required=True)
 
 
