@@ -36,7 +36,8 @@ from ...operations import (
     SyncSiteLDAP,
     SyncUserToLDAP,
 )
-from ._args import group_args, site_args, user_args
+from ...yaml import print_yaml
+from ._args import group_args, site_args, user_args, yaml_args
 
 
 @commands.register('ng', 'ldap',
@@ -485,6 +486,7 @@ def ldap_show_cmd(args: Namespace):
 
 @site_args.apply(required=True)
 @user_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'ldap', 'show', 'user',
                    help='Show LDAP record for a user')
 async def ldap_show_user_cmd(args: Namespace):
@@ -499,6 +501,18 @@ async def ldap_show_user_cmd(args: Namespace):
     if record is None:
         console.print(f'[red]No LDAP entry for {args.user}[/]')
         return 1
+    if args.yaml:
+        print_yaml({
+            'username': record.username,
+            'uid': record.uid,
+            'gid': record.gid,
+            'email': record.email,
+            'home_directory': record.home_directory,
+            'shell': record.shell,
+            'ssh_keys': list(record.ssh_keys),
+            'memberships': sorted(memberships),
+        })
+        return 0
     table = Table.grid(padding=(0, 1))
     table.add_column(style='bold cyan', no_wrap=True)
     table.add_column()
@@ -522,6 +536,7 @@ async def ldap_show_user_cmd(args: Namespace):
 
 @site_args.apply(required=True)
 @group_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'ldap', 'show', 'group',
                    help='Show LDAP record for a group')
 async def ldap_show_group_cmd(args: Namespace):
@@ -532,6 +547,13 @@ async def ldap_show_group_cmd(args: Namespace):
     if record is None:
         console.print(f'[red]No LDAP entry for {args.group}[/]')
         return 1
+    if args.yaml:
+        print_yaml({
+            'groupname': record.groupname,
+            'gid': record.gid,
+            'members': sorted(record.members),
+        })
+        return 0
     console.print(
         f'[bold]{record.groupname}[/] gid={record.gid} '
         f'members=[dim]{", ".join(sorted(record.members)) or "(none)"}[/]',
@@ -539,6 +561,7 @@ async def ldap_show_group_cmd(args: Namespace):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'ldap', 'show', 'site',
                    help='Probe site OU tree + special-group presence')
 async def ldap_show_site_cmd(args: Namespace):
@@ -561,6 +584,10 @@ async def ldap_show_site_cmd(args: Namespace):
         status_records = await StatusGroup.find_all().to_list()
         for record in access_records + status_records:
             statuses[f'group:{record.name}'] = await ldap.group_exists(record.name)
+
+    if args.yaml:
+        print_yaml(statuses)
+        return 0
 
     table = Table(title=f'LDAP site state: {args.site}')
     table.add_column('check', style='cyan')

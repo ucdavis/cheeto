@@ -42,13 +42,14 @@ from ...queries import (
     user_groups_at_site,
     user_site_overrides,
 )
-from ...yaml import dumps as dumps_yaml, highlight_yaml
+from ...yaml import print_yaml
 from ._args import (
     email_args,
     fullname_args,
     password_args,
     site_args,
     user_args,
+    yaml_args,
 )
 from ._slurm_show import user_slurm_at_site
 
@@ -737,7 +738,7 @@ async def user_show(args: Namespace):
         sites=sites, iam_config=args.config.ucdiam,
     )
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(data)))
+        print_yaml(data)
     else:
         console.print(_render_user_panel(data))
 
@@ -812,10 +813,7 @@ async def user_list(args: Namespace):
             'status': _status_of(u),
             'access': _access_of(u),
         } for u in users]
-        console.print(highlight_yaml(dumps_yaml({
-            'count': len(rows),
-            'users': rows,
-        })))
+        print_yaml(rows)
         return
 
     title = f'Users (count={len(users)}, operator={operator})'
@@ -875,6 +873,7 @@ async def user_clear_offboarding_site_statuses(args: Namespace):
     )
 
 
+@yaml_args.apply()
 @commands.register('ng', 'user', 'redundant-site-statuses',
                    help='List per-site status overrides that duplicate the '
                         'user\'s global status; --clear removes them')
@@ -888,6 +887,10 @@ async def user_redundant_site_statuses(args: Namespace):
         )
         return
     rows = await find_redundant_site_statuses()
+    if args.yaml:
+        print_yaml([{'user': u, 'site': s, 'status': st}
+                    for u, s, st in rows])
+        return
     if not rows:
         console.print('No redundant per-site status overrides.')
         return

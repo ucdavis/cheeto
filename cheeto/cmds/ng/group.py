@@ -27,7 +27,7 @@ from ...operations import (
     RemoveGroupSudoer,
 )
 from ...queries import group_members_at_site
-from ...yaml import dumps as dumps_yaml, highlight_yaml
+from ...yaml import print_yaml
 from ._args import group_args, site_args, user_args
 from ._slurm_show import group_slurm_at_site
 
@@ -375,7 +375,7 @@ async def group_show(args: Namespace):
         data = _group_to_dict(group)
 
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(data)))
+        print_yaml(data)
     else:
         console.print(_render_group_panel(data))
 

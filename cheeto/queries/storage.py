@@ -167,11 +167,13 @@ async def get_storage(
 
 async def list_site_storages(
     site: Site, category: str | None = None, *,
-    owner_id=None, group_id=None,
+    owner_id=None, group_id=None, host=None,
 ) -> list[Storage]:
     """All Storage records at a site, fully resolved (depth 2) so
     mount_path works for both automount and static mounts. Optionally
-    filtered (AND) by category and/or owner/group document id."""
+    filtered (AND) by category, owner/group document id, and/or backing-
+    volume host. Host lives on the volume (a derived Storage property), so
+    it is filtered on the already-fetched rows rather than in the query."""
     filters = [Storage.site.id == site.id]
     if category is not None:
         filters.append(Storage.category == category)
@@ -179,8 +181,11 @@ async def list_site_storages(
         filters.append(Storage.owner.id == owner_id)
     if group_id is not None:
         filters.append(Storage.group.id == group_id)
-    return await Storage.find(
+    storages = await Storage.find(
         *filters,
         fetch_links=True,
         nesting_depth=2,
     ).sort('+name').to_list()
+    if host is not None:
+        storages = [s for s in storages if s.host == host]
+    return storages

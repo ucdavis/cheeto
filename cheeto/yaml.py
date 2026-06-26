@@ -112,3 +112,12 @@ def highlight_yaml(dumped: str):
                   'yaml',
                   theme='github-dark',
                   background_color='default')
+
+
+def print_yaml(obj: Any) -> None:
+    """Dump `obj` as YAML to STDOUT — the single emit point for CLI `--yaml`
+    output. The repo's Console defaults to stderr; this routes to stdout so
+    YAML is pipeable. highlight_yaml returns a Rich Syntax, so color is
+    dropped automatically when the output is not a TTY (clean piped YAML)."""
+    from .log import Console  # local import: log.py does not import yaml.py
+    Console(stderr=False).print(highlight_yaml(dumps(obj)))

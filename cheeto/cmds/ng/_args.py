@@ -137,3 +137,9 @@ def fullname_args(parser: ArgParser, required: bool = True):
 def password_args(parser: ArgParser):
     parser.add_argument('--password', action='store_true', default=False,
                         help='Generate a random password for the user')
+
+
+@arggroup('yaml')
+def yaml_args(parser: ArgParser):
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML to stdout')

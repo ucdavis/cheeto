@@ -10,7 +10,8 @@ from ...log import Console
 from ...models.user import User
 from ...operations import operation_names
 from ...queries import find_history
-from ._args import user_args
+from ...yaml import print_yaml
+from ._args import user_args, yaml_args
 
 
 def _parse_dt(value: str):
@@ -23,6 +24,7 @@ def _parse_dt(value: str):
 
 
 @user_args.apply()
+@yaml_args.apply()
 @commands.register('ng', 'history',
                    help='Query operation history')
 async def history_cmd(args: Namespace):
@@ -50,6 +52,24 @@ async def history_cmd(args: Namespace):
         op=args.op, author_id=author_id,
         since=since, until=until, limit=args.limit,
     )
+
+    if args.yaml:
+        rows = []
+        for entry in entries:
+            if isinstance(entry.author, User):
+                author = entry.author.name
+            elif entry.author is None:
+                author = None
+            else:
+                author = 'Unknown'
+            rows.append({
+                'timestamp': entry.timestamp,
+                'op': entry.op,
+                'author': author,
+                'changes': entry.changes,
+            })
+        print_yaml(rows)
+        return 0
 
     if not entries:
         console.print('[dim]No history entries found[/]')

@@ -39,7 +39,7 @@ from ...queries import (
     root_authorized_keys_text,
     site_to_puppet_legacy,
 )
-from ...yaml import dumps as dumps_yaml, highlight_yaml
+from ...yaml import dumps as dumps_yaml, highlight_yaml, print_yaml
 from ._args import group_args, site_args
 
 
@@ -77,9 +77,7 @@ async def site_list(args: Namespace):
     console = Console()
     sites = await Site.find_all().sort('+name').to_list()
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(
-            [{'name': s.name, 'fqdn': s.fqdn} for s in sites],
-        )))
+        print_yaml([{'name': s.name, 'fqdn': s.fqdn} for s in sites])
         return
     table = Table(title=f'Sites (count={len(sites)})')
     table.add_column('name', style='green', no_wrap=True)
@@ -238,7 +236,7 @@ async def site_show(args: Namespace):
         return 1
     data = await _site_to_dict(site)
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(data)))
+        print_yaml(data)
     else:
         console.print(_render_site_panel(data))
 

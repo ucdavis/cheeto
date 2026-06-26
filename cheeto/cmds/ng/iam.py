@@ -25,7 +25,8 @@ from ...operations import (
 )
 from ...operations.iam import maybe_notify_offboarding
 from ...queries import resolve_status_name
-from ._args import user_args
+from ...yaml import print_yaml
+from ._args import user_args, yaml_args
 
 
 @commands.register('ng', 'iam',
@@ -148,6 +149,7 @@ def _(parser: ArgParser):
 
 
 @user_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'iam', 'show',
                    help='Show stored IAM bookkeeping for a user (no IAM call)')
 async def iam_show_cmd(args: Namespace):
@@ -158,6 +160,39 @@ async def iam_show_cmd(args: Namespace):
         return 1
 
     cfg = args.config.ucdiam
+
+    if args.yaml:
+        iam_data = None
+        if user.iam is not None:
+            iam = user.iam
+            person = None
+            if iam.person is not None:
+                person = {
+                    'iam_id': iam.person.iam_id,
+                    'mothra_id': iam.person.mothra_id,
+                    'user_types': list(iam.person.user_types),
+                    'associations': [
+                        {'dept': a.dept_name, 'title': a.title,
+                         'class': a.title_type}
+                        for a in iam.person.associations
+                    ],
+                }
+            iam_data = {
+                'iam_status': iam.iam_status,
+                'iam_synced_at': iam.iam_synced_at,
+                'last_seen_at': iam.last_seen_at,
+                'first_missing_at': iam.first_missing_at,
+                'person': person,
+            }
+        print_yaml({
+            'name': user.name,
+            'type': user.type,
+            'status': await resolve_status_name(user.status),
+            'expires_at': user.expires_at,
+            'iam': iam_data,
+        })
+        return 0
+
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
     table.add_column(style='bold cyan', no_wrap=True)
     table.add_column()
