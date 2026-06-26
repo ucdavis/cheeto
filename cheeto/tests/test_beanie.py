@@ -5795,6 +5795,100 @@ class TestStorageYamlDicts:
         assert d['quobyte'] is None
 
 
+class TestListSiteStoragesHydration:
+    """list_site_storages resolves links via batched queries: derived
+    properties (incl. static-mount mount_path) work, and the query count is
+    bounded and constant regardless of row count (no N+1 / deep fetch)."""
+
+    async def test_static_and_automount_properties(self, beanie_client):
+        from cheeto.queries import find_group_by_name
+        from cheeto.queries.storage import (
+            list_site_storages, mount_mechanism_label,
+        )
+        site = Site(name='hyd_site', fqdn='hyd.test')
+        await site.insert()
+        central = await _seed_volume(site, name='home', host='nas01',
+                                     host_path='/nas01/home')
+        uvol = await _seed_volume(
+            site, name='home/su', host='nas01', host_path='/nas01/home/su',
+            parent=central,
+            allocations=[StorageAllocation(quota='1T', comment='base')],
+        )
+        smount = StaticMount(name='home', site=site, fstype='nfs4',
+                             volume=central, mount_path='/home',
+                             options=['defaults'])
+        await smount.insert()
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        su, _ = await CreateUser.run(beanie_client, None, name='su',
+                                     email='su@t.com', uid=90001, fullname='x')
+        au, _ = await CreateUser.run(beanie_client, None, name='au',
+                                     email='au@t.com', uid=90002, fullname='x')
+        su_g = await find_group_by_name('su')
+        au_g = await find_group_by_name('au')
+        await Storage(name='su', site=site, category='home', owner=su,
+                      group=su_g, volume=uvol, static_mount=smount).insert()
+        await Storage(name='au', site=site, category='home', owner=au,
+                      group=au_g, volume=central, automount_map=amap,
+                      mount_name='au').insert()
+
+        rows = {s.name: s for s in await list_site_storages(site)}
+        su_s = rows['su']
+        assert su_s.owner.name == 'su'
+        assert su_s.group.name == 'su'
+        assert su_s.volume.name == 'home/su'
+        assert su_s.host == 'nas01'
+        assert su_s.quota == '1T'
+        assert su_s.mount_path == '/home/su'   # static: needs sm.volume hydrated
+        assert mount_mechanism_label(su_s) == 'static:home'
+
+        au_s = rows['au']
+        assert au_s.mount_path == '/home/au'   # automount
+        assert mount_mechanism_label(au_s) == 'automount:home'
+
+    async def test_query_count_constant(self, beanie_client, cmd_counter):
+        from cheeto.queries import find_group_by_name
+        from cheeto.queries.storage import (
+            list_site_storages, list_site_volumes,
+        )
+        site = Site(name='qc_site', fqdn='qc.test')
+        await site.insert()
+        vol = await _seed_volume(site, name='home', host='nas01',
+                                 host_path='/nas01/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+
+        async def add(names, base_uid):
+            for i, nm in enumerate(names):
+                u, _ = await CreateUser.run(
+                    beanie_client, None, name=nm, email=f'{nm}@t.com',
+                    uid=base_uid + i, fullname='x')
+                g = await find_group_by_name(nm)
+                await Storage(name=nm, site=site, category='home', owner=u,
+                              group=g, volume=vol, automount_map=amap,
+                              mount_name=nm).insert()
+
+        await add(['a', 'b'], 91000)
+        cmd_counter.commands.clear()
+        await list_site_storages(site)
+        n2 = len(cmd_counter.commands)
+
+        await add(['c', 'd', 'e'], 91100)
+        cmd_counter.commands.clear()
+        await list_site_storages(site)
+        n5 = len(cmd_counter.commands)
+
+        assert n2 == n5, (
+            f'list_site_storages query count grew with row count '
+            f'({n2} -> {n5}); N+1 / over-fetch regression'
+        )
+        assert n5 <= 8, f'expected a small fixed query count, got {n5}'
+
+        cmd_counter.commands.clear()
+        await list_site_volumes(site)
+        assert len(cmd_counter.commands) <= 2
+
+
 class TestMigrateStorage:
     """v1 storage (collections + NFS/ZFS sources + automounts) → v2
     (StorageVolume + Storage + AutomountMap), incl. the Farm legacy acid

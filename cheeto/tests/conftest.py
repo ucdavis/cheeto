@@ -7,12 +7,51 @@ import sys
 import time
 import re
 
-from pymongo import MongoClient
+from pymongo import MongoClient, monitoring
 import pytest
 
 from ..config import get_config
 from ..log import setup as _setup_logging
 from ..types import is_listlike
+
+
+class _CmdCounter(monitoring.CommandListener):
+    """Counts find/aggregate/getMore commands while `enabled`, so a test can
+    assert a query helper issues a bounded, constant number of round-trips
+    (an N+1 / over-fetch regression guard). Registered globally at import time
+    so it sees the session AsyncMongoClient created later in `beanie_client`."""
+
+    def __init__(self):
+        self.enabled = False
+        self.commands: list[str] = []
+
+    def started(self, event):
+        if self.enabled and event.command_name in {'find', 'aggregate',
+                                                    'getMore'}:
+            self.commands.append(event.command_name)
+
+    def succeeded(self, event):
+        pass
+
+    def failed(self, event):
+        pass
+
+
+CMD_COUNTER = _CmdCounter()
+monitoring.register(CMD_COUNTER)
+
+
+@pytest.fixture
+def cmd_counter():
+    """Arm CMD_COUNTER for the duration of a test; clear it on entry so only
+    commands issued during the test are counted."""
+    CMD_COUNTER.commands.clear()
+    CMD_COUNTER.enabled = True
+    try:
+        yield CMD_COUNTER
+    finally:
+        CMD_COUNTER.enabled = False
+        CMD_COUNTER.commands.clear()
 
 
 MONGODB_PORT = 28080

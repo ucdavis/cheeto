@@ -635,7 +635,7 @@ async def storage_volume_list(args: Namespace):
     table.add_column('quota', justify='right')
     table.add_column('parent', style='magenta')
     for v in volumes:
-        parent = v.parent.name if v.parent is not None else '—'
+        parent = getattr(v.parent, 'name', '—')
         table.add_row(
             v.name, v.backend, v.host, v.host_path, v.quota or '—', parent,
         )

@@ -7,16 +7,23 @@ Depth guide: `nesting_depth=1` resolves `Storage.volume` and
 automount mount_path (volume host/host_path are concrete, never resolved
 through `parent`). Static-mount `mount_path` additionally needs
 `static_mount.volume` fetched, i.e. `nesting_depth=2` — only `get_storage`
-and the CLI listing use that.
+uses that. The bulk listing (`list_site_storages`) instead resolves links
+with one batched query per field (`_hydrate_storage_links`): a blanket
+`nesting_depth=2` find fans every owner out into its status/access/back-links
+and is pathologically slow on a busy site.
 """
 
 from __future__ import annotations
 
 import asyncio
 
+from beanie.operators import In
+
 from ..models.base import link_target_id
+from ..models.group import Group
 from ..models.site import Site, SiteStorageSettings
 from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
+from ..models.user import User
 
 
 async def list_automap_storages(site: Site, category: str) -> list[Storage]:
@@ -60,11 +67,19 @@ async def find_volume(site: Site, name: str) -> StorageVolume | None:
 
 
 async def list_site_volumes(site: Site) -> list[StorageVolume]:
-    return await StorageVolume.find(
+    """All volumes at a site (sorted by name), each `parent` resolved from the
+    in-result set rather than via a link fetch — volumes nest within a site,
+    so the parent is always present in the same result. Callers that only need
+    the parent id (e.g. `link_target_id(v.parent)`) work either way."""
+    volumes = await StorageVolume.find(
         StorageVolume.site.id == site.id,
-        fetch_links=True,
-        nesting_depth=1,
     ).sort('+name').to_list()
+    by_id = {v.id: v for v in volumes}
+    for v in volumes:
+        pid = link_target_id(v.parent)
+        if pid is not None and pid in by_id:
+            v.parent = by_id[pid]
+    return volumes
 
 
 async def find_static_mount(site: Site, name: str) -> StaticMount | None:
@@ -165,15 +180,54 @@ async def get_storage(
     )
 
 
+async def _hydrate_storage_links(storages: list[Storage]) -> None:
+    """Resolve every storage's Link fields with one batched query per field
+    and assign the fetched docs back in place, so the derived properties
+    (host/host_path/quota/mount_path/mount_options) work without a deep
+    per-row fetch. `static_mount` is fetched with its own volume so static
+    `mount_path` resolves. Fixed query count, independent of len(storages)."""
+    if not storages:
+        return
+
+    def _ids(attr: str) -> list:
+        return list({
+            tid for s in storages
+            if (tid := link_target_id(getattr(s, attr))) is not None
+        })
+
+    async def _by_id(model, ids, **find_kwargs) -> dict:
+        if not ids:
+            return {}
+        docs = await model.find(In(model.id, ids), **find_kwargs).to_list()
+        return {d.id: d for d in docs}
+
+    volumes, owners, groups, maps, smounts = await asyncio.gather(
+        _by_id(StorageVolume, _ids('volume')),
+        _by_id(User, _ids('owner')),
+        _by_id(Group, _ids('group'), with_children=True),
+        _by_id(AutomountMap, _ids('automount_map')),
+        _by_id(StaticMount, _ids('static_mount'),
+               fetch_links=True, nesting_depth=1),
+    )
+    for s in storages:
+        s.volume = volumes.get(link_target_id(s.volume))
+        s.owner = owners.get(link_target_id(s.owner))
+        s.group = groups.get(link_target_id(s.group))
+        mid = link_target_id(s.automount_map)
+        s.automount_map = maps.get(mid) if mid is not None else None
+        sid = link_target_id(s.static_mount)
+        s.static_mount = smounts.get(sid) if sid is not None else None
+
+
 async def list_site_storages(
     site: Site, category: str | None = None, *,
     owner_id=None, group_id=None, host=None,
 ) -> list[Storage]:
-    """All Storage records at a site, fully resolved (depth 2) so
-    mount_path works for both automount and static mounts. Optionally
-    filtered (AND) by category, owner/group document id, and/or backing-
-    volume host. Host lives on the volume (a derived Storage property), so
-    it is filtered on the already-fetched rows rather than in the query."""
+    """All Storage records at a site, with volume/owner/group/mount links
+    resolved via batched per-field queries (`_hydrate_storage_links`) so the
+    derived properties work. Optionally filtered (AND) by category and/or
+    owner/group document id (indexed Storage fields), and/or backing-volume
+    host (a derived property, filtered on the hydrated rows)."""
     filters = [Storage.site.id == site.id]
     if category is not None:
         filters.append(Storage.category == category)
@@ -181,11 +235,8 @@ async def list_site_storages(
         filters.append(Storage.owner.id == owner_id)
     if group_id is not None:
         filters.append(Storage.group.id == group_id)
-    storages = await Storage.find(
-        *filters,
-        fetch_links=True,
-        nesting_depth=2,
-    ).sort('+name').to_list()
+    storages = await Storage.find(*filters).sort('+name').to_list()
+    await _hydrate_storage_links(storages)
     if host is not None:
         storages = [s for s in storages if s.host == host]
     return storages
