@@ -8,6 +8,7 @@ from rich.table import Table
 from .. import commands
 from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
+from ...iam_async import AsyncIAMAPI
 from ...log import Console
 from ...models.group import AccessGroup, StatusGroup
 from ...models.site import Site
@@ -29,6 +30,7 @@ from ...operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    create_user_from_iam,
 )
 from ...queries import (
     effective_access_links,
@@ -431,6 +433,43 @@ async def user_new_shared(args: Namespace):
     console.print(f'Created shared user [green]{user.name}[/] (uid={user.uid})')
     if password is not None:
         _announce_password(console, password)
+
+
+@password_args.apply()
+@commands.register('ng', 'user', 'new', 'iam',
+                   help='Create a user from queried UC Davis IAM data '
+                        '(uid/gid from mothra_id), then sync the IAM snapshot')
+async def user_new_iam(args: Namespace):
+    console = Console()
+    cfg = args.config.ucdiam
+    password = generate_password() if args.password else None
+    try:
+        async with AsyncIAMAPI(cfg) as iam_api:
+            user = await create_user_from_iam(
+                args.db, args.author,
+                iam_api=iam_api, identifier=args.identifier,
+                user_type=args.type, access=args.access, password=password,
+                grace_days=cfg.grace_days,
+                expiry_offset_days=cfg.expiry_offset_days,
+            )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Created user [green]{user.name}[/] (uid={user.uid}) from IAM'
+    )
+    if password is not None:
+        _announce_password(console, password)
+
+
+@user_new_iam.args()
+def _(parser: ArgParser):
+    parser.add_argument('identifier',
+                        help='Username or email to look up in IAM')
+    parser.add_argument('--type', default='user', choices=list(USER_TYPES))
+    parser.add_argument('--access', nargs='+', default=['slurm', 'login-ssh'],
+                        choices=list(ACCESS_TYPES),
+                        help='Access types (default: slurm login-ssh)')
 
 
 @site_args.apply()

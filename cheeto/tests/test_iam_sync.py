@@ -30,13 +30,17 @@ from ..iam_async import (
 )
 from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail
 from ..models import ALL_MODELS
+from ..models.group import Group
 from ..models.history import History
 from ..models.user import UCDIAMInfo, UCDIAMPerson, User
 from ..operations import (
     ReapOffboardedUsers,
     SyncAllUsersIAM,
     SyncUserIAM,
+    create_user_from_iam,
 )
+from ..operations.iam import _iam_user_fields
+from ..queries import resolve_access_names
 
 from .conftest import MONGODB_PORT, seed_access_status_groups, status_link
 
@@ -978,3 +982,152 @@ class TestReapOffboardedUsersNotify:
             User.name == 'past2', fetch_links=True, nesting_depth=1,
         )
         assert fetched.status.status_name == 'inactive'
+
+
+# ---------------------------------------------------------------------------
+# create_user_from_iam — build a User entirely from queried IAM data
+# ---------------------------------------------------------------------------
+
+
+# Richer than PERSON_JANE: carries the campusEmail / dFullName that
+# _iam_user_fields requires.
+PERSON_RICH = {
+    'iamId': '1000000001',
+    'mothraId': '01000001',
+    'userId': 'jdoe',
+    'campusEmail': 'jdoe@ucdavis.edu',
+    'dFullName': 'Jane Doe',
+    'oFullName': 'Jane O Doe',
+    'isEmployee': True,
+    'isStaff': True,
+    'isHSEmployee': False,
+    'isFaculty': False,
+    'isStudent': False,
+    'isExternal': False,
+}
+
+
+class TestIamUserFields:
+    """_iam_user_fields: map an IAM person to CreateUser kwargs (uid==gid==mothra)."""
+
+    def test_valid(self):
+        fields = _iam_user_fields(PERSON_RICH, fallback_email=None)
+        assert fields == {
+            'name': 'jdoe', 'email': 'jdoe@ucdavis.edu',
+            'uid': 1000001, 'gid': 1000001, 'fullname': 'Jane Doe',
+        }
+
+    def test_email_fallback(self):
+        person = {k: v for k, v in PERSON_RICH.items() if k != 'campusEmail'}
+        fields = _iam_user_fields(person, fallback_email='fallback@ucdavis.edu')
+        assert fields['email'] == 'fallback@ucdavis.edu'
+
+    def test_missing_userid(self):
+        person = {k: v for k, v in PERSON_RICH.items() if k != 'userId'}
+        with pytest.raises(ValueError, match='kerberos username'):
+            _iam_user_fields(person, fallback_email=None)
+
+    def test_missing_mothra(self):
+        person = {k: v for k, v in PERSON_RICH.items() if k != 'mothraId'}
+        with pytest.raises(ValueError, match='mothraId'):
+            _iam_user_fields(person, fallback_email=None)
+
+    def test_missing_email(self):
+        person = {k: v for k, v in PERSON_RICH.items() if k != 'campusEmail'}
+        with pytest.raises(ValueError, match='no email'):
+            _iam_user_fields(person, fallback_email=None)
+
+    def test_missing_fullname(self):
+        person = {k: v for k, v in PERSON_RICH.items()
+                  if k not in ('dFullName', 'oFullName')}
+        with pytest.raises(ValueError, match='full name'):
+            _iam_user_fields(person, fallback_email=None)
+
+
+class TestResolveIamIdByEmail:
+
+    async def test_hit(self):
+        def handler(request):
+            if '/iam/people/contactinfo/search' in request.url.path:
+                return _iam_response([{'iamId': '1000000001',
+                                       'email': 'jdoe@ucdavis.edu'}])
+            return httpx.Response(404, content=b'')
+        async with make_iam_api(handler) as api:
+            rec = await api.resolve_iam_id_by_email('jdoe@ucdavis.edu')
+        assert rec['iamId'] == '1000000001'
+
+    async def test_empty_returns_missing(self):
+        def handler(request):
+            return _iam_response([])
+        async with make_iam_api(handler) as api:
+            assert await api.resolve_iam_id_by_email('nope@x.test') is IAM_MISSING
+
+
+class TestCreateUserFromIAM:
+
+    def _handler(self, *, with_email=False):
+        base = make_iam_handler(person=[PERSON_RICH])
+
+        def handler(request):
+            if with_email and '/iam/people/contactinfo/search' in request.url.path:
+                return _iam_response([{'iamId': '1000000001'}])
+            return base(request)
+        return handler
+
+    async def _assert_jdoe(self):
+        user = await User.find_one(User.name == 'jdoe', fetch_links=True,
+                                   nesting_depth=1)
+        assert user is not None
+        assert user.uid == 1000001
+        assert user.gid == 1000001
+        assert user.email == 'jdoe@ucdavis.edu'
+        assert user.fullname == 'Jane Doe'
+        assert user.type == 'user'
+        assert set(await resolve_access_names(user.access)) == {
+            'slurm', 'login-ssh',
+        }
+        # snapshot populated by the chained SyncUserIAM
+        assert user.iam is not None
+        assert user.iam.iam_status == 'present'
+        assert user.iam.person.mothra_id == 1000001
+        # personal group carries the same gid
+        group = await Group.find_one(Group.name == 'jdoe')
+        assert group is not None and group.gid == 1000001
+
+    async def test_by_username(self, beanie_client):
+        async with make_iam_api(self._handler()) as api:
+            user = await create_user_from_iam(
+                beanie_client, None, iam_api=api, identifier='jdoe',
+                access=['slurm', 'login-ssh'],
+            )
+        assert user.name == 'jdoe'
+        await self._assert_jdoe()
+
+    async def test_by_email(self, beanie_client):
+        async with make_iam_api(self._handler(with_email=True)) as api:
+            user = await create_user_from_iam(
+                beanie_client, None, iam_api=api,
+                identifier='jdoe@ucdavis.edu', access=['slurm', 'login-ssh'],
+            )
+        assert user.name == 'jdoe'
+        await self._assert_jdoe()
+
+    async def test_no_iam_record_raises(self, beanie_client):
+        def handler(request):
+            return _iam_response([])
+        async with make_iam_api(handler) as api:
+            with pytest.raises(ValueError, match='No IAM record'):
+                await create_user_from_iam(
+                    beanie_client, None, iam_api=api, identifier='ghost',
+                )
+
+    async def test_duplicate_user_raises(self, beanie_client):
+        async with make_iam_api(self._handler()) as api:
+            await create_user_from_iam(
+                beanie_client, None, iam_api=api, identifier='jdoe',
+                access=['slurm', 'login-ssh'],
+            )
+            with pytest.raises(ValueError, match='already exists'):
+                await create_user_from_iam(
+                    beanie_client, None, iam_api=api, identifier='jdoe',
+                )
