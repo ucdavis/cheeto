@@ -39,7 +39,7 @@ from ...queries.slurm import (
 )
 from ...operations.base import UNSET
 from ...types import parse_qos_tres
-from ...yaml import dumps as dumps_yaml, highlight_yaml
+from ...yaml import print_yaml
 from ._args import EXPIRABLE_CLEAR, expirable_args, group_args, site_args
 from ._slurm_show import _tres_compact
 
@@ -397,7 +397,7 @@ async def slurm_qos_show(args: Namespace):
             return 1
         data = _qos_to_dict(qos)
         if args.yaml:
-            console.print(highlight_yaml(dumps_yaml(data)))
+            print_yaml(data)
         else:
             console.print(_render_qos_panel(data))
         return 0
@@ -407,7 +407,7 @@ async def slurm_qos_show(args: Namespace):
         console.print(f'[dim](no QOSes on {args.site})[/]')
         return 0
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml([_qos_to_dict(q) for q in qoses])))
+        print_yaml([_qos_to_dict(q) for q in qoses])
         return 0
 
     table = Table(title=f'QOSes on {args.site}')
@@ -523,7 +523,7 @@ async def slurm_association_show(args: Namespace):
         }
 
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml([_assoc_dict(a) for a in assocs])))
+        print_yaml([_assoc_dict(a) for a in assocs])
         return 0
 
     table = Table(title=f'Associations on {args.site}')
@@ -639,7 +639,7 @@ async def slurm_partition_show(args: Namespace):
             return 1
         data = _partition_to_dict(part)
         if args.yaml:
-            console.print(highlight_yaml(dumps_yaml(data)))
+            print_yaml(data)
         else:
             table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
             table.add_column(style='bold cyan', no_wrap=True)
@@ -665,7 +665,7 @@ async def slurm_partition_show(args: Namespace):
 
     data = [_partition_to_dict(p) for p in parts]
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(data)))
+        print_yaml(data)
         return 0
 
     title = f'Partitions on {args.site}'
@@ -738,7 +738,7 @@ async def slurm_allocation_show(args: Namespace):
             return 1
         data = _alloc_to_dict(None, alloc=alloc)
         if args.yaml:
-            console.print(highlight_yaml(dumps_yaml(data)))
+            print_yaml(data)
         else:
             table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
             table.add_column(style='bold cyan', no_wrap=True)
@@ -795,7 +795,7 @@ async def slurm_allocation_show(args: Namespace):
         return 0
 
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml([_alloc_to_dict(qa) for qa in qas])))
+        print_yaml([_alloc_to_dict(qa) for qa in qas])
         return 0
 
     def _fmt_dt(dt) -> str:

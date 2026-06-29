@@ -69,6 +69,7 @@ from .iam import (
     SyncAllUsersIAM,
     SyncUserIAM,
     SyncUserIAMResult,
+    create_user_from_iam,
 )
 from .ldap import (
     BackfillLDAPInfo,

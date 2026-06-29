@@ -22,6 +22,7 @@ from ...operations import (
     SetVolumeStorageMounts,
 )
 from ...queries import find_group_by_name, find_site_by_name, find_user_by_name
+from ...yaml import print_yaml
 from ...queries.storage import (
     find_automount_map,
     find_volume,
@@ -33,7 +34,7 @@ from ...queries.storage import (
     list_site_volumes,
     mount_mechanism_label,
 )
-from ._args import group_args, site_args, user_args
+from ._args import group_args, site_args, user_args, yaml_args
 
 
 @commands.register('ng', 'storage',
@@ -100,12 +101,35 @@ def _(parser: ArgParser):
 # ---------------------------------------------------------------------------
 
 
+def _storage_to_dict(s: Storage) -> dict:
+    """Plain dict of a Storage's displayed fields for --yaml output."""
+    try:
+        mount_path = s.mount_path or None
+    except ValueError as e:
+        mount_path = f'ERROR: {e}'
+    return {
+        'name': s.name,
+        'category': s.category,
+        'owner': s.owner.name,
+        'group': s.group.name,
+        'volume': s.volume.name,
+        'host': s.host,
+        'host_path': s.host_path,
+        'subpath': s.subpath or None,
+        'mount_type': mount_mechanism_label(s),
+        'mount_path': mount_path,
+        'mount_options': s.mount_options,
+        'quota': s.quota,
+    }
+
+
 @site_args.apply(required=True)
 @user_args.apply()
 @group_args.apply()
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'list',
                    help='List storage records at a site, optionally filtered '
-                        'by owner (--user), group, and/or category')
+                        'by owner (--user), group, host, and/or category')
 async def storage_list(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
@@ -129,13 +153,20 @@ async def storage_list(args: Namespace):
 
     storages = await list_site_storages(
         site, category=args.category, owner_id=owner_id, group_id=group_id,
+        host=args.host,
     )
+
+    if args.yaml:
+        print_yaml([_storage_to_dict(s) for s in storages])
+        return 0
 
     desc = []
     if args.user:
         desc.append(f'owner={args.user}')
     if args.group:
         desc.append(f'group={args.group}')
+    if args.host:
+        desc.append(f'host={args.host}')
     if args.category:
         desc.append(f'category={args.category}')
     desc.append(f'count={len(storages)}')
@@ -167,6 +198,8 @@ async def storage_list(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--category', default=None,
                         choices=list(STORAGE_CATEGORIES))
+    parser.add_argument('--host', default=None,
+                        help='Filter by backing volume host')
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +295,69 @@ def _render_static_subtable(sm: StaticMount) -> Table:
     return st
 
 
+def _volume_to_dict(volume: StorageVolume, *, n_children: int | None = None) -> dict:
+    """Plain dict of a StorageVolume for --yaml output (mirrors the show panel).
+    `parent` resolves to a name only when the link was fetched (volume list);
+    `volume show` reports the child count via `n_children`."""
+    d = {
+        'name': volume.name,
+        'backend': volume.backend,
+        'host': volume.host,
+        'host_path': volume.host_path,
+        'quota': volume.quota,
+        'parent': getattr(volume.parent, 'name', None)
+        if volume.parent is not None else None,
+        'allocations': [
+            {'quota': a.quota, 'comment': a.comment} for a in volume.allocations
+        ],
+        'zfs_dataset': volume.zfs.dataset_name if volume.zfs is not None else None,
+        'quobyte': (
+            {'volume_id': volume.quobyte.volume_id,
+             'tenant': volume.quobyte.tenant}
+            if volume.quobyte is not None else None
+        ),
+        'nfs_export': (
+            {'export_options': volume.nfs_export.export_options,
+             'export_ranges': list(volume.nfs_export.export_ranges)}
+            if volume.nfs_export is not None else None
+        ),
+        'provisioned_at': volume.provisioned_at,
+    }
+    if n_children is not None:
+        d['children'] = n_children
+    return d
+
+
+def _static_mount_to_dict(sm: StaticMount) -> dict:
+    """Plain dict of a StaticMount for --yaml output."""
+    try:
+        device = sm.device_spec
+    except ValueError as e:
+        device = f'ERROR: {e}'
+    return {
+        'name': sm.name,
+        'fstype': sm.fstype,
+        'mount_path': sm.mount_path,
+        'device': device,
+        'subpath': sm.subpath or None,
+        'spec': sm.spec or None,
+        'options': list(sm.options),
+    }
+
+
+def _automount_map_to_dict(amap, *, entries: list | None = None) -> dict:
+    """Plain dict of an AutomountMap for --yaml output; `entries` (for show)
+    is the list of storages mounted under it."""
+    d = {
+        'name': amap.name,
+        'prefix': amap.prefix,
+        'options': list(amap.options),
+    }
+    if entries is not None:
+        d['entries'] = entries
+    return d
+
+
 def _render_storage_panel(storage: Storage) -> Panel:
     t = _kv_table()
     t.add_row('name', storage.name)
@@ -306,6 +402,7 @@ def _render_storage_panel(storage: Storage) -> Panel:
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'show',
                    help='Show a storage record in full detail, including its '
                         'backing volume and mount mechanism')
@@ -322,6 +419,9 @@ async def storage_show(args: Namespace):
             f'[red]Storage {args.name} not found on {args.site}{suffix}[/]'
         )
         return 1
+    if args.yaml:
+        print_yaml(_storage_to_dict(storage))
+        return 0
     console.print(_render_storage_panel(storage))
 
 
@@ -514,6 +614,7 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'volume', 'list',
                    help='List storage volumes at a site')
 async def storage_volume_list(args: Namespace):
@@ -523,6 +624,9 @@ async def storage_volume_list(args: Namespace):
         console.print(f'[red]Site {args.site} not found[/]')
         return 1
     volumes = await list_site_volumes(site)
+    if args.yaml:
+        print_yaml([_volume_to_dict(v) for v in volumes])
+        return 0
     table = Table(title=f'Storage volumes on {args.site} (count={len(volumes)})')
     table.add_column('name', style='green', no_wrap=True)
     table.add_column('backend', style='cyan')
@@ -531,7 +635,7 @@ async def storage_volume_list(args: Namespace):
     table.add_column('quota', justify='right')
     table.add_column('parent', style='magenta')
     for v in volumes:
-        parent = v.parent.name if v.parent is not None else '—'
+        parent = getattr(v.parent, 'name', '—')
         table.add_row(
             v.name, v.backend, v.host, v.host_path, v.quota or '—', parent,
         )
@@ -539,6 +643,7 @@ async def storage_volume_list(args: Namespace):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'volume', 'show',
                    help='Show one storage volume')
 async def storage_volume_show(args: Namespace):
@@ -554,6 +659,9 @@ async def storage_volume_show(args: Namespace):
     n_children = await StorageVolume.find(
         StorageVolume.parent.id == volume.id,
     ).count()
+    if args.yaml:
+        print_yaml(_volume_to_dict(volume, n_children=n_children))
+        return 0
 
     table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
     table.add_column(style='bold cyan', no_wrap=True)
@@ -790,6 +898,7 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'static-mount', 'list',
                    help='List static mounts at a site')
 async def static_mount_list(args: Namespace):
@@ -799,6 +908,9 @@ async def static_mount_list(args: Namespace):
         console.print(f'[red]Site {args.site} not found[/]')
         return 1
     mounts = await list_site_static_mounts(site)
+    if args.yaml:
+        print_yaml([_static_mount_to_dict(m) for m in mounts])
+        return 0
     table = Table(title=f'Static mounts on {args.site} (count={len(mounts)})')
     table.add_column('name', style='green', no_wrap=True)
     table.add_column('fstype', style='cyan')
@@ -854,6 +966,7 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'automount-map', 'list',
                    help='List automount maps at a site')
 async def automount_map_list(args: Namespace):
@@ -863,6 +976,13 @@ async def automount_map_list(args: Namespace):
         console.print(f'[red]Site {args.site} not found[/]')
         return 1
     maps = await list_site_automount_maps(site)
+    if args.yaml:
+        rows = []
+        for m in maps:
+            n = await Storage.find(Storage.automount_map.id == m.id).count()
+            rows.append({**_automount_map_to_dict(m), 'storages': n})
+        print_yaml(rows)
+        return 0
     table = Table(title=f'Automount maps on {args.site} (count={len(maps)})')
     table.add_column('name', style='green', no_wrap=True)
     table.add_column('prefix', style='cyan')
@@ -875,6 +995,7 @@ async def automount_map_list(args: Namespace):
 
 
 @site_args.apply(required=True)
+@yaml_args.apply()
 @commands.register('ng', 'storage', 'automount-map', 'show',
                    help='Show an automount map and its entries (the storages '
                         'mounted under it)')
@@ -889,6 +1010,21 @@ async def automount_map_show(args: Namespace):
         console.print(f'[red]Automount map {args.name} not found on {args.site}[/]')
         return 1
     storages = await list_map_storages(amap)
+    if args.yaml:
+        entries = []
+        for s in storages:
+            try:
+                device = f'{s.host}:{s.host_path}'
+            except ValueError as e:
+                device = f'ERROR: {e}'
+            try:
+                options = list(s.mount_options)
+            except ValueError as e:
+                options = f'ERROR: {e}'
+            entries.append({'entry': s.mount_name or s.name,
+                            'device': device, 'options': options})
+        print_yaml(_automount_map_to_dict(amap, entries=entries))
+        return 0
     table = Table(
         title=f'Automount map {amap.name} '
               f'(prefix={amap.prefix}, {len(storages)} entries)',

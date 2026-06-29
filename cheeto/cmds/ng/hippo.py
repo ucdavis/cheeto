@@ -17,8 +17,8 @@ from ...operations.hippo import (
     filter_events,
     hippoapi_client,
 )
-from ...yaml import dumps as dumps_yaml, highlight_yaml
-from ._args import site_args, user_args
+from ...yaml import print_yaml
+from ._args import site_args, user_args, yaml_args
 
 
 @commands.register('ng', 'hippo',
@@ -53,13 +53,19 @@ def _(parser: ArgParser):
                         help='Process only events of this action')
 
 
+@yaml_args.apply()
 @commands.register('ng', 'hippo', 'events',
                    help='List pending events from the HiPPO API (upstream)')
 async def hippo_events(args: Namespace):
     console = Console()
     with hippoapi_client(args.config.hippo, quiet=args.quiet) as client:
         events = await event_queue_pending_events.asyncio(client=client) or []
-    for event in filter_events(events, args.type, args.id):
+    selected = list(filter_events(events, args.type, args.id))
+    if args.yaml:
+        print_yaml([e.to_dict() if hasattr(e, 'to_dict') else e
+                    for e in selected])
+        return 0
+    for event in selected:
         console.print(event.to_dict() if hasattr(event, 'to_dict') else event)
 
 
@@ -74,6 +80,7 @@ def _(parser: ArgParser):
 
 @site_args.apply()
 @user_args.apply()
+@yaml_args.apply()
 @commands.register('ng', 'hippo', 'list',
                    help='Query locally-stored HippoEvent records')
 async def hippo_list(args: Namespace):
@@ -102,6 +109,20 @@ async def hippo_list(args: Namespace):
         .limit(args.limit)
         .to_list()
     )
+    if args.yaml:
+        rows = []
+        for ev in events:
+            site_name = (ev.site.name if ev.site and hasattr(ev.site, 'name')
+                         else None)
+            rows.append({
+                'hippo_id': ev.hippo_id, 'action': ev.action,
+                'status': ev.status, 'site': site_name,
+                'target': ev.target_username or None,
+                'groups': list(ev.target_groupnames),
+                'n_tries': ev.n_tries, 'first_seen_at': ev.first_seen_at,
+            })
+        print_yaml(rows)
+        return 0
     if not events:
         console.print('[dim](no events match)[/]')
         return 0
@@ -140,6 +161,7 @@ def _(parser: ArgParser):
                         help='Maximum entries to show (default: 50)')
 
 
+@yaml_args.apply()
 @commands.register('ng', 'hippo', 'show',
                    help='Show a single locally-stored HippoEvent')
 async def hippo_show(args: Namespace):
@@ -169,7 +191,9 @@ async def hippo_show(args: Namespace):
         'last_error': event.last_error,
         'raw': event.raw,
     }
-    console.print(highlight_yaml(dumps_yaml(data)))
+    # hippo show's only representation is the YAML dump; --yaml is accepted for
+    # surface consistency but YAML is always what it emits.
+    print_yaml(data)
 
 
 @hippo_show.args()

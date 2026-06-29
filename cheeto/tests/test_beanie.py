@@ -5694,7 +5694,7 @@ class TestVolumeAllocationOps:
 
 
 class TestListSiteStorages:
-    """list_site_storages filtering by owner / group / category (AND)."""
+    """list_site_storages filtering by owner / group / category / host (AND)."""
 
     async def _seed(self, beanie_client):
         from cheeto.queries import find_group_by_name
@@ -5708,33 +5708,185 @@ class TestListSiteStorages:
             beanie_client, None, name='bob', email='b@t.com',
             uid=80002, fullname='Bob',
         )
+        carol, _ = await CreateUser.run(
+            beanie_client, None, name='carol', email='c@t.com',
+            uid=80003, fullname='Carol',
+        )
         alice_grp = await find_group_by_name('alice')
         bob_grp = await find_group_by_name('bob')
-        vol = await _seed_volume(site, name='vol1', host='nas01',
-                                 host_path='/nas01/vol1')
-        # alice owns a home (group alice) and a share whose group is bob's
+        carol_grp = await find_group_by_name('carol')
+        vol1 = await _seed_volume(site, name='vol1', host='nas01',
+                                  host_path='/nas01/vol1')
+        vol2 = await _seed_volume(site, name='vol2', host='nas02',
+                                  host_path='/nas02/vol2')
+        # alice owns a home (group alice) and a share whose group is bob's;
+        # bob owns a home; carol owns a group volume on a different host.
         await Storage(name='alice', site=site, category='home',
-                      owner=alice, group=alice_grp, volume=vol).insert()
+                      owner=alice, group=alice_grp, volume=vol1).insert()
         await Storage(name='bob', site=site, category='home',
-                      owner=bob, group=bob_grp, volume=vol).insert()
+                      owner=bob, group=bob_grp, volume=vol1).insert()
         await Storage(name='shared1', site=site, category='share',
-                      owner=alice, group=bob_grp, volume=vol).insert()
-        return site, alice, bob, alice_grp, bob_grp
+                      owner=alice, group=bob_grp, volume=vol1).insert()
+        await Storage(name='proj', site=site, category='group',
+                      owner=carol, group=carol_grp, volume=vol2).insert()
+        return {'site': site, 'alice': alice, 'bob': bob, 'carol': carol,
+                'alice_grp': alice_grp, 'bob_grp': bob_grp,
+                'carol_grp': carol_grp}
 
     async def test_filters(self, beanie_client):
         from cheeto.queries.storage import list_site_storages
-        site, alice, bob, alice_grp, bob_grp = await self._seed(beanie_client)
+        s = await self._seed(beanie_client)
+        site = s['site']
 
         async def names(**kw):
-            return {s.name for s in await list_site_storages(site, **kw)}
+            return {st.name for st in await list_site_storages(site, **kw)}
 
-        assert await names() == {'alice', 'bob', 'shared1'}
-        assert await names(owner_id=alice.id) == {'alice', 'shared1'}
-        assert await names(group_id=bob_grp.id) == {'bob', 'shared1'}
+        assert await names() == {'alice', 'bob', 'shared1', 'proj'}
+        assert await names(owner_id=s['alice'].id) == {'alice', 'shared1'}
+        assert await names(group_id=s['bob_grp'].id) == {'bob', 'shared1'}
         assert await names(category='home') == {'alice', 'bob'}
-        assert await names(owner_id=alice.id, category='home') == {'alice'}
-        assert await names(owner_id=alice.id,
-                           group_id=bob_grp.id) == {'shared1'}
+        assert await names(owner_id=s['alice'].id, category='home') == {'alice'}
+        assert await names(owner_id=s['alice'].id,
+                           group_id=s['bob_grp'].id) == {'shared1'}
+
+    async def test_host_filter(self, beanie_client):
+        from cheeto.queries.storage import list_site_storages
+        s = await self._seed(beanie_client)
+        site = s['site']
+
+        async def names(**kw):
+            return {st.name for st in await list_site_storages(site, **kw)}
+
+        assert await names(host='nas01') == {'alice', 'bob', 'shared1'}
+        assert await names(host='nas02') == {'proj'}
+        assert await names(host='absent') == set()
+        # host combines (AND) with the other filters
+        assert await names(host='nas02', owner_id=s['carol'].id) == {'proj'}
+        assert await names(host='nas01', owner_id=s['carol'].id) == set()
+
+
+class TestStorageYamlDicts:
+    """The --yaml serializer for storage volumes (the most complex one)."""
+
+    async def test_volume_to_dict(self, beanie_client):
+        from cheeto.cmds.ng.storage import _volume_to_dict
+        site = Site(name='yd_site', fqdn='yd.test')
+        await site.insert()
+        parent = await _seed_volume(site, name='home', host='nas01',
+                                    host_path='/nas01/home')
+        await _seed_volume(
+            site, name='home/u1', host='nas01', host_path='/nas01/home/u1',
+            parent=parent,
+            allocations=[StorageAllocation(quota='1T', comment='base')],
+        )
+        # fetched with links (like `volume list`) so parent resolves to a name
+        child = await StorageVolume.find_one(
+            StorageVolume.name == 'home/u1', fetch_links=True, nesting_depth=1,
+        )
+        d = _volume_to_dict(child, n_children=0)
+        assert d['name'] == 'home/u1'
+        assert d['backend'] == 'zfs'
+        assert d['host'] == 'nas01'
+        assert d['quota'] == '1T'
+        assert d['parent'] == 'home'
+        assert d['allocations'] == [{'quota': '1T', 'comment': 'base'}]
+        assert d['children'] == 0
+        assert d['zfs_dataset'] == ''
+        assert d['quobyte'] is None
+
+
+class TestListSiteStoragesHydration:
+    """list_site_storages resolves links via batched queries: derived
+    properties (incl. static-mount mount_path) work, and the query count is
+    bounded and constant regardless of row count (no N+1 / deep fetch)."""
+
+    async def test_static_and_automount_properties(self, beanie_client):
+        from cheeto.queries import find_group_by_name
+        from cheeto.queries.storage import (
+            list_site_storages, mount_mechanism_label,
+        )
+        site = Site(name='hyd_site', fqdn='hyd.test')
+        await site.insert()
+        central = await _seed_volume(site, name='home', host='nas01',
+                                     host_path='/nas01/home')
+        uvol = await _seed_volume(
+            site, name='home/su', host='nas01', host_path='/nas01/home/su',
+            parent=central,
+            allocations=[StorageAllocation(quota='1T', comment='base')],
+        )
+        smount = StaticMount(name='home', site=site, fstype='nfs4',
+                             volume=central, mount_path='/home',
+                             options=['defaults'])
+        await smount.insert()
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+        su, _ = await CreateUser.run(beanie_client, None, name='su',
+                                     email='su@t.com', uid=90001, fullname='x')
+        au, _ = await CreateUser.run(beanie_client, None, name='au',
+                                     email='au@t.com', uid=90002, fullname='x')
+        su_g = await find_group_by_name('su')
+        au_g = await find_group_by_name('au')
+        await Storage(name='su', site=site, category='home', owner=su,
+                      group=su_g, volume=uvol, static_mount=smount).insert()
+        await Storage(name='au', site=site, category='home', owner=au,
+                      group=au_g, volume=central, automount_map=amap,
+                      mount_name='au').insert()
+
+        rows = {s.name: s for s in await list_site_storages(site)}
+        su_s = rows['su']
+        assert su_s.owner.name == 'su'
+        assert su_s.group.name == 'su'
+        assert su_s.volume.name == 'home/su'
+        assert su_s.host == 'nas01'
+        assert su_s.quota == '1T'
+        assert su_s.mount_path == '/home/su'   # static: needs sm.volume hydrated
+        assert mount_mechanism_label(su_s) == 'static:home'
+
+        au_s = rows['au']
+        assert au_s.mount_path == '/home/au'   # automount
+        assert mount_mechanism_label(au_s) == 'automount:home'
+
+    async def test_query_count_constant(self, beanie_client, cmd_counter):
+        from cheeto.queries import find_group_by_name
+        from cheeto.queries.storage import (
+            list_site_storages, list_site_volumes,
+        )
+        site = Site(name='qc_site', fqdn='qc.test')
+        await site.insert()
+        vol = await _seed_volume(site, name='home', host='nas01',
+                                 host_path='/nas01/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home')
+        await amap.insert()
+
+        async def add(names, base_uid):
+            for i, nm in enumerate(names):
+                u, _ = await CreateUser.run(
+                    beanie_client, None, name=nm, email=f'{nm}@t.com',
+                    uid=base_uid + i, fullname='x')
+                g = await find_group_by_name(nm)
+                await Storage(name=nm, site=site, category='home', owner=u,
+                              group=g, volume=vol, automount_map=amap,
+                              mount_name=nm).insert()
+
+        await add(['a', 'b'], 91000)
+        cmd_counter.commands.clear()
+        await list_site_storages(site)
+        n2 = len(cmd_counter.commands)
+
+        await add(['c', 'd', 'e'], 91100)
+        cmd_counter.commands.clear()
+        await list_site_storages(site)
+        n5 = len(cmd_counter.commands)
+
+        assert n2 == n5, (
+            f'list_site_storages query count grew with row count '
+            f'({n2} -> {n5}); N+1 / over-fetch regression'
+        )
+        assert n5 <= 8, f'expected a small fixed query count, got {n5}'
+
+        cmd_counter.commands.clear()
+        await list_site_volumes(site)
+        assert len(cmd_counter.commands) <= 2
 
 
 class TestMigrateStorage:

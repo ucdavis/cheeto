@@ -33,6 +33,7 @@ from ..constants import IAM_SYNCABLE_USER_TYPES
 from ..iam_async import (
     IAM_MISSING,
     AsyncIAMAPI,
+    IAMMissing,
     IAMTransientError,
     IAMUserPayload,
     build_ucdiam_info,
@@ -41,7 +42,7 @@ from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail, Email
 from ..models.user import UCDIAMInfo, User
 from ..queries.access_status import find_status_group, resolve_status_name
 from .base import Operation
-from .user import clear_user_site_statuses
+from .user import CreateUser, clear_user_site_statuses
 
 logger = logging.getLogger(__name__)
 
@@ -512,3 +513,81 @@ class ReapOffboardedUsers(Operation):
             'notified_count': self._notified,
             'notify_errors': self._notify_errors,
         }
+
+
+# ---------------------------------------------------------------------------
+# Create a User from queried IAM data
+# ---------------------------------------------------------------------------
+
+
+def _iam_user_fields(person: dict, *, fallback_email: str | None) -> dict:
+    """Map a queried IAM person record to CreateUser kwargs. uid == gid ==
+    mothra_id (the HiPPO-origination convention). Raises ValueError with a
+    clear message when a required field is missing."""
+    name = (person.get('userId') or '').strip()
+    if not name:
+        raise ValueError('IAM record has no kerberos username (userId)')
+    mothra = person.get('mothraId')
+    try:
+        uid = int(mothra)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f'IAM record for {name} has no usable mothraId ({mothra!r}); '
+            f'cannot derive uid'
+        )
+    email = (person.get('campusEmail') or person.get('email')
+             or fallback_email or '').strip()
+    if not email:
+        raise ValueError(f'IAM record for {name} has no email')
+    fullname = (person.get('dFullName') or person.get('oFullName')
+                or '').strip()
+    if not fullname:
+        raise ValueError(f'IAM record for {name} has no full name')
+    return {'name': name, 'email': email, 'uid': uid, 'gid': uid,
+            'fullname': fullname}
+
+
+async def create_user_from_iam(
+    client: AsyncMongoClient,
+    author: User | None,
+    *,
+    iam_api: AsyncIAMAPI,
+    identifier: str,
+    user_type: str = 'user',
+    access: list[str] | None = None,
+    password: str | None = None,
+    grace_days: int = 0,
+    expiry_offset_days: int = 30,
+) -> User:
+    """Create a User entirely from queried IAM data — name/email/fullname and
+    uid == gid == mothra_id (as HiPPO-originated creation does) — then populate
+    the IAM snapshot (`user.iam`) via SyncUserIAM. `identifier` is a kerberos
+    username or an email (detected by '@'). Raises ValueError on a missing or
+    incomplete IAM record (or if the user already exists)."""
+    if '@' in identifier:
+        record = await iam_api.resolve_iam_id_by_email(identifier)
+    else:
+        record = await iam_api.resolve_iam_id_by_username(identifier)
+    if isinstance(record, IAMMissing):
+        raise ValueError(f'No IAM record for {identifier!r}')
+
+    bundle = await iam_api.fetch_user_bundle(int(record['iamId']))
+    if isinstance(bundle, IAMMissing):
+        raise ValueError(f'IAM person {record["iamId"]} not found')
+
+    fields = _iam_user_fields(
+        bundle.person,
+        fallback_email=identifier if '@' in identifier else None,
+    )
+    await CreateUser.run(
+        client, author,
+        name=fields['name'], email=fields['email'],
+        uid=fields['uid'], gid=fields['gid'], fullname=fields['fullname'],
+        type=user_type, access=access, password=password,
+    )
+    await SyncUserIAM.run(
+        client, author,
+        username=fields['name'], iam_api=iam_api,
+        grace_days=grace_days, expiry_offset_days=expiry_offset_days,
+    )
+    return await User.find_one(User.name == fields['name'])

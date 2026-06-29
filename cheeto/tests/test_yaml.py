@@ -153,3 +153,19 @@ class TestParseYamlForest:
         forest_2 = forest['test-forest-2']
         assert forest_2['a'] == 3
         assert forest_2['b'] == 'cheeto'
+
+
+class TestPrintYaml:
+
+    def test_routes_to_stdout(self, capsys):
+        '''print_yaml writes clean, parseable YAML to stdout (not stderr).'''
+        from io import StringIO
+
+        from ruamel.yaml import YAML
+
+        yaml.print_yaml({'a': 1, 'b': ['x', 'y']})
+        captured = capsys.readouterr()
+        assert captured.err == ''
+        assert captured.out.strip() != ''
+        parsed = YAML(typ='safe').load(StringIO(captured.out))
+        assert parsed == {'a': 1, 'b': ['x', 'y']}

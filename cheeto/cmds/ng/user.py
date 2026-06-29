@@ -8,6 +8,7 @@ from rich.table import Table
 from .. import commands
 from ...constants import ACCESS_TYPES, USER_STATUSES, USER_TYPES
 from ...encrypt import generate_password
+from ...iam_async import AsyncIAMAPI
 from ...log import Console
 from ...models.group import AccessGroup, StatusGroup
 from ...models.site import Site
@@ -29,6 +30,7 @@ from ...operations import (
     SetUserShell,
     SetUserStatus,
     SetUserType,
+    create_user_from_iam,
 )
 from ...queries import (
     effective_access_links,
@@ -42,13 +44,14 @@ from ...queries import (
     user_groups_at_site,
     user_site_overrides,
 )
-from ...yaml import dumps as dumps_yaml, highlight_yaml
+from ...yaml import print_yaml
 from ._args import (
     email_args,
     fullname_args,
     password_args,
     site_args,
     user_args,
+    yaml_args,
 )
 from ._slurm_show import user_slurm_at_site
 
@@ -432,6 +435,43 @@ async def user_new_shared(args: Namespace):
         _announce_password(console, password)
 
 
+@password_args.apply()
+@commands.register('ng', 'user', 'new', 'iam',
+                   help='Create a user from queried UC Davis IAM data '
+                        '(uid/gid from mothra_id), then sync the IAM snapshot')
+async def user_new_iam(args: Namespace):
+    console = Console()
+    cfg = args.config.ucdiam
+    password = generate_password() if args.password else None
+    try:
+        async with AsyncIAMAPI(cfg) as iam_api:
+            user = await create_user_from_iam(
+                args.db, args.author,
+                iam_api=iam_api, identifier=args.identifier,
+                user_type=args.type, access=args.access, password=password,
+                grace_days=cfg.grace_days,
+                expiry_offset_days=cfg.expiry_offset_days,
+            )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Created user [green]{user.name}[/] (uid={user.uid}) from IAM'
+    )
+    if password is not None:
+        _announce_password(console, password)
+
+
+@user_new_iam.args()
+def _(parser: ArgParser):
+    parser.add_argument('identifier',
+                        help='Username or email to look up in IAM')
+    parser.add_argument('--type', default='user', choices=list(USER_TYPES))
+    parser.add_argument('--access', nargs='+', default=['slurm', 'login-ssh'],
+                        choices=list(ACCESS_TYPES),
+                        help='Access types (default: slurm login-ssh)')
+
+
 @site_args.apply()
 @user_args.apply(required=True)
 @commands.register('ng', 'user', 'status',
@@ -737,7 +777,7 @@ async def user_show(args: Namespace):
         sites=sites, iam_config=args.config.ucdiam,
     )
     if args.yaml:
-        console.print(highlight_yaml(dumps_yaml(data)))
+        print_yaml(data)
     else:
         console.print(_render_user_panel(data))
 
@@ -812,10 +852,7 @@ async def user_list(args: Namespace):
             'status': _status_of(u),
             'access': _access_of(u),
         } for u in users]
-        console.print(highlight_yaml(dumps_yaml({
-            'count': len(rows),
-            'users': rows,
-        })))
+        print_yaml(rows)
         return
 
     title = f'Users (count={len(users)}, operator={operator})'
@@ -875,6 +912,7 @@ async def user_clear_offboarding_site_statuses(args: Namespace):
     )
 
 
+@yaml_args.apply()
 @commands.register('ng', 'user', 'redundant-site-statuses',
                    help='List per-site status overrides that duplicate the '
                         'user\'s global status; --clear removes them')
@@ -888,6 +926,10 @@ async def user_redundant_site_statuses(args: Namespace):
         )
         return
     rows = await find_redundant_site_statuses()
+    if args.yaml:
+        print_yaml([{'user': u, 'site': s, 'status': st}
+                    for u, s, st in rows])
+        return
     if not rows:
         console.print('No redundant per-site status overrides.')
         return

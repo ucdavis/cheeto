@@ -31,6 +31,7 @@ from .iamapi.api.organization_info_controller import search_ppsbo_us
 from .iamapi.api.people_associations_controller import get_pps_assocs_using_iam_id
 from .iamapi.api.people_ctlr import (
     get_person_using_iam_id,
+    search_contact_info,
     search_pri_kerb_acct,
 )
 from .iamapi.client import Client
@@ -139,6 +140,16 @@ class AsyncIAMAPI:
         Returns the first hit dict (containing `iamId`), or IAM_MISSING."""
         results = await self._call(
             search_pri_kerb_acct.asyncio_detailed, user_id=name,
+        )
+        if isinstance(results, IAMMissing):
+            return results
+        return results[0] if results else IAM_MISSING
+
+    async def resolve_iam_id_by_email(self, email: str) -> dict | IAMMissing:
+        """Look up a user's IAM record by email (contact info).
+        Returns the first hit dict (containing `iamId`), or IAM_MISSING."""
+        results = await self._call(
+            search_contact_info.asyncio_detailed, email=email,
         )
         if isinstance(results, IAMMissing):
             return results
