@@ -116,8 +116,19 @@ def highlight_yaml(dumped: str):
 
 def print_yaml(obj: Any) -> None:
     """Dump `obj` as YAML to STDOUT — the single emit point for CLI `--yaml`
-    output. The repo's Console defaults to stderr; this routes to stdout so
-    YAML is pipeable. highlight_yaml returns a Rich Syntax, so color is
-    dropped automatically when the output is not a TTY (clean piped YAML)."""
-    from .log import Console  # local import: log.py does not import yaml.py
-    Console(stderr=False).print(highlight_yaml(dumps(obj)))
+    output. On an interactive terminal it is syntax-highlighted; when stdout
+    is redirected/piped (or captured) it is emitted as plain, parseable YAML.
+
+    Keys off `sys.stdout.isatty()` directly rather than Rich's terminal
+    detection: Rich honors FORCE_COLOR (set by many CI environments) and would
+    otherwise leak ANSI escapes into piped/captured output."""
+    text = dumps(obj)
+    try:
+        is_tty = sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        is_tty = False
+    if is_tty:
+        from .log import Console  # local import: log.py does not import yaml.py
+        Console(stderr=False).print(highlight_yaml(text))
+    else:
+        sys.stdout.write(text)
