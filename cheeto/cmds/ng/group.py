@@ -201,7 +201,7 @@ async def group_new_lab(args: Namespace):
 
 @site_args.apply(required=True)
 @user_args.apply(required=True)
-@commands.register('ng', 'group', 'from-sponsor',
+@commands.register('ng', 'group', 'new', 'from-sponsor',
                    help='Create a sponsor group from a user at a site')
 async def group_from_sponsor(args: Namespace):
     console = Console()
