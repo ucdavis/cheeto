@@ -50,10 +50,10 @@ def hippoapi_client(config: HippoConfig, quiet: bool = False) -> AuthenticatedCl
     )
 
 
-async def send_email(mail: Email, client: AuthenticatedClient) -> None:
+async def send_email(mail: Email, client: AuthenticatedClient) -> bool:
     """POST a rendered Email through the HiPPO styled-notification endpoint.
     Logs on failure; never raises on a non-200 (callers treat notification as
-    best-effort)."""
+    best-effort). Returns True iff the endpoint accepted it (HTTP 200)."""
     body = SimpleNotificationModel(
         subject=mail.subject,
         header=mail.header,
@@ -64,17 +64,20 @@ async def send_email(mail: Email, client: AuthenticatedClient) -> None:
     response = await notify_styled.asyncio_detailed(client=client, body=body)
     if response.status_code == 200:
         logger.info('sent email subject=%r to=%r', mail.subject, mail.emails)
-    else:
-        logger.error(
-            'email send failed (status=%d): %s',
-            response.status_code, response.content,
-        )
+        return True
+    logger.error(
+        'email send failed (status=%d): %s',
+        response.status_code, response.content,
+    )
+    return False
 
 
 @contextmanager
 def email_notifier(
     config: HippoConfig,
     *,
+    db: 'AsyncMongoClient',
+    author: 'User | None' = None,
     enabled: bool = True,
     quiet: bool = True,
 ) -> Iterator[Optional[Callable[[Email], Awaitable[None]]]]:
@@ -82,15 +85,20 @@ def email_notifier(
     `None` when `enabled` is False. Centralizes the on/off gate and the client
     lifetime so callers can write::
 
-        with email_notifier(config.hippo, enabled=cfg.notify) as notify:
+        with email_notifier(config.hippo, db=args.db, author=args.author,
+                            enabled=cfg.notify) as notify:
             await SomeOp.run(..., notifier=notify)
-    """
+
+    Every send goes through the `SendUserEmail` operation so the fully-rendered
+    email is recorded in History — hence `db`/`author` (the audit author)."""
     if not enabled:
         yield None
         return
     with hippoapi_client(config, quiet=quiet) as client:
         async def notify(mail: Email) -> None:
-            await send_email(mail, client)
+            # Lazy import: operations.email imports send_email from this module.
+            from .operations.email import SendUserEmail
+            await SendUserEmail.run(db, author, mail=mail, hippo_client=client)
         yield notify
 
 

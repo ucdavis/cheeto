@@ -65,7 +65,8 @@ async def _iam_sync(config: Config,
                     author: User | None) -> dict[str, int]:
     tcfg = config.daemon.tasks.iam_sync
     async with AsyncIAMAPI(config.ucdiam) as iam_api:
-        with email_notifier(config.hippo, enabled=tcfg.notify) as notify:
+        with email_notifier(config.hippo, db=client, author=author,
+                            enabled=tcfg.notify) as notify:
             return await SyncAllUsersIAM.run(
                 client, author,
                 iam_api=iam_api,
@@ -85,7 +86,8 @@ async def _reap(config: Config,
     # the task is configured and opts in.
     tcfg = config.daemon.tasks.reap
     notify_enabled = tcfg.notify if tcfg is not None else False
-    with email_notifier(config.hippo, enabled=notify_enabled) as notify:
+    with email_notifier(config.hippo, db=client, author=author,
+                        enabled=notify_enabled) as notify:
         return await ReapOffboardedUsers.run(client, author, notifier=notify)
 
 

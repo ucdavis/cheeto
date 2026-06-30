@@ -28,7 +28,11 @@ from ..iam_async import (
     IAMUserPayload,
     build_ucdiam_info,
 )
-from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail
+from ..mail import (
+    AccountDeactivatedEmail,
+    AccountOffboardingEmail,
+    AccountRestoredEmail,
+)
 from ..models import ALL_MODELS
 from ..models.group import Group
 from ..models.history import History
@@ -125,6 +129,8 @@ def make_iam_handler(
     person: list[dict] | None = None,
     associations: list[dict] | None = None,
     division: dict[str, list[dict]] | None = None,
+    prikerb: list[dict] | None = None,
+    contact: list[dict] | None = None,
     person_status: int = 200,
     raise_transport: bool = False,
     on_request: Callable[[httpx.Request], None] | None = None,
@@ -134,6 +140,10 @@ def make_iam_handler(
     `person` / `associations` are lists of result dicts to return (or None to
     return an empty results list, which IAM uses for 'definitively missing').
     `division` maps orgOId -> result list.
+    `prikerb` overrides the username (prikerbacct) search results; defaults to
+    `person` for backward compatibility. `contact` is the contact-info (email)
+    search results; defaults to empty so the username path is exercised unless
+    a test opts into the email fallback.
     `person_status` lets a test exercise a non-200 response on get_person.
     """
     division = division or {}
@@ -145,7 +155,11 @@ def make_iam_handler(
             raise httpx.ConnectError('mock transport error')
         path = request.url.path
         if '/iam/people/prikerbacct/search' in path:
-            return _iam_response(person or [])
+            results = prikerb if prikerb is not None else (person or [])
+            return _iam_response(results)
+        # Must precede the generic /iam/people/ (get_person) branch below.
+        if '/iam/people/contactinfo/search' in path:
+            return _iam_response(contact or [])
         if path.startswith('/iam/people/'):
             # /iam/people/{iam_id}
             if person_status != 200:
@@ -338,6 +352,67 @@ class TestSyncUserIAM:
         assert fetched.iam.first_missing_at is None
         assert fetched.expires_at is None
 
+    async def test_resolve_falls_back_to_email(self, beanie_client, make_user):
+        # Legacy user whose system username does not match their IAM userId:
+        # the username search misses but the email (contact-info) search hits.
+        await make_user(name='legacy', uid=10010)
+        handler = make_iam_handler(
+            prikerb=[],                          # username search misses
+            contact=[{'iamId': '1000000001'}],   # email search hits
+            person=[PERSON_JANE],
+            associations=[],
+            division={},
+        )
+        now = datetime(2026, 5, 1)
+        async with make_iam_api(handler) as api:
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username='legacy', iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        assert result.outcome == 'hit'
+
+        fetched = await User.find_one(User.name == 'legacy')
+        assert fetched.iam is not None
+        assert fetched.iam.iam_status == 'present'
+        assert fetched.iam.person.iam_id == 1000000001
+
+        # The History entry records that the email fallback was used.
+        hist = await History.find_one(History.op == 'sync_user_iam')
+        assert hist is not None
+        assert hist.changes['resolved_by'] == 'email'
+
+    async def test_resolve_both_miss_starts_streak(self, beanie_client, make_user):
+        # Neither username nor email resolves -> IAM_MISSING -> miss_first.
+        await make_user(name='ghost', uid=10011)
+        handler = make_iam_handler(prikerb=[], contact=[])
+        now = datetime(2026, 5, 1)
+        async with make_iam_api(handler) as api:
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username='ghost', iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        assert result.outcome == 'miss_first'
+
+    async def test_resolve_by_username_records_resolved_by(
+        self, beanie_client, make_user,
+    ):
+        # Username hit (no email fallback needed) -> resolved_by == 'username'.
+        await make_user(name='jdoe', uid=10012)
+        handler = make_iam_handler(
+            person=[PERSON_JANE], associations=[], division={},
+        )
+        now = datetime(2026, 5, 1)
+        async with make_iam_api(handler) as api:
+            await SyncUserIAM.run(
+                beanie_client, None,
+                username='jdoe', iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        hist = await History.find_one(History.op == 'sync_user_iam')
+        assert hist.changes['resolved_by'] == 'username'
+
     async def test_hit_restored_from_offboarding(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
@@ -489,6 +564,42 @@ class TestSyncUserIAM:
         usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
         assert usi.status is None
 
+    @pytest.mark.parametrize('status_name', ['inactive', 'disabled'])
+    async def test_miss_non_active_not_offboarded(
+        self, beanie_client, make_user, status_name,
+    ):
+        # A non-active account that goes missing past grace must NOT be
+        # offboarded or notified: outcome is miss_not_active, and neither the
+        # status nor expires_at changes (only the missing bookkeeping advances).
+        from ..models.user import UCDIAMInfo
+        now = datetime(2026, 5, 1)
+        first_missed = now - timedelta(days=20)
+        user = await make_user(
+            name=f'{status_name}user', uid=10100,
+            status=status_name,
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+                first_missing_at=first_missed,
+            ),
+        )
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username=user.name, iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        assert result.outcome == 'miss_not_active'
+
+        fetched = await User.find_one(
+            User.name == user.name, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == status_name   # unchanged
+        assert fetched.expires_at is None                  # not armed
+        assert fetched.iam.iam_status == 'missing'         # bookkeeping advanced
+        assert fetched.iam.first_missing_at == first_missed
+
     async def test_miss_already_expiring(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
@@ -550,7 +661,7 @@ class TestSyncUserIAM:
         because mongo round-trips datetimes as naive.
         """
         first_missed = datetime(2026, 4, 20)
-        await make_user(iam=UCDIAMInfo(
+        await make_user(status='active', iam=UCDIAMInfo(
             iam_status='missing',
             person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
             first_missing_at=first_missed,
@@ -564,7 +675,7 @@ class TestSyncUserIAM:
                 grace_days=14, expiry_offset_days=30,
             )
         # 'now' will be roughly today; the streak we preloaded is older
-        # than 14 days, so we should have flipped to offboarding.
+        # than 14 days, so the active user should have flipped to offboarding.
         assert result.outcome in {'miss_within_grace', 'miss_offboarding'}
 
     async def test_resolver_hits_but_get_person_misses_records_streak(
@@ -941,6 +1052,77 @@ class TestSyncAllUsersIAMNotify:
         assert fetched.status.status_name == 'offboarding'
         assert fetched.expires_at == now + timedelta(days=30)
 
+    async def test_restored_sends_email(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        # Offboarding user with a future expiry and a cached IAM person who now
+        # reappears in IAM -> restored, and a restoration email is sent.
+        await User(
+            name='returner', email='returner@example.edu', uid=40010, gid=40010,
+            fullname='Returner', home_directory='/home/returner', type='user',
+            status=await status_link('offboarding'),
+            expires_at=now + timedelta(days=15),
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+                first_missing_at=now - timedelta(days=20),
+            ),
+        ).insert()
+        sent, notify = _collector()
+
+        handler = make_iam_handler(
+            person=[PERSON_JANE], associations=[], division={},
+        )
+        async with make_iam_api(handler) as api:
+            tally = await SyncAllUsersIAM.run(
+                beanie_client, None,
+                iam_api=api, grace_days=14, expiry_offset_days=30,
+                now=now, notifier=notify,
+            )
+        assert tally['hit_restored'] == 1
+        assert tally['notified_restored'] == 1
+        assert tally['notify_error'] == 0
+
+        assert len(sent) == 1
+        mail = sent[0]
+        assert isinstance(mail, AccountRestoredEmail)
+        assert mail.emails == ['returner@example.edu']
+        assert 'returner' in '\n\n'.join(mail.paragraphs())
+
+    async def test_inactive_missing_sends_no_email(self, beanie_client):
+        now = datetime(2026, 5, 1)
+        # Already-inactive user, missing from IAM past grace: must not be
+        # offboarded or emailed.
+        await User(
+            name='inactiveleaver', email='inactiveleaver@example.edu',
+            uid=40020, gid=40020, fullname='Inactive Leaver',
+            home_directory='/home/inactiveleaver', type='user',
+            status=await status_link('inactive'),
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+                first_missing_at=now - timedelta(days=20),
+            ),
+        ).insert()
+        sent, notify = _collector()
+
+        handler = make_iam_handler(person_status=404)
+        async with make_iam_api(handler) as api:
+            tally = await SyncAllUsersIAM.run(
+                beanie_client, None,
+                iam_api=api, grace_days=14, expiry_offset_days=30,
+                now=now, notifier=notify,
+            )
+        assert tally['miss_not_active'] == 1
+        assert tally['miss_offboarding'] == 0
+        assert tally['notified_offboarding'] == 0
+        assert sent == []
+
+        fetched = await User.find_one(
+            User.name == 'inactiveleaver', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == 'inactive'
+        assert fetched.expires_at is None
+
 
 class TestReapOffboardedUsersNotify:
 
@@ -1131,3 +1313,57 @@ class TestCreateUserFromIAM:
                 await create_user_from_iam(
                     beanie_client, None, iam_api=api, identifier='jdoe',
                 )
+
+
+# ---------------------------------------------------------------------------
+# SendUserEmail — audit-logged sending
+# ---------------------------------------------------------------------------
+
+
+class TestSendUserEmail:
+
+    async def test_logs_rendered_email_to_history(self, beanie_client, monkeypatch):
+        from ..operations import SendUserEmail
+
+        captured: list = []
+
+        async def fake_send(mail, client):
+            captured.append(mail)
+            return True
+
+        monkeypatch.setattr('cheeto.operations.email.send_email', fake_send)
+
+        mail = AccountDeactivatedEmail(to=['x@y.test'], username='jdoe')
+        sent = await SendUserEmail.run(
+            beanie_client, None, mail=mail, hippo_client=None,
+        )
+        assert sent is True
+        assert captured == [mail]
+
+        hist = await History.find_one(History.op == 'send_user_email')
+        assert hist is not None
+        assert hist.changes['email_type'] == 'AccountDeactivatedEmail'
+        assert hist.changes['subject'] == 'UCD HPC: Account Deactivated'
+        assert hist.changes['to'] == ['x@y.test']
+        assert hist.changes['cc'] == []
+        assert hist.changes['sent'] is True
+        assert 'jdoe' in hist.changes['body']
+
+    async def test_failed_send_still_logged(self, beanie_client, monkeypatch):
+        from ..operations import SendUserEmail
+
+        async def fake_send(mail, client):
+            return False
+
+        monkeypatch.setattr('cheeto.operations.email.send_email', fake_send)
+
+        mail = AccountDeactivatedEmail(to=['x@y.test'], username='jdoe')
+        sent = await SendUserEmail.run(
+            beanie_client, None, mail=mail, hippo_client=None,
+        )
+        assert sent is False
+
+        hist = await History.find_one(History.op == 'send_user_email')
+        assert hist is not None
+        assert hist.changes['sent'] is False
+        assert 'jdoe' in hist.changes['body']

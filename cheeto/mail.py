@@ -202,3 +202,20 @@ class AccountDeactivatedEmail(Email):
     @property
     def header(self) -> str:
         return 'Your account has been deactivated'
+
+
+class AccountRestoredEmail(Email):
+
+    def __init__(self, to: list[str] | None = None,
+                       cc: list[str] | None = None,
+                       **kwargs):
+        self.template = 'account-restored.txt.j2'
+        super().__init__(to=to, cc=cc, **kwargs)
+
+    @property
+    def subject(self) -> str:
+        return 'UCD HPC: Account Restored'
+
+    @property
+    def header(self) -> str:
+        return 'Your account has been restored'

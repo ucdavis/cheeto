@@ -4,7 +4,7 @@ Three ops live here:
 
   - `SyncUserIAM` — single-user sync. Implements the full state machine:
       hit / hit_restored / miss_first / miss_within_grace / miss_offboarding /
-      miss_already_expiring / miss_never_seen / no_iam_id.
+      miss_already_expiring / miss_not_active.
   - `SyncAllUsersIAM` — driver that loops `SyncUserIAM` over candidate users
     (filtered to `IAM_SYNCABLE_USER_TYPES` so administrative `system`/`class`/
     `shared` accounts are never touched).
@@ -38,7 +38,12 @@ from ..iam_async import (
     IAMUserPayload,
     build_ucdiam_info,
 )
-from ..mail import AccountDeactivatedEmail, AccountOffboardingEmail, Email
+from ..mail import (
+    AccountDeactivatedEmail,
+    AccountOffboardingEmail,
+    AccountRestoredEmail,
+    Email,
+)
 from ..models.user import UCDIAMInfo, User
 from ..queries.access_status import find_status_group, resolve_status_name
 from .base import Operation
@@ -115,6 +120,30 @@ async def maybe_notify_offboarding(
     return True
 
 
+async def maybe_notify_restored(
+    result: SyncUserIAMResult,
+    notifier: Notifier | None,
+) -> bool:
+    """Email a restoration notice when a user just transitioned back out of
+    offboarding (reappeared in IAM). Best-effort, mirroring
+    `maybe_notify_offboarding`: a failed send is logged and reported as False,
+    never propagated. Returns True iff a mail was sent."""
+    if notifier is None or result.outcome != 'hit_restored':
+        return False
+    mail = AccountRestoredEmail(
+        to=[result.email],
+        username=result.username,
+    )
+    try:
+        await notifier(mail)
+    except Exception as e:
+        logger.warning(
+            'restore notification failed for %s: %s', result.username, e,
+        )
+        return False
+    return True
+
+
 class SyncUserIAM(Operation):
     """Sync one user against the IAM API and update their state machine.
 
@@ -145,6 +174,7 @@ class SyncUserIAM(Operation):
         # Filled in by execute() so describe() can report on what happened.
         self._outcome: str = ''
         self._iam_id: int | None = None
+        self._resolved_by: str = ''
         self._expires_at: datetime | None = None
         self._first_missing_at: datetime | None = None
         self._last_seen_at: datetime | None = None
@@ -201,13 +231,23 @@ class SyncUserIAM(Operation):
         if user.iam is not None and user.iam.person is not None:
             iam_id = user.iam.person.iam_id
             self._iam_id = iam_id
+            self._resolved_by = 'cached'
             return await self.iam_api.fetch_user_bundle(iam_id)
 
-        # No cached iam_id (either never synced, or last sync's lookup
-        # didn't produce a person snapshot). Re-resolve.
+        # No cached iam_id (either never synced, or last sync's lookup didn't
+        # produce a person snapshot). Resolve by username, then fall back to
+        # email — some legacy users' system username differs from their IAM
+        # userId. IAM_MISSING only if BOTH miss. (Transient IAM errors raise
+        # out of the resolver and propagate; we never mask them as misses.)
         resolved = await self.iam_api.resolve_iam_id_by_username(user.name)
         if resolved is IAM_MISSING:
-            return IAM_MISSING
+            if user.email:
+                resolved = await self.iam_api.resolve_iam_id_by_email(user.email)
+            if resolved is IAM_MISSING:
+                return IAM_MISSING
+            self._resolved_by = 'email'
+        else:
+            self._resolved_by = 'username'
         iam_id = int(resolved['iamId'])
         self._iam_id = iam_id
         return await self.iam_api.fetch_user_bundle(iam_id)
@@ -252,20 +292,25 @@ class SyncUserIAM(Operation):
 
         elapsed = self.now - iam.first_missing_at
         if elapsed >= timedelta(days=self.grace_days):
-            # Past grace: set expires_at and flip status, but only if we
-            # haven't already set a future expiry (don't clobber operator
-            # work).
+            # Past grace, and no future expiry already pending (don't clobber
+            # operator work). Only a still-active account is moved into the
+            # offboarding window — set its expiry, flip the status, and notify.
+            # Already-inactive/disabled accounts (and accounts already
+            # offboarding) are left to the operator / reaper and are never
+            # (re-)offboarded or notified.
             if user.expires_at is None or user.expires_at <= self.now:
-                user.expires_at = self.now + timedelta(
-                    days=self.expiry_offset_days
-                )
                 current_status = await resolve_status_name(user.status)
                 if current_status == 'active':
+                    user.expires_at = self.now + timedelta(
+                        days=self.expiry_offset_days
+                    )
                     user.status = await find_status_group('offboarding')
                     # Drop per-site status overrides so the effective status
                     # (per-site else global) falls back to global offboarding.
                     await clear_user_site_statuses(user, session)
-                self._outcome = 'miss_offboarding'
+                    self._outcome = 'miss_offboarding'
+                else:
+                    self._outcome = 'miss_not_active'
             else:
                 self._outcome = 'miss_already_expiring'
         else:
@@ -288,6 +333,7 @@ class SyncUserIAM(Operation):
             'username': self.username,
             'outcome': self._outcome,
             'iam_id': self._iam_id,
+            'resolved_by': self._resolved_by,
             'expires_at': _isoformat(self._expires_at),
             'first_missing_at': _isoformat(self._first_missing_at),
             'last_seen_at': _isoformat(self._last_seen_at),
@@ -309,9 +355,11 @@ _TALLY_KEYS = (
     'miss_within_grace',
     'miss_offboarding',
     'miss_already_expiring',
+    'miss_not_active',
     'transient_error',
     'error',
     'notified_offboarding',
+    'notified_restored',
     'notify_error',
 )
 
@@ -416,6 +464,12 @@ class SyncAllUsersIAM(Operation):
         if result.outcome == 'miss_offboarding' and self.notifier is not None:
             if await maybe_notify_offboarding(result, self.notifier):
                 self._tally['notified_offboarding'] += 1
+            else:
+                self._tally['notify_error'] += 1
+
+        if result.outcome == 'hit_restored' and self.notifier is not None:
+            if await maybe_notify_restored(result, self.notifier):
+                self._tally['notified_restored'] += 1
             else:
                 self._tally['notify_error'] += 1
 
