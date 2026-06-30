@@ -101,6 +101,7 @@ class CreateUser(Operation):
         gid: int | None = None,
         home_directory: str | None = None,
         password: str | None = None,
+        ssh_key: str | None = None,
     ) -> None:
         super().__init__(client, author)
         self.name = name
@@ -117,6 +118,8 @@ class CreateUser(Operation):
         self.access = access or []
         self.home_directory = home_directory or f'/home/{name}'
         self.password = password
+        # Collapse '' / whitespace-only to None so we never persist a blank key.
+        self.ssh_key = ssh_key.strip() if ssh_key else None
 
     async def execute(self, session: AsyncClientSession) -> tuple[User, Group]:
         existing = await User.find_one(User.name == self.name)
@@ -154,6 +157,12 @@ class CreateUser(Operation):
         )
         await group.insert(session=session)
 
+        # Persist the SSH key (if any) directly: the SshKey @after_event(Insert)
+        # hook re-dirties the user for LDAP sync. Inlined rather than via
+        # AddUserSshKey so it shares this operation's session/transaction.
+        if self.ssh_key:
+            await SshKey(key=self.ssh_key, user=user).insert(session=session)
+
         self._user = user
         self._group = group
         return user, group
@@ -166,6 +175,7 @@ class CreateUser(Operation):
             'type': self.type,
             'email': self.email,
             'has_password': self.password is not None,
+            'has_ssh_key': self.ssh_key is not None,
         }
 
 

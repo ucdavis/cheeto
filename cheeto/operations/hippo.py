@@ -44,7 +44,7 @@ from ..models.user import User
 from .group_membership import AddGroupMember, RemoveGroupMember
 from .group import CreateGroupFromSponsor
 from .storage import CreateHomeStorage
-from .user import AddUserAccess, CreateUser
+from .user import AddUserAccess, AddUserSshKey, CreateUser
 from .user_site import AddSiteUser
 
 
@@ -242,10 +242,18 @@ class CreateAccountHandler(BaseHippoHandler):
 
     async def _ensure_user(self, parsed: ParsedEventContext,
                            context: HippoContext) -> User:
+        # Also applies the SSH key carried on the event: for an existing user we
+        # run an update (replace) op; for a new user CreateUser sets it inline.
+        acct = parsed.hippo_account
+        key = acct.key or None  # Unset / None / '' -> None
         existing = await User.find_one(User.name == parsed.username)
         if existing is not None:
+            if key:
+                await AddUserSshKey.run(
+                    context.client, context.author,
+                    name=parsed.username, key=key, replace=True,
+                )
             return existing
-        acct = parsed.hippo_account
         # HiPPO identities carry mothra/iam ids we could fold into User.iam, but
         # UCDIAMInfo requires both — skip until we cross-walk properly.
         user, _ = await CreateUser.run(
@@ -256,6 +264,7 @@ class CreateAccountHandler(BaseHippoHandler):
             fullname=acct.name,
             gid=int(acct.mothra),
             home_directory=f'/home/{parsed.username}',
+            ssh_key=key,
         )
         return user
 
