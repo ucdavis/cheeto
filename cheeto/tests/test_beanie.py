@@ -996,6 +996,35 @@ class TestCreateUserOp:
         assert user.password != plaintext
         assert user.password.startswith('$y$')
 
+    async def test_create_user_with_ssh_key(self, beanie_client):
+        key = 'ssh-ed25519 AAAA test@host'
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='keyopuser', email='key@test.com', uid=41600,
+            fullname='Key Op User', ssh_key=key,
+        )
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert len(keys) == 1
+        assert keys[0].key == key
+
+    async def test_create_user_without_ssh_key(self, beanie_client):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='nokeyuser', email='nokey@test.com', uid=41601,
+            fullname='No Key User',
+        )
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert keys == []
+
+    async def test_create_user_blank_ssh_key_not_persisted(self, beanie_client):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='blankkeyuser', email='blank@test.com', uid=41602,
+            fullname='Blank Key User', ssh_key='   ',
+        )
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert keys == []
+
 
 class TestUserMutationOps:
 
@@ -7550,13 +7579,19 @@ class TestCreateAccountHomeStorage:
                 home_volume='home', home_quota='20G', home_automount_map='home',
             )
 
-    async def _run_handler(self, beanie_client):
+    def _event_with_key(self, key):
+        """A copy of _EVENT whose sole account carries the given SSH key."""
+        account = dict(self._EVENT['accounts'][0])
+        account['key'] = key
+        return {**self._EVENT, 'accounts': [account]}
+
+    async def _run_handler(self, beanie_client, event=None):
         from ..config import HippoConfig
         from ..hippoapi.models.queued_event_model import QueuedEventModel
         from ..operations.hippo import CreateAccountHandler, HippoContext
         upstream = QueuedEventModel.from_dict({
             'id': 1, 'action': 'CreateAccount', 'status': 'Pending',
-            'data': dict(self._EVENT),
+            'data': dict(event if event is not None else self._EVENT),
         })
         # In-memory record (not inserted) — the handler only stashes attrs on
         # it; the processor owns persistence.
@@ -7595,3 +7630,31 @@ class TestCreateAccountHomeStorage:
         assert await Storage.find_one(
             Storage.name == 'hippouser', Storage.category == 'home',
         ) is None
+
+    async def test_new_user_gets_ssh_key(self, beanie_client):
+        await self._seed_site(beanie_client)
+        key = 'ssh-ed25519 AAAAnewuser hippo@x.test'
+        await self._run_handler(beanie_client, event=self._event_with_key(key))
+        user = await User.find_one(User.name == 'hippouser')
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert [k.key for k in keys] == [key]
+
+    async def test_existing_user_key_replaced(self, beanie_client):
+        await self._seed_site(beanie_client)
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='hippouser', email='hippo@x.test', uid=9990001,
+            fullname='Hippo User', ssh_key='ssh-ed25519 OLDKEY old@host',
+        )
+        new_key = 'ssh-ed25519 AAAAreplacement hippo@x.test'
+        await self._run_handler(beanie_client,
+                                event=self._event_with_key(new_key))
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert [k.key for k in keys] == [new_key]
+
+    async def test_empty_key_not_persisted(self, beanie_client):
+        await self._seed_site(beanie_client)
+        await self._run_handler(beanie_client)   # default _EVENT has key=''
+        user = await User.find_one(User.name == 'hippouser')
+        keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+        assert keys == []
