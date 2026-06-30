@@ -1,4 +1,5 @@
 from .base import OPERATIONS, Operation, get_operation, operation_names
+from .email import SendUserEmail
 from .site import (
     AddSiteAlias,
     AddStickyGroup,

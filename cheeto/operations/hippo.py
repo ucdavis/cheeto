@@ -18,7 +18,7 @@ from pymongo import AsyncMongoClient
 
 from ..config import HippoConfig
 from ..constants import HIPPO_EVENT_ACTIONS
-from ..hippo import filter_events, hippoapi_client, send_email
+from ..hippo import filter_events, hippoapi_client
 from ..hippoapi import AuthenticatedClient
 from ..hippoapi.api.event_queue import (
     event_queue_pending_events,
@@ -41,6 +41,7 @@ from ..models.group_membership import GroupMembership
 from ..models.hippo import HippoEvent
 from ..models.site import Site
 from ..models.user import User
+from .email import SendUserEmail
 from .group_membership import AddGroupMember, RemoveGroupMember
 from .group import CreateGroupFromSponsor
 from .storage import CreateHomeStorage
@@ -186,7 +187,10 @@ class UpdateSshKeyHandler(AccountHippoHandler):
             sitename=parsed.sitename,
             sitefqdn=sitefqdn,
         )
-        await send_email(mail, context.hippo_client)
+        await SendUserEmail.run(
+            context.client, context.author,
+            mail=mail, hippo_client=context.hippo_client,
+        )
 
 
 class CreateAccountHandler(BaseHippoHandler):
@@ -237,7 +241,10 @@ class CreateAccountHandler(BaseHippoHandler):
 
         if notify:
             mail = await self._build_email(parsed, user, site)
-            await send_email(mail, context.hippo_client)
+            await SendUserEmail.run(
+                context.client, context.author,
+                mail=mail, hippo_client=context.hippo_client,
+            )
         return user
 
     async def _ensure_user(self, parsed: ParsedEventContext,
@@ -388,7 +395,10 @@ class AddAccountToGroupHandler(AccountHippoHandler):
             slurm_accounts=slurm_accounts,
             group_storages=[],
         )
-        await send_email(mail, context.hippo_client)
+        await SendUserEmail.run(
+            context.client, context.author,
+            mail=mail, hippo_client=context.hippo_client,
+        )
 
 
 class RemoveAccountFromGroupHandler(AccountHippoHandler):
@@ -437,7 +447,10 @@ class RemoveAccountFromGroupHandler(AccountHippoHandler):
             sitename=parsed.sitename,
             sponsors=sponsors,
         )
-        await send_email(mail, context.hippo_client)
+        await SendUserEmail.run(
+            context.client, context.author,
+            mail=mail, hippo_client=context.hippo_client,
+        )
 
 
 class CreateGroupHandler(BaseHippoHandler):
@@ -472,7 +485,10 @@ class CreateGroupHandler(BaseHippoHandler):
                 sitename=parsed.sitename,
                 sitefqdn=sitefqdn,
             )
-            await send_email(mail, context.hippo_client)
+            await SendUserEmail.run(
+                context.client, context.author,
+                mail=mail, hippo_client=context.hippo_client,
+            )
         return sponsor, group
 
 
