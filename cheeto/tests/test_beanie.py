@@ -68,9 +68,11 @@ from ..operations import (
     RehomeUser,
     RemoveVolumeAllocation,
     CreateSite,
+    CreateSlurmAccount,
     CreateSlurmAssociation,
     CreateSlurmPartition,
     CreateSlurmQOS,
+    EditSlurmAccount,
     CreateSystemGroup,
     CreateSystemUser,
     CreateUser,
@@ -1856,6 +1858,175 @@ class TestSlurmOps:
             qos_name='prov2-qos',
         )
         assert assoc1.id == assoc2.id
+
+    async def test_create_slurm_account(self, beanie_client, site):
+        await CreateGroup.run(beanie_client, None, name='acct-grp', gid=64400)
+        account = await CreateSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acct-grp',
+        )
+        assert account.id is not None
+
+        from cheeto.models.slurm import SlurmAccount as _SA
+        fetched = await _SA.find_one(_SA.id == account.id)
+        assert fetched.limits.max_user_jobs == -1
+        assert fetched.limits.max_group_jobs == -1
+        assert fetched.limits.max_submit_jobs == -1
+        assert fetched.limits.max_job_length == '-1'
+        assert fetched.coordinators == []
+
+        hist = await History.find_one(History.op == 'create_slurm_account')
+        assert hist is not None
+        assert hist.changes['group'] == 'acct-grp'
+        assert hist.changes['site'] == 'slurmsite'
+
+    async def test_create_slurm_account_with_limits_and_coordinators(
+        self, beanie_client, site,
+    ):
+        await CreateGroup.run(beanie_client, None, name='acct2-grp', gid=64401)
+        await User(
+            name='coorduser', email='coord@test.com', uid=64500, gid=64500,
+            fullname='Coord User', home_directory='/home/coorduser',
+            type='user',
+        ).insert()
+        account = await CreateSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acct2-grp',
+            max_user_jobs=10, max_group_jobs=50, max_submit_jobs=100,
+            max_job_length='7-00:00:00', coordinators=['coorduser'],
+        )
+        from cheeto.models.slurm import SlurmAccount as _SA
+        fetched = await _SA.find_one(
+            _SA.id == account.id, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.limits.max_user_jobs == 10
+        assert fetched.limits.max_group_jobs == 50
+        assert fetched.limits.max_submit_jobs == 100
+        assert fetched.limits.max_job_length == '7-00:00:00'
+        assert [c.name for c in fetched.coordinators] == ['coorduser']
+
+    async def test_create_slurm_account_duplicate_raises(self, beanie_client, site):
+        await CreateGroup.run(beanie_client, None, name='acctdup-grp', gid=64402)
+        await CreateSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acctdup-grp',
+        )
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateSlurmAccount.run(
+                beanie_client, None,
+                site_name='slurmsite', group_name='acctdup-grp',
+            )
+
+    async def test_create_slurm_account_unknown_coordinator_raises(
+        self, beanie_client, site,
+    ):
+        await CreateGroup.run(beanie_client, None, name='acctnc-grp', gid=64403)
+        with pytest.raises(ValueError, match='does not exist'):
+            await CreateSlurmAccount.run(
+                beanie_client, None,
+                site_name='slurmsite', group_name='acctnc-grp',
+                coordinators=['ghostuser'],
+            )
+
+    async def test_edit_slurm_account(self, beanie_client, site):
+        await CreateGroup.run(beanie_client, None, name='acctedit-grp', gid=64404)
+        for uname, uid in (('c1', 64510), ('c2', 64511)):
+            await User(
+                name=uname, email=f'{uname}@test.com', uid=uid, gid=uid,
+                fullname=uname, home_directory=f'/home/{uname}', type='user',
+            ).insert()
+        await CreateSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acctedit-grp',
+            max_user_jobs=5, coordinators=['c1'],
+        )
+        # Partial limit update + coordinator replace; max_user_jobs untouched.
+        await EditSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acctedit-grp',
+            max_group_jobs=42, coordinators=['c2'],
+        )
+        group = await Group.find_one(Group.name == 'acctedit-grp')
+        from cheeto.models.slurm import SlurmAccount as _SA
+        fetched = await _SA.find_one(
+            _SA.group.id == group.id, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.limits.max_user_jobs == 5    # unchanged
+        assert fetched.limits.max_group_jobs == 42  # updated
+        assert [c.name for c in fetched.coordinators] == ['c2']  # replaced
+
+    async def test_edit_slurm_account_missing_raises(self, beanie_client, site):
+        await CreateGroup.run(beanie_client, None, name='acctmiss-grp', gid=64405)
+        with pytest.raises(ValueError, match='No SlurmAccount'):
+            await EditSlurmAccount.run(
+                beanie_client, None,
+                site_name='slurmsite', group_name='acctmiss-grp',
+                max_user_jobs=1,
+            )
+
+    async def test_provision_auto_creates_account(self, beanie_client, site):
+        await CreateGroup.run(beanie_client, None, name='provauto-grp', gid=64406)
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='provauto-part', site_name='slurmsite',
+        )
+        # No SlurmAccount seeded — provision must create it. Instantiate the op
+        # directly so we can read `created_account`.
+        op = ProvisionSlurmAllocation(
+            beanie_client, None,
+            site_name='slurmsite', account_group_name='provauto-grp',
+            partition_name='provauto-part',
+        )
+        assoc = await op._run()
+        assert assoc.id is not None
+        assert op.created_account is True
+
+        from cheeto.models.slurm import SlurmAccount as _SA
+        group = await Group.find_one(Group.name == 'provauto-grp')
+        account = await _SA.find_one(
+            _SA.group.id == group.id, _SA.site.id == site.id,
+        )
+        assert account is not None
+
+    async def test_provision_existing_account_not_recreated(
+        self, beanie_client, site,
+    ):
+        group = await CreateGroup.run(
+            beanie_client, None, name='provexist-grp', gid=64407,
+        )
+        from cheeto.models.slurm import SlurmAccount as _SA, SlurmAccountLimits
+        await _SA(group=group, site=site, limits=SlurmAccountLimits()).insert()
+        await CreateSlurmPartition.run(
+            beanie_client, None, name='provexist-part', site_name='slurmsite',
+        )
+        op = ProvisionSlurmAllocation(
+            beanie_client, None,
+            site_name='slurmsite', account_group_name='provexist-grp',
+            partition_name='provexist-part',
+        )
+        await op._run()
+        assert op.created_account is False
+
+    async def test_slurm_account_at_site_query(self, beanie_client, site):
+        from cheeto.queries.slurm import slurm_account_at_site
+        group = await CreateGroup.run(
+            beanie_client, None, name='acctq-grp', gid=64408,
+        )
+        # Miss before creation.
+        assert await slurm_account_at_site(group, site) is None
+
+        await User(
+            name='qcoord', email='qcoord@test.com', uid=64520, gid=64520,
+            fullname='Q Coord', home_directory='/home/qcoord', type='user',
+        ).insert()
+        await CreateSlurmAccount.run(
+            beanie_client, None,
+            site_name='slurmsite', group_name='acctq-grp',
+            coordinators=['qcoord'],
+        )
+        # Hit; with fetch_links the coordinator User resolves.
+        account = await slurm_account_at_site(group, site, fetch_links=True)
+        assert account is not None
+        assert [c.name for c in account.coordinators] == ['qcoord']
 
     async def test_list_qos_and_associations_at_site(self, beanie_client, site):
         from cheeto.queries.slurm import (

@@ -54,9 +54,11 @@ from .group_membership import (
 )
 from .slurm import (
     AddQOSAllocation,
+    CreateSlurmAccount,
     CreateSlurmAssociation,
     CreateSlurmPartition,
     CreateSlurmQOS,
+    EditSlurmAccount,
     EditSlurmAllocation,
     EditSlurmQOS,
     ProvisionSlurmAllocation,

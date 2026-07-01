@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, Optional
+from typing import Annotated
 
 import pymongo
-from beanie import BackLink
 from pymongo import IndexModel
 from pydantic import Field, field_validator, model_validator
 
 from ..constants import GROUP_TYPES, UINT_MAX
 from .base import BaseDocument
 from .ldap_sync import LDAPSyncable, stable_fingerprint
-
-if TYPE_CHECKING:
-    from .slurm import SlurmAccount
 
 
 class Group(LDAPSyncable, BaseDocument):
@@ -29,12 +25,9 @@ class Group(LDAPSyncable, BaseDocument):
     type: str = 'group'
 
     # Membership is per-site and lives on GroupMembership edges, not here.
-    # See cheeto/models/group_membership.py.
-
-    slurm: Optional[BackLink['SlurmAccount']] = Field(
-        default=None,
-        json_schema_extra={'original_field': 'group'},
-    )
+    # See cheeto/models/group_membership.py. Slurm accounts are per-site and
+    # keyed on (group, site); they are looked up via SlurmAccount, not a
+    # backlink here.
 
     @field_validator('type')
     @classmethod

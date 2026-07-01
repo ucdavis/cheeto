@@ -2,7 +2,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from beanie import PydanticObjectId
-from ponderosa import ArgParser
+from ponderosa import ArgParser, arggroup
 from rich.panel import Panel
 from rich.table import Table
 
@@ -15,9 +15,11 @@ from ...models.site import Site
 from ...models.slurm import SlurmAllocation, SlurmPartition, SlurmQOS, SlurmTRES
 from ...operations import (
     AddQOSAllocation,
+    CreateSlurmAccount,
     CreateSlurmAssociation,
     CreateSlurmPartition,
     CreateSlurmQOS,
+    EditSlurmAccount,
     EditSlurmAllocation,
     EditSlurmQOS,
     ProvisionSlurmAllocation,
@@ -35,6 +37,7 @@ from ...queries.slurm import (
     list_qos_at_site,
     partition_at_site,
     qos_at_site,
+    slurm_account_at_site,
     total_tres,
 )
 from ...operations.base import UNSET
@@ -90,6 +93,12 @@ def slurm_qos_cmd(args: Namespace):
 @commands.register('ng', 'slurm', 'association', aliases=['assoc'],
                    help='Slurm association operations')
 def slurm_association_cmd(args: Namespace):
+    pass
+
+
+@commands.register('ng', 'slurm', 'account',
+                   help='Slurm account operations')
+def slurm_account_cmd(args: Namespace):
     pass
 
 
@@ -942,3 +951,154 @@ def _(parser: ArgParser):
                         help='Read current user default accounts from a saved '
                              '`sacctmgr show -P user format=User,DefaultAccount` '
                              'dump instead of the controller (offline preview)')
+
+
+# ---------------------------------------------------------------------------
+# slurm account
+# ---------------------------------------------------------------------------
+
+
+def _account_limit_kwargs(args: Namespace) -> dict:
+    return {
+        'max_user_jobs': args.max_user_jobs,
+        'max_group_jobs': args.max_group_jobs,
+        'max_submit_jobs': args.max_submit_jobs,
+        'max_job_length': args.max_job_length,
+    }
+
+
+@arggroup('slurm account', desc='Slurm account limits and coordinators')
+def slurm_account_args(parser: ArgParser) -> None:
+    parser.add_argument('--max-user-jobs', type=int, default=None,
+                        help='Max concurrent jobs per user (-1 = unlimited)')
+    parser.add_argument('--max-group-jobs', type=int, default=None,
+                        help='Max concurrent jobs for the whole account '
+                             '(-1 = unlimited)')
+    parser.add_argument('--max-submit-jobs', type=int, default=None,
+                        help='Max jobs the account may have queued at once '
+                             '(-1 = unlimited)')
+    parser.add_argument('--max-job-length', default=None,
+                        help='Max wall time per job (e.g. "7-00:00:00"; '
+                             '-1 = unlimited)')
+    parser.add_argument('--coordinator', action='append', default=None,
+                        dest='coordinators', metavar='USERNAME',
+                        help='Account coordinator username (repeatable). On '
+                             'edit, replaces the existing coordinator list.')
+
+
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@slurm_account_args.apply()
+@commands.register('ng', 'slurm', 'account', 'new',
+                   help='Create the Slurm account for a group on a site')
+async def slurm_account_new(args: Namespace):
+    console = Console()
+    await CreateSlurmAccount.run(
+        args.db, args.author,
+        site_name=args.site, group_name=args.group,
+        coordinators=args.coordinators,
+        **_account_limit_kwargs(args),
+    )
+    console.print(
+        f'Created Slurm account for group [green]{args.group}[/] '
+        f'on site [green]{args.site}[/]'
+    )
+
+
+
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@slurm_account_args.apply()
+@commands.register('ng', 'slurm', 'account', 'edit',
+                   help="Edit a group's Slurm account limits/coordinators "
+                        'on a site')
+async def slurm_account_edit(args: Namespace):
+    console = Console()
+    await EditSlurmAccount.run(
+        args.db, args.author,
+        site_name=args.site, group_name=args.group,
+        coordinators=args.coordinators,
+        **_account_limit_kwargs(args),
+    )
+    console.print(
+        f'Updated Slurm account for group [green]{args.group}[/] '
+        f'on site [green]{args.site}[/]'
+    )
+
+def _account_to_dict(account) -> dict:
+    limits = account.limits
+    coordinators = [
+        c.name if hasattr(c, 'name') else str(c.ref.id)
+        for c in account.coordinators
+    ]
+    return {
+        'group': account.group.name if hasattr(account.group, 'name') else None,
+        'site': account.site.name if hasattr(account.site, 'name') else None,
+        'limits': {
+            'max_user_jobs': limits.max_user_jobs,
+            'max_group_jobs': limits.max_group_jobs,
+            'max_submit_jobs': limits.max_submit_jobs,
+            'max_job_length': limits.max_job_length,
+        },
+        'coordinators': coordinators,
+    }
+
+
+def _render_account_panel(data: dict) -> Panel:
+    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
+    table.add_column(style='bold cyan', no_wrap=True)
+    table.add_column()
+    table.add_row('group', str(data['group']))
+    table.add_row('site', str(data['site']))
+    lim = data['limits']
+    table.add_row(
+        'limits',
+        f"max_user_jobs={lim['max_user_jobs']}, "
+        f"max_group_jobs={lim['max_group_jobs']}, "
+        f"max_submit_jobs={lim['max_submit_jobs']}, "
+        f"max_job_length={lim['max_job_length']}",
+    )
+    coords = data['coordinators']
+    table.add_row(
+        'coordinators', ', '.join(coords) if coords else '[dim](none)[/]',
+    )
+    return Panel(
+        table,
+        title=f'[bold]Slurm account:[/] [green]{data["group"]}[/] '
+              f'@ [green]{data["site"]}[/]',
+        border_style='cyan', expand=False,
+    )
+
+
+@group_args.apply(required=True)
+@site_args.apply(required=True)
+@commands.register('ng', 'slurm', 'account', 'show',
+                   help="Show a group's Slurm account on a site")
+async def slurm_account_show(args: Namespace):
+    console = Console()
+    site = await Site.find_one(Site.name == args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+    group = await Group.find_one(Group.name == args.group)
+    if group is None:
+        console.print(f'[red]Group {args.group} not found[/]')
+        return 1
+    account = await slurm_account_at_site(group, site, fetch_links=True)
+    if account is None:
+        console.print(
+            f'[dim](no Slurm account for {args.group} on {args.site})[/]'
+        )
+        return 0
+    data = _account_to_dict(account)
+    if args.yaml:
+        print_yaml(data)
+    else:
+        console.print(_render_account_panel(data))
+    return 0
+
+
+@slurm_account_show.args()
+def _(parser: ArgParser):
+    parser.add_argument('--yaml', action='store_true', default=False,
+                        help='Output as YAML')
