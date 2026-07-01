@@ -85,6 +85,20 @@ class UserGroupSlurm:
     slurm: GroupSlurm
 
 
+async def slurm_account_at_site(
+    group: Group, site: Site, *, fetch_links: bool = False,
+) -> SlurmAccount | None:
+    """Fetch the SlurmAccount for (group, site), or None. With
+    `fetch_links=True` (nesting_depth=1) the coordinator Users resolve, for
+    display."""
+    return await SlurmAccount.find_one(
+        SlurmAccount.group.id == group.id,
+        SlurmAccount.site.id == site.id,
+        fetch_links=fetch_links,
+        nesting_depth=1 if fetch_links else None,
+    )
+
+
 async def group_slurm_at_site(group: Group, site: Site) -> GroupSlurm | None:
     """Fetch the SlurmAccount and SlurmAssociations for (group, site), or None."""
     account = await SlurmAccount.find_one(

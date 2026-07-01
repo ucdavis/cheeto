@@ -37,6 +37,18 @@ from .base import UNSET, Operation
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
 
 
+async def _resolve_coordinators(usernames: list[str]) -> list[User]:
+    """Resolve coordinator usernames to User documents (for a SlurmAccount's
+    coordinators list). Raises ValueError on the first unknown username."""
+    out: list[User] = []
+    for name in usernames:
+        user = await User.find_one(User.name == name)
+        if user is None:
+            raise ValueError(f'User {name} does not exist')
+        out.append(user)
+    return out
+
+
 class CreateSlurmPartition(Operation):
     op_name = 'create_slurm_partition'
 
@@ -386,6 +398,161 @@ class EditSlurmQOS(Operation):
         return data
 
 
+class CreateSlurmAccount(Operation):
+    """Create the SlurmAccount for a group on a site — the per-(group, site)
+    container that associations and coordinators attach to. Job limits default
+    to unlimited (-1) and can be changed later via EditSlurmAccount."""
+
+    op_name = 'create_slurm_account'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        group_name: str,
+        max_user_jobs: int | None = None,
+        max_group_jobs: int | None = None,
+        max_submit_jobs: int | None = None,
+        max_job_length: str | None = None,
+        coordinators: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.site_name = site_name
+        self.group_name = group_name
+        self.max_user_jobs = max_user_jobs
+        self.max_group_jobs = max_group_jobs
+        self.max_submit_jobs = max_submit_jobs
+        self.max_job_length = max_job_length
+        self.coordinators = coordinators or []
+
+    def _limit_overrides(self) -> dict[str, Any]:
+        overrides: dict[str, Any] = {}
+        if self.max_user_jobs is not None:
+            overrides['max_user_jobs'] = self.max_user_jobs
+        if self.max_group_jobs is not None:
+            overrides['max_group_jobs'] = self.max_group_jobs
+        if self.max_submit_jobs is not None:
+            overrides['max_submit_jobs'] = self.max_submit_jobs
+        if self.max_job_length is not None:
+            overrides['max_job_length'] = self.max_job_length
+        return overrides
+
+    async def execute(self, session: AsyncClientSession) -> SlurmAccount:
+        site = await Site.find_one(Site.name == self.site_name)
+        if site is None:
+            raise ValueError(f'Site {self.site_name} does not exist')
+        group = await Group.find_one(Group.name == self.group_name)
+        if group is None:
+            raise ValueError(f'Group {self.group_name} does not exist')
+
+        existing = await SlurmAccount.find_one(
+            SlurmAccount.group.id == group.id,
+            SlurmAccount.site.id == site.id,
+        )
+        if existing is not None:
+            raise ValueError(
+                f'SlurmAccount for group {self.group_name} on site '
+                f'{self.site_name} already exists'
+            )
+
+        limits = SlurmAccountLimits(**self._limit_overrides())
+        coordinators = await _resolve_coordinators(self.coordinators)
+
+        account = SlurmAccount(
+            group=group, site=site, limits=limits, coordinators=coordinators,
+        )
+        await account.insert(session=session)
+        self._account = account
+        return account
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.site_name,
+            'group': self.group_name,
+            'limits': self._limit_overrides(),
+            'coordinators': self.coordinators,
+        }
+
+
+class EditSlurmAccount(Operation):
+    """Edit a group's SlurmAccount on a site: update job limits and/or replace
+    the coordinator list. Only the fields passed are changed; passing an empty
+    coordinator list clears the coordinators."""
+
+    op_name = 'edit_slurm_account'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        group_name: str,
+        max_user_jobs: int | None = None,
+        max_group_jobs: int | None = None,
+        max_submit_jobs: int | None = None,
+        max_job_length: str | None = None,
+        coordinators: list[str] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.site_name = site_name
+        self.group_name = group_name
+        self.max_user_jobs = max_user_jobs
+        self.max_group_jobs = max_group_jobs
+        self.max_submit_jobs = max_submit_jobs
+        self.max_job_length = max_job_length
+        # None => leave coordinators untouched; [] => clear them.
+        self.coordinators = coordinators
+
+    async def execute(self, session: AsyncClientSession) -> SlurmAccount:
+        site = await Site.find_one(Site.name == self.site_name)
+        if site is None:
+            raise ValueError(f'Site {self.site_name} does not exist')
+        group = await Group.find_one(Group.name == self.group_name)
+        if group is None:
+            raise ValueError(f'Group {self.group_name} does not exist')
+        account = await SlurmAccount.find_one(
+            SlurmAccount.group.id == group.id,
+            SlurmAccount.site.id == site.id,
+        )
+        if account is None:
+            raise ValueError(
+                f'No SlurmAccount for group {self.group_name} on site '
+                f'{self.site_name}'
+            )
+
+        if self.max_user_jobs is not None:
+            account.limits.max_user_jobs = self.max_user_jobs
+        if self.max_group_jobs is not None:
+            account.limits.max_group_jobs = self.max_group_jobs
+        if self.max_submit_jobs is not None:
+            account.limits.max_submit_jobs = self.max_submit_jobs
+        if self.max_job_length is not None:
+            account.limits.max_job_length = self.max_job_length
+        if self.coordinators is not None:
+            account.coordinators = await _resolve_coordinators(self.coordinators)
+
+        await account.save(session=session)
+        self._account = account
+        return account
+
+    def describe(self) -> dict[str, Any]:
+        data: dict[str, Any] = {'site': self.site_name, 'group': self.group_name}
+        if self.max_user_jobs is not None:
+            data['max_user_jobs'] = self.max_user_jobs
+        if self.max_group_jobs is not None:
+            data['max_group_jobs'] = self.max_group_jobs
+        if self.max_submit_jobs is not None:
+            data['max_submit_jobs'] = self.max_submit_jobs
+        if self.max_job_length is not None:
+            data['max_job_length'] = self.max_job_length
+        if self.coordinators is not None:
+            data['coordinators'] = self.coordinators
+        return data
+
+
 class RemoveSlurmPartition(Operation):
     op_name = 'remove_slurm_partition'
 
@@ -630,6 +797,7 @@ class ProvisionSlurmAllocation(Operation):
         self.priority = priority
         self.flags = flags or ['DenyOnLimit']
         self.created_qos = False
+        self.created_account = False
 
     async def execute(self, session: AsyncClientSession) -> SlurmAssociation:
         site = await Site.find_one(Site.name == self.site_name)
@@ -645,9 +813,12 @@ class ProvisionSlurmAllocation(Operation):
             SlurmAccount.site.id == site.id,
         )
         if account is None:
-            raise ValueError(
-                f'No SlurmAccount for {self.account_group_name} on {self.site_name}'
-            )
+            # Provisioning implies the group should have an account here; create
+            # a default one (unlimited limits, no coordinators) rather than
+            # failing. Limits/coordinators can be set later via EditSlurmAccount.
+            account = SlurmAccount(group=group, site=site)
+            await account.insert(session=session)
+            self.created_account = True
         partition = await SlurmPartition.find_one(
             SlurmPartition.name == self.partition_name,
             SlurmPartition.site.id == site.id,
@@ -703,6 +874,7 @@ class ProvisionSlurmAllocation(Operation):
             'partition': self.partition_name,
             'qos': self.qos_name,
             'created_qos': self.created_qos,
+            'created_account': self.created_account,
         }
 
 
