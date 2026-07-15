@@ -3,3 +3,7 @@ cheeto/**/__pycache__
 *.txt
 .vscode
 scratch
+
+# Sphinx docs: build output and the sphinx-autoapi-generated API tree
+docs/_build/
+docs/reference/api/

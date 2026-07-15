@@ -24,6 +24,15 @@ optional = true
 [tool.poetry.group.dev.dependencies]
 pdbpp = "^0.10.3"
 
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+sphinx = "^8.1"
+myst-parser = "^4.0"
+sphinx-autoapi = "^3.4"
+furo = "^2024.8.6"
+
 [tool.poetry.requires-plugins]
 poetry-bumpversion = "^0.3.3"
 
