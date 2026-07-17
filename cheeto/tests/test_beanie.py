@@ -63,6 +63,7 @@ from ..operations import (
     CreateAutomountMap,
     CreateGroup,
     CreateGroupFromSponsor,
+    CreateGroupStorage,
     CreateHomeStorage,
     EditVolumeAllocation,
     RehomeUser,
@@ -5679,6 +5680,145 @@ class TestCreateHomeStorageOp:
                 beanie_client, None,
                 user_name='hsuser', site_name='hs_site',
             )
+
+
+class TestCreateGroupStorageOp:
+
+    async def _seed_group_site(self, beanie_client, *, sponsors=('pi',)):
+        """Site with a parent 'groups' volume + a 'group' automount map, a
+        lab group 'glab', and the given sponsor users (added as group
+        sponsors at the site)."""
+        site = Site(name='gs_site', fqdn='gs.test')
+        await site.insert()
+        await _seed_volume(
+            site, name='groups', host='nas5', host_path='/nas5/groups',
+        )
+        await AutomountMap(name='group', site=site, prefix='/group').insert()
+        await CreateGroup.run(beanie_client, None, name='glab', gid=3900001)
+        for i, s in enumerate(sponsors):
+            await CreateUser.run(
+                beanie_client, None,
+                name=s, email=f'{s}@test.com', uid=75000 + i, fullname=s,
+            )
+            await AddGroupSponsor.run(
+                beanie_client, None,
+                group_name='glab', user_name=s, site_name='gs_site',
+            )
+        return await Site.find_one(Site.name == 'gs_site')
+
+    async def test_sponsor_default_and_group_map(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='10T', parent_volume='groups',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'groups/glab',
+            fetch_links=True, nesting_depth=1,
+        )
+        assert volume is not None
+        assert volume.host == 'nas5'
+        assert volume.host_path == '/nas5/groups/glab'
+        assert volume.quota == '10T'
+        assert volume.parent.name == 'groups'
+
+        fetched = await Storage.find_one(
+            Storage.name == 'glab', Storage.category == 'group',
+            fetch_links=True, nesting_depth=2,
+        )
+        assert fetched.category == 'group'
+        assert fetched.owner.name == 'pi'       # defaulted to the sponsor
+        assert fetched.group.name == 'glab'
+        assert fetched.subpath == ''
+        assert fetched.quota == '10T'
+        assert fetched.mount_path == '/group/glab'
+
+        hist = await History.find_one(History.op == 'create_group_storage')
+        assert hist is not None
+        assert hist.changes['group'] == 'glab'
+        assert hist.changes['owner'] == 'pi'
+
+    async def test_explicit_owner_overrides_sponsor(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=())
+        await CreateUser.run(
+            beanie_client, None,
+            name='ownr', email='o@test.com', uid=75500, fullname='Ownr',
+        )
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='5T', parent_volume='groups', owner_name='ownr',
+        )
+        fetched = await Storage.find_one(
+            Storage.name == 'glab', Storage.category == 'group',
+            fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.owner.name == 'ownr'
+
+    async def test_no_sponsor_requires_owner(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=())
+        with pytest.raises(ValueError, match='no sponsor'):
+            await CreateGroupStorage.run(
+                beanie_client, None,
+                group_name='glab', site_name='gs_site',
+                quota='5T', parent_volume='groups',
+            )
+
+    async def test_multiple_sponsors_requires_owner(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi1', 'pi2'))
+        with pytest.raises(ValueError, match='multiple sponsors'):
+            await CreateGroupStorage.run(
+                beanie_client, None,
+                group_name='glab', site_name='gs_site',
+                quota='5T', parent_volume='groups',
+            )
+
+    async def test_requires_parent_or_host(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        with pytest.raises(ValueError, match='parent volume or host'):
+            await CreateGroupStorage.run(
+                beanie_client, None,
+                group_name='glab', site_name='gs_site', quota='5T',
+            )
+
+    async def test_requires_quota(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        with pytest.raises(ValueError, match='requires a quota'):
+            await CreateGroupStorage.run(
+                beanie_client, None,
+                group_name='glab', site_name='gs_site',
+                parent_volume='groups',
+            )
+
+    async def test_duplicate_group_storage_errors(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='10T', parent_volume='groups',
+        )
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateGroupStorage.run(
+                beanie_client, None,
+                group_name='glab', site_name='gs_site',
+                quota='10T', parent_volume='groups',
+            )
+
+    async def test_host_escape_hatch(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='20T', host='nas99',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'group/glab',
+        )
+        assert volume.host == 'nas99'
+        assert volume.host_path == '/group/glab'
+        assert volume.quota == '20T'
+        assert volume.parent is None
 
 
 class TestRehomeUser:
