@@ -22,6 +22,7 @@ from .user import (
     ClearOffboardingSiteStatuses,
     ClearRedundantSiteStatuses,
     CreateClassUser,
+    CreateClassUsers,
     CreateSharedUser,
     CreateSystemUser,
     CreateUser,

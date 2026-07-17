@@ -1,20 +1,26 @@
 from __future__ import annotations
 
+import re
+from datetime import datetime
 from typing import Any
 
+from beanie.operators import In
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..constants import (
     DEFAULT_SHELL,
     MIN_CLASS_ID,
+    MIN_LABGROUP_ID,
     MIN_SHARED_UID,
     MIN_SYSTEM_UID,
     UINT_MAX,
 )
-from ..encrypt import get_mcf_hasher, hash_yescrypt
+from ..encrypt import generate_password, get_mcf_hasher, hash_yescrypt
 from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group_membership import GroupMembership
+from ..models.site import Site
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from ..queries.access_status import (
@@ -24,6 +30,7 @@ from ..queries.access_status import (
 )
 from ..queries.user import find_redundant_site_statuses, find_users
 from .base import Operation
+from .storage import _provision_home_storage
 
 
 def _hash_password(plaintext: str) -> str:
@@ -102,6 +109,7 @@ class CreateUser(Operation):
         home_directory: str | None = None,
         password: str | None = None,
         ssh_key: str | None = None,
+        expires_at: datetime | None = None,
     ) -> None:
         super().__init__(client, author)
         self.name = name
@@ -112,6 +120,7 @@ class CreateUser(Operation):
         self.type = type
         self.shell = shell
         self.status = status
+        self.expires_at = expires_at
         # Empty default — callers explicitly pass access shorthands they need.
         # AccessGroup resolution happens at execute() time so the operation
         # surfaces a clear error if SeedAccessStatusGroups hasn't been run.
@@ -144,6 +153,7 @@ class CreateUser(Operation):
             access=access_links,
             home_directory=self.home_directory,
             password=_hash_password(self.password) if self.password else None,
+            expires_at=self.expires_at,
         )
         await user.insert(session=session)
 
@@ -241,7 +251,10 @@ class CreateClassUser(Operation):
         self.password = password
 
     async def execute(self, session: AsyncClientSession) -> tuple[User, Group]:
-        uid = await _get_next_id(MIN_CLASS_ID)
+        # Cap at MIN_LABGROUP_ID: the naive scan would otherwise pick up
+        # system uids (>= 4e9), and personal-group gid == uid must stay out
+        # of the labgroup gid band.
+        uid = await _get_next_id(MIN_CLASS_ID, MIN_LABGROUP_ID)
         op = CreateUser(
             self.client, self.author,
             name=self.name, email=self.email, uid=uid,
@@ -259,6 +272,156 @@ class CreateClassUser(Operation):
             'type': 'class',
             'email': self.email,
             'has_password': self.password is not None,
+        }
+
+
+CLASS_PREFIX_REGEX = re.compile(r'^[a-z][a-z0-9-]*$')
+
+# Default access shorthands for batch-created class accounts (v1 parity).
+DEFAULT_CLASS_ACCESS = ('login-ssh', 'slurm')
+
+
+class CreateClassUsers(Operation):
+    """Batch-create a class roster: `count` users named
+    `{prefix}-{i}` (1-indexed, zero-padded to len(str(count)) digits), each
+    type='class' with a generated password and a mandatory expiration.
+
+    Runs as one transaction: the uid block is allocated once up front and
+    all user/personal-group name collisions are pre-checked in single
+    queries, because the per-user checks inside CreateUser.execute read
+    outside the session and cannot see this batch's uncommitted inserts.
+
+    Each user is added to `site_name` (a UserSiteInfo edge, status active)
+    and gets a home storage provisioned from the site's home defaults
+    (default home volume/quota/mount — see CreateHomeStorage). With
+    `group_name`, a GroupMembership member edge is added as well.
+
+    Intended for class-scale batches (N in the hundreds): the N yescrypt
+    hashes run inside the transaction's lifetime window.
+
+    Returns list[(User, plaintext_password)]; plaintext never enters
+    History.
+    """
+
+    op_name = 'create_class_users'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        prefix: str,
+        count: int,
+        email: str,
+        expires_at: datetime,
+        site_name: str,
+        access: list[str] | None = None,
+        group_name: str | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        if count < 1:
+            raise ValueError('count must be >= 1')
+        if not isinstance(expires_at, datetime):
+            raise ValueError(
+                'class accounts require an expiration (expires_at)'
+            )
+        if not CLASS_PREFIX_REGEX.match(prefix):
+            raise ValueError(
+                f'Invalid prefix {prefix!r}: must start with a lowercase '
+                'letter and contain only [a-z0-9-]'
+            )
+        width = len(str(count))
+        self.names = [
+            f'{prefix}-{i:0{width}d}' for i in range(1, count + 1)
+        ]
+        if len(prefix) + 1 + width > 32:
+            raise ValueError(
+                f'Generated username {self.names[-1]!r} exceeds the 32 '
+                'character limit; shorten the prefix'
+            )
+        self.prefix = prefix
+        self.count = count
+        self.email = email
+        self.expires_at = expires_at
+        self.access = list(access) if access else list(DEFAULT_CLASS_ACCESS)
+        self.site_name = site_name
+        self.group_name = group_name
+        # Plaintext lives only on the instance and the execute() return
+        # value; describe() must never touch it.
+        self.passwords = [generate_password() for _ in range(count)]
+        self._base_uid: int | None = None
+        self._home_mechanism: str = 'none'
+
+    async def execute(
+        self, session: AsyncClientSession,
+    ) -> list[tuple[User, str]]:
+        site = await Site.find_one(Site.name == self.site_name)
+        if site is None:
+            raise ValueError(f'Site {self.site_name} does not exist')
+        active_sg = await _resolve_status_link('active')
+        group: Group | None = None
+        if self.group_name is not None:
+            group = await Group.find_one(Group.name == self.group_name)
+            if group is None:
+                raise ValueError(f'Group {self.group_name} does not exist')
+
+        clashing = await User.find(In(User.name, self.names)).to_list()
+        if clashing:
+            taken = ', '.join(sorted(u.name for u in clashing))
+            raise ValueError(f'User(s) already exist: {taken}')
+        # CreateUser inserts a personal group per user without its own
+        # collision check, so guard those names too.
+        clashing_groups = await Group.find(In(Group.name, self.names)).to_list()
+        if clashing_groups:
+            taken = ', '.join(sorted(g.name for g in clashing_groups))
+            raise ValueError(f'Group(s) already exist: {taken}')
+
+        base_uid = await _get_next_id(MIN_CLASS_ID, MIN_LABGROUP_ID)
+        if base_uid + self.count > MIN_LABGROUP_ID:
+            raise ValueError(
+                f'class uid range exhausted: need {self.count} uids from '
+                f'{base_uid}, cap is {MIN_LABGROUP_ID}'
+            )
+        self._base_uid = base_uid
+
+        results: list[tuple[User, str]] = []
+        for i, (name, password) in enumerate(zip(self.names, self.passwords)):
+            op = CreateUser(
+                self.client, self.author,
+                name=name, email=self.email, uid=base_uid + i,
+                fullname=name, type='class',
+                access=self.access, password=password,
+                expires_at=self.expires_at,
+            )
+            user, personal_group = await op.execute(session)
+            await UserSiteInfo(
+                user=user, site=site, status=active_sg,
+            ).insert(session=session)
+            if group is not None:
+                await GroupMembership(
+                    user=user, group=group, site=site, roles=['member'],
+                ).insert(session=session)
+            _, self._home_mechanism = await _provision_home_storage(
+                session, site=site, user=user, group=personal_group,
+            )
+            results.append((user, password))
+
+        self._results = results
+        return results
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'prefix': self.prefix,
+            'count': self.count,
+            'usernames': self.names,
+            'base_uid': self._base_uid,
+            'email': self.email,
+            'access': self.access,
+            'expires_at': self.expires_at,
+            'site': self.site_name,
+            'group': self.group_name,
+            'home_mechanism': self._home_mechanism,
+            'has_passwords': True,
         }
 
 

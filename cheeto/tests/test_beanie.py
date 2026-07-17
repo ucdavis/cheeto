@@ -74,6 +74,7 @@ from ..operations import (
     CreateSlurmPartition,
     CreateSlurmQOS,
     EditSlurmAccount,
+    CreateClassUsers,
     CreateSystemGroup,
     CreateSystemUser,
     CreateUser,
@@ -1027,6 +1028,266 @@ class TestCreateUserOp:
         )
         keys = await SshKey.find(SshKey.user.id == user.id).to_list()
         assert keys == []
+
+
+CLASS_EXPIRY = datetime.datetime(2027, 6, 30, tzinfo=datetime.timezone.utc)
+
+
+class TestCreateClassUsersOp:
+
+    async def _seed_class_site(self, beanie_client, *, name='clsite',
+                               fqdn='cl.test'):
+        """Site with a central home volume, home defaults, and a 'home'
+        automount map: the batch op provisions a home per user."""
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name=name, fqdn=fqdn)
+        await site.insert()
+        await _seed_volume(site, name='home', host='flash01',
+                           host_path='/flash/export/home')
+        amap = AutomountMap(name='home', site=site, prefix='/home',
+                            options=['fstype=nfs'])
+        await amap.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename=name,
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        return site
+
+    async def test_happy_path(self, beanie_client):
+        from cheeto.constants import MIN_CLASS_ID
+
+        await self._seed_class_site(beanie_client)
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='ecl243', count=3, email='instructor@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        assert [u.name for u, _ in results] == [
+            'ecl243-1', 'ecl243-2', 'ecl243-3',
+        ]
+        plaintexts = [pw for _, pw in results]
+        assert all(plaintexts)
+        assert len(set(plaintexts)) == 3
+
+        for user, plaintext in results:
+            assert user.type == 'class'
+            assert user.gid == user.uid
+            assert user.fullname == user.name
+            assert user.home_directory == f'/home/{user.name}'
+            assert user.password is not None
+            assert user.password != plaintext
+            assert user.password.startswith('$y$')
+            assert user.status.status_name == 'active'
+            assert {ag.access_name for ag in user.access} == {
+                'login-ssh', 'slurm',
+            }
+            assert user.expires_at == CLASS_EXPIRY
+            personal = await Group.find_one(Group.name == user.name)
+            assert personal is not None
+            assert personal.type == 'user'
+            assert personal.gid == user.uid
+
+            usi = await UserSiteInfo.find_one(
+                UserSiteInfo.user.id == user.id,
+                fetch_links=True, nesting_depth=1,
+            )
+            assert usi is not None
+            assert usi.status.status_name == 'active'
+
+            volume = await StorageVolume.find_one(
+                StorageVolume.name == f'home/{user.name}',
+                fetch_links=True, nesting_depth=1,
+            )
+            assert volume is not None
+            assert volume.quota == '20G'
+            assert volume.parent.name == 'home'
+            storage = await Storage.find_one(
+                Storage.name == user.name, fetch_links=True, nesting_depth=2,
+            )
+            assert storage is not None
+            assert storage.category == 'home'
+            assert storage.mount_path == f'/home/{user.name}'
+
+        assert await GroupMembership.find_all().count() == 0
+
+        uids = [u.uid for u, _ in results]
+        assert uids == [MIN_CLASS_ID, MIN_CLASS_ID + 1, MIN_CLASS_ID + 2]
+
+        hist = await History.find_one(History.op == 'create_class_users')
+        assert hist is not None
+        assert hist.changes['usernames'] == [u.name for u, _ in results]
+        assert hist.changes['count'] == 3
+        assert hist.changes['home_mechanism'] == 'automount:home'
+        assert hist.changes['has_passwords'] is True
+        for plaintext in plaintexts:
+            assert plaintext not in repr(hist.changes)
+
+    async def test_padding_width_two(self, beanie_client):
+        await self._seed_class_site(beanie_client)
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='pad', count=10, email='pad@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        names = [u.name for u, _ in results]
+        assert names[0] == 'pad-01'
+        assert names[8] == 'pad-09'
+        assert names[9] == 'pad-10'
+
+    async def test_uid_blocks_are_sequential(self, beanie_client):
+        from cheeto.constants import MIN_CLASS_ID
+
+        await self._seed_class_site(beanie_client)
+        first = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='blocka', count=3, email='a@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        second = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='blockb', count=2, email='b@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        assert [u.uid for u, _ in first] == [
+            MIN_CLASS_ID, MIN_CLASS_ID + 1, MIN_CLASS_ID + 2,
+        ]
+        assert [u.uid for u, _ in second] == [
+            MIN_CLASS_ID + 3, MIN_CLASS_ID + 4,
+        ]
+
+    async def test_uid_scan_ignores_system_range(self, beanie_client):
+        # Pins the _get_next_id(MIN_CLASS_ID, MIN_LABGROUP_ID) cap: a system
+        # uid above the class band must not become the scan's max.
+        from cheeto.constants import MIN_CLASS_ID
+
+        await self._seed_class_site(beanie_client)
+        await User(
+            name='sysabove', email='sys@test.com',
+            uid=4_000_000_001, gid=4_000_000_001,
+            fullname='Sys Above', home_directory='/home/sysabove',
+        ).insert()
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='capped', count=2, email='cap@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        assert [u.uid for u, _ in results] == [
+            MIN_CLASS_ID, MIN_CLASS_ID + 1,
+        ]
+
+    async def test_group_membership_edges(self, beanie_client):
+        from cheeto.queries import group_members_at_site
+
+        site = await self._seed_class_site(beanie_client)
+        group = await CreateGroup.run(
+            beanie_client, None, name='clgroup', gid=61234,
+        )
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='clgrp', count=3, email='clg@test.com',
+            expires_at=CLASS_EXPIRY,
+            site_name='clsite', group_name='clgroup',
+        )
+        roster = await group_members_at_site(group, site)
+        assert roster['members'] == [u.name for u, _ in results]
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+        ).to_list()
+        assert all(e.roles == ['member'] for e in edges)
+
+    async def test_nonexistent_site_and_group(self, beanie_client):
+        with pytest.raises(ValueError, match='Site .* does not exist'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='badsite', count=2, email='bs@test.com',
+                expires_at=CLASS_EXPIRY, site_name='nope',
+            )
+        await Site(name='okgsite', fqdn='okg.test').insert()
+        with pytest.raises(ValueError, match='Group .* does not exist'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='badgrp', count=2, email='bg@test.com',
+                expires_at=CLASS_EXPIRY,
+                site_name='okgsite', group_name='nope',
+            )
+        assert await User.find(User.type == 'class').count() == 0
+
+    async def test_site_without_home_defaults_rolls_back(self, beanie_client):
+        # Home provisioning fails mid-loop (after the first user insert);
+        # the transaction must roll the whole batch back.
+        await Site(name='nodefsite', fqdn='nodef.test').insert()
+        with pytest.raises(ValueError, match='no default home volume'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='nodef', count=2, email='nd@test.com',
+                expires_at=CLASS_EXPIRY, site_name='nodefsite',
+            )
+        assert await User.find_all().count() == 0
+        assert await StorageVolume.find_all().count() == 0
+        assert await History.find_one(
+            History.op == 'create_class_users') is None
+
+    async def test_invalid_construction_rejected(self, beanie_client):
+        with pytest.raises(ValueError, match='count must be'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='zero', count=0, email='z@test.com',
+                expires_at=CLASS_EXPIRY, site_name='anysite',
+            )
+        with pytest.raises(ValueError, match='require an expiration'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='noexp', count=2, email='ne@test.com',
+                expires_at=None, site_name='anysite',
+            )
+        with pytest.raises(ValueError, match='Invalid prefix'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='Bad_Prefix', count=2, email='bp@test.com',
+                expires_at=CLASS_EXPIRY, site_name='anysite',
+            )
+        with pytest.raises(ValueError, match='32 character'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='a' * 30, count=10, email='lg@test.com',
+                expires_at=CLASS_EXPIRY, site_name='anysite',
+            )
+        assert await User.find_all().count() == 0
+        assert await History.find_one(
+            History.op == 'create_class_users') is None
+
+    async def test_user_collision_rolls_back_batch(self, beanie_client):
+        await self._seed_class_site(beanie_client)
+        await CreateUser.run(
+            beanie_client, None,
+            name='cls-2', email='pre@test.com', uid=45000,
+            fullname='Pre Existing',
+        )
+        with pytest.raises(ValueError, match=r'User\(s\) already exist: cls-2'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='cls', count=3, email='c@test.com',
+                expires_at=CLASS_EXPIRY, site_name='clsite',
+            )
+        assert await User.find_one(User.name == 'cls-1') is None
+        assert await User.find_one(User.name == 'cls-3') is None
+        assert await StorageVolume.find_one(
+            StorageVolume.name == 'home/cls-1') is None
+        assert await History.find_one(
+            History.op == 'create_class_users') is None
+
+    async def test_personal_group_collision_rejected(self, beanie_client):
+        await self._seed_class_site(beanie_client)
+        await Group(name='gcls-2', gid=62000, type='group').insert()
+        with pytest.raises(
+            ValueError, match=r'Group\(s\) already exist: gcls-2',
+        ):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='gcls', count=3, email='g@test.com',
+                expires_at=CLASS_EXPIRY, site_name='clsite',
+            )
+        assert await User.find_all().count() == 0
 
 
 class TestUserMutationOps:
