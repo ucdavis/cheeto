@@ -12,6 +12,7 @@ from ...models.storage import StaticMount, Storage, StorageVolume
 from ...operations import (
     AddVolumeAllocation,
     CreateAutomountMap,
+    CreateGroupStorage,
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
@@ -94,6 +95,62 @@ def _(parser: ArgParser):
                              'this host instead of under a parent volume')
     parser.add_argument('--path', default=None,
                         help='Host path for --host (default: /home/<user>)')
+
+
+# ---------------------------------------------------------------------------
+# `ng storage new group`
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply(required=True)
+@group_args.apply(required=True)
+@commands.register('ng', 'storage', 'new', 'group',
+                   help="Provision a group's shared storage (volume + record) "
+                        'under a parent volume or host')
+async def storage_new_group(args: Namespace):
+    console = Console()
+    try:
+        await CreateGroupStorage.run(
+            args.db, args.author,
+            group_name=args.group, site_name=args.site,
+            owner_name=args.owner,
+            quota=args.quota,
+            parent_volume=args.parent_volume,
+            automount_map=args.automount_map,
+            static_mount=args.static_mount,
+            no_mount=args.no_mount,
+            host=args.host, host_path=args.path,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Created group storage for [green]{args.group}[/] on site {args.site}'
+    )
+
+
+@storage_new_group.args()
+def _(parser: ArgParser):
+    parser.add_argument('--owner', default=None,
+                        help='Owning user (default: the group sponsor at the '
+                             'site; required if there is no single sponsor)')
+    parser.add_argument('--quota', required=True,
+                        help='Quota for the group volume (e.g. 10T)')
+    parser.add_argument('--parent-volume', default=None,
+                        help='Parent volume to provision under (required '
+                             'unless --host is given)')
+    parser.add_argument('--automount-map', default=None,
+                        help="Mount via this automount map (default: a map "
+                             "named 'group' at the site)")
+    parser.add_argument('--static-mount', default=None,
+                        help='Mount via this static mount')
+    parser.add_argument('--no-mount', action='store_true', default=False,
+                        help='Create the storage without a mount mechanism')
+    parser.add_argument('--host', default=None,
+                        help='Escape hatch: create a standalone volume on '
+                             'this host instead of under a parent volume')
+    parser.add_argument('--path', default=None,
+                        help='Host path for --host (default: /group/<group>)')
 
 
 # ---------------------------------------------------------------------------

@@ -89,6 +89,7 @@ from .puppet import SyncOldPuppet
 from .storage import (
     AddVolumeAllocation,
     CreateAutomountMap,
+    CreateGroupStorage,
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,

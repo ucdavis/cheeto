@@ -10,6 +10,7 @@ from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.base import link_target_id
 from ..models.group import Group
+from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.storage import (
     AutomountMap,
@@ -473,6 +474,263 @@ class CreateHomeStorage(Operation):
         return {
             'user': self.user_name,
             'site': self.site_name,
+            'quota': self.quota,
+            'parent_volume': self.parent_volume,
+            'host': self.host,
+            'mechanism': self._mechanism,
+        }
+
+
+async def _build_group_volume(
+    site: Site, group_name: str, *,
+    quota: str, parent_volume_name: str | None,
+    host: str | None, host_path: str | None,
+) -> StorageVolume:
+    """Build (not insert) the backing StorageVolume for a group's storage.
+
+    Standalone on `host` (named 'group/<group>'), else a child carved under an
+    explicitly-named parent volume (named '<parent>/<group>', backend/host
+    inherited). There is no site group-default, so a parent volume or host is
+    required. The volume carries the group's quota as its sole allocation.
+    """
+    alloc = _make_allocation(quota, 'initial group allocation')
+    if host is not None:
+        return StorageVolume(
+            name=f'group/{group_name}',
+            site=site,
+            backend='zfs',
+            host=host,
+            host_path=host_path or f'/group/{group_name}',
+            allocations=[alloc],
+            **_backend_config_kwargs('zfs'),
+        )
+    if parent_volume_name is None:
+        raise ValueError(
+            'Group storage requires a parent volume or host; pass '
+            'parent_volume/--parent-volume or host/--host'
+        )
+    parent = await _find_volume(site, parent_volume_name)
+    if parent is None:
+        raise ValueError(
+            f'Parent volume {parent_volume_name} does not exist on {site.name}'
+        )
+    return StorageVolume(
+        name=f'{parent.name}/{group_name}',
+        site=site,
+        backend=parent.backend,
+        host=parent.host,
+        host_path=_join_host_path(parent.host_path, group_name),
+        parent=parent,
+        allocations=[alloc],
+        **_backend_config_kwargs(parent.backend),
+    )
+
+
+async def _resolve_group_mount(
+    site: Site, *,
+    automount_map: str | None, static_mount: str | None, no_mount: bool,
+) -> tuple[AutomountMap | None, StaticMount | None]:
+    """Resolve the mount mechanism for a group storage: explicit
+    automount_map/static_mount by name, else the legacy fallback of an
+    AutomountMap named 'group' on the site (mirrors home's 'home' fallback).
+    Returns (amap, smount); (None, None) if no_mount or nothing resolves."""
+    if no_mount:
+        return None, None
+    if automount_map is not None:
+        amap = await AutomountMap.find_one(
+            AutomountMap.name == automount_map,
+            AutomountMap.site.id == site.id,
+        )
+        if amap is None:
+            raise ValueError(
+                f'AutomountMap {automount_map} does not exist on {site.name}'
+            )
+        return amap, None
+    if static_mount is not None:
+        smount = await StaticMount.find_one(
+            StaticMount.name == static_mount,
+            StaticMount.site.id == site.id,
+        )
+        if smount is None:
+            raise ValueError(
+                f'StaticMount {static_mount} does not exist on {site.name}'
+            )
+        return None, smount
+    # Legacy fallback: a map conventionally named 'group'.
+    amap = await AutomountMap.find_one(
+        AutomountMap.name == 'group',
+        AutomountMap.site.id == site.id,
+    )
+    return amap, None
+
+
+async def _provision_group_storage(
+    session: AsyncClientSession, *,
+    site: Site, group: Group, owner: User,
+    quota: str, parent_volume: str | None,
+    automount_map: str | None, static_mount: str | None,
+    no_mount: bool, host: str | None, host_path: str | None,
+) -> tuple[Storage, str]:
+    """Build + insert the group volume and the group-facing Storage record,
+    returning (storage, mechanism_label). The volume insert is pre-checked so a
+    name clash surfaces as a clean ValueError rather than a DuplicateKeyError."""
+    volume = await _build_group_volume(
+        site, group.name, quota=quota, parent_volume_name=parent_volume,
+        host=host, host_path=host_path,
+    )
+    if await _find_volume(site, volume.name) is not None:
+        raise ValueError(
+            f'StorageVolume {volume.name} already exists on {site.name}'
+        )
+    await volume.insert(session=session)
+
+    amap, smount = await _resolve_group_mount(
+        site, automount_map=automount_map, static_mount=static_mount,
+        no_mount=no_mount,
+    )
+    mechanism = 'none'
+    if amap is not None:
+        mechanism = f'automount:{amap.name}'
+    elif smount is not None:
+        mechanism = f'static:{smount.mount_path}'
+
+    storage = Storage(
+        name=group.name,
+        site=site,
+        category='group',
+        owner=owner,
+        group=group,
+        volume=volume,
+        subpath='',
+        automount_map=amap,
+        mount_name=group.name if amap is not None else '',
+        static_mount=smount,
+    )
+    await storage.insert(session=session)
+    return storage, mechanism
+
+
+class CreateGroupStorage(Operation):
+    """Provision a group's shared storage: a StorageVolume (a child under an
+    explicit parent volume, or standalone on a host) plus the group-facing
+    Storage record (category='group', mounted under /group via the site's
+    'group' automount map by default).
+
+    `Storage.owner` is required; it defaults to the group's sponsor at the site
+    (the sponsor-role GroupMembership). If the group has no sponsor there, or
+    more than one, an explicit `owner_name` is required.
+
+    Unlike home storage there are no site-level group defaults, so a parent
+    volume (or host) and a quota must be given.
+    """
+
+    op_name = 'create_group_storage'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        group_name: str,
+        site_name: str,
+        owner_name: str | None = None,
+        quota: str | None = None,
+        parent_volume: str | None = None,
+        automount_map: str | None = None,
+        static_mount: str | None = None,
+        no_mount: bool = False,
+        host: str | None = None,
+        host_path: str | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        if automount_map is not None and static_mount is not None:
+            raise ValueError(
+                'automount_map and static_mount are mutually exclusive'
+            )
+        self.group_name = group_name
+        self.site_name = site_name
+        self.owner_name = owner_name
+        self.quota = quota
+        self.parent_volume = parent_volume
+        self.automount_map = automount_map
+        self.static_mount = static_mount
+        self.no_mount = no_mount
+        self.host = host
+        self.host_path = host_path
+        # Resolved owner name, filled in by execute() for describe().
+        self._owner_name = owner_name or ''
+        self._mechanism = 'none'
+
+    async def _resolve_owner(self, group: Group, site: Site) -> User:
+        if self.owner_name is not None:
+            owner = await User.find_one(User.name == self.owner_name)
+            if owner is None:
+                raise ValueError(f'User {self.owner_name} does not exist')
+            return owner
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+            fetch_links=True,
+        ).to_list()
+        sponsors = [e.user for e in edges if 'sponsor' in e.roles]
+        if len(sponsors) == 1:
+            return sponsors[0]
+        if not sponsors:
+            raise ValueError(
+                f'Group {group.name} has no sponsor on {site.name}; '
+                f'pass an explicit owner (--owner)'
+            )
+        names = ', '.join(sorted(s.name for s in sponsors))
+        raise ValueError(
+            f'Group {group.name} has multiple sponsors on {site.name} '
+            f'({names}); pass an explicit owner (--owner)'
+        )
+
+    async def execute(self, session: AsyncClientSession) -> Storage:
+        if self.quota is None:
+            raise ValueError('Group storage requires a quota')
+        if self.parent_volume is None and self.host is None:
+            raise ValueError(
+                'Group storage requires a parent volume or host; pass '
+                'parent_volume/--parent-volume or host/--host'
+            )
+
+        group = await Group.find_one(
+            Group.name == self.group_name, with_children=True,
+        )
+        if group is None:
+            raise ValueError(f'Group {self.group_name} does not exist')
+
+        site = await _find_site(self.site_name)
+        owner = await self._resolve_owner(group, site)
+        self._owner_name = owner.name
+
+        existing = await Storage.find_one(
+            Storage.name == self.group_name,
+            Storage.site.id == site.id,
+            Storage.category == 'group',
+        )
+        if existing is not None:
+            raise ValueError(
+                f'Group storage for {self.group_name} on {self.site_name} '
+                f'already exists'
+            )
+
+        storage, mechanism = await _provision_group_storage(
+            session, site=site, group=group, owner=owner,
+            quota=self.quota, parent_volume=self.parent_volume,
+            automount_map=self.automount_map, static_mount=self.static_mount,
+            no_mount=self.no_mount, host=self.host, host_path=self.host_path,
+        )
+        self._mechanism = mechanism
+        self._storage = storage
+        return storage
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'group': self.group_name,
+            'site': self.site_name,
+            'owner': self._owner_name or None,
             'quota': self.quota,
             'parent_volume': self.parent_volume,
             'host': self.host,
