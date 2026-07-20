@@ -9,6 +9,7 @@ Skips automatically when `slapd` isn't available on the host.
 
 from __future__ import annotations
 
+import bonsai
 import pytest
 import pytest_asyncio
 
@@ -21,6 +22,31 @@ from ..ldap_async import (
 
 
 SITENAME = 'test-cluster'
+
+
+async def _raw_attr(config, dn: str, attr: str) -> list[str] | None:
+    """Fetch one attribute of `dn` with a fresh admin bind, bypassing the
+    manager's record mapping — the raw server truth, independent of what
+    entry_to_user projects. Returns None when the attribute (or entry) is
+    absent."""
+    client = bonsai.LDAPClient(config.servers[0])
+    client.set_credentials(
+        'SIMPLE', user=config.login_dn, password=config.password,
+    )
+    async with client.connect(is_async=True) as conn:
+        results = await conn.search(
+            dn, bonsai.LDAPSearchScope.BASE, '(objectClass=*)',
+            attrlist=[attr],
+        )
+    if not results:
+        return None
+    values = results[0].get(attr)
+    if not values:
+        return None
+    return [
+        v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
+        for v in values
+    ]
 
 
 @pytest_asyncio.fixture(loop_scope='session')
@@ -81,8 +107,13 @@ class TestEnsureSiteTree:
 
     async def test_creates_full_tree(self, manager):
         result = await manager.ensure_site_tree()
-        # All 6 DNs created plus the 2 automount keys = 8.
-        assert all(v == 'created' for v in result.values()), result
+        # ou=users is seeded by the slapd fixture itself, so it reports
+        # already_exists; every per-site entry must be freshly created.
+        assert result[manager.user_ou_dn()] == 'already_exists'
+        assert all(
+            v == 'created' for dn, v in result.items()
+            if dn != manager.user_ou_dn()
+        ), result
         # Verify each is now present.
         for dn in result.keys():
             assert await manager.dn_exists(dn)
@@ -102,7 +133,7 @@ class TestUserCRUD:
     async def test_add_get_delete_user(self, manager, site):
         record = LDAPUserRecord(
             username='alice', email='alice@example.test',
-            uid=10001, gid=10001, fullname='Alice',
+            uid=10001, gid=10001, fullname='Alice', surname='Alice',
             home_directory='/home/alice', shell='/usr/bin/bash',
         )
         await manager.add_user(record)
@@ -123,7 +154,7 @@ class TestUserCRUD:
     async def test_update_user(self, manager, site):
         record = LDAPUserRecord(
             username='bob', email='bob@example.test',
-            uid=10002, gid=10002, fullname='Bob',
+            uid=10002, gid=10002, fullname='Bob', surname='Bob',
             home_directory='/home/bob', shell='/usr/bin/bash',
         )
         await manager.add_user(record)
@@ -135,11 +166,90 @@ class TestUserCRUD:
     async def test_update_nonexistent_user_raises(self, manager, site):
         ghost = LDAPUserRecord(
             username='ghost', email='nope@x',
-            uid=99999, gid=99999, fullname='Ghost',
+            uid=99999, gid=99999, fullname='Ghost', surname='Ghost',
             home_directory='/home/ghost', shell='/usr/bin/bash',
         )
         with pytest.raises(LDAPNotFound):
             await manager.update_user(ghost)
+
+    async def test_user_password_written_updated_cleared(
+        self, manager, site, slapd_ldap_config,
+    ):
+        record = LDAPUserRecord(
+            username='pwrt', email='pwrt@x.test',
+            uid=10010, gid=10010, fullname='PW RT', surname='RT',
+            home_directory='/home/pwrt', shell='/usr/bin/bash',
+            password='$y$j9T$firstsalt$firsthash',
+        )
+        await manager.add_user(record)
+        dn = manager.user_dn('pwrt')
+        assert await _raw_attr(slapd_ldap_config, dn, 'userPassword') == [
+            '{CRYPT}$y$j9T$firstsalt$firsthash',
+        ]
+        # get_user round-trips the wire form for presence reporting.
+        fetched = await manager.get_user('pwrt')
+        assert fetched.password == '{CRYPT}$y$j9T$firstsalt$firsthash'
+
+        record.password = '$y$j9T$secondsalt$secondhash'
+        await manager.update_user(record)
+        assert await _raw_attr(slapd_ldap_config, dn, 'userPassword') == [
+            '{CRYPT}$y$j9T$secondsalt$secondhash',
+        ]
+
+        # Clearing the password in beanie must remove the stale hash.
+        record.password = None
+        await manager.update_user(record)
+        assert await _raw_attr(slapd_ldap_config, dn, 'userPassword') is None
+        assert (await manager.get_user('pwrt')).password is None
+
+    async def test_user_password_bind_end_to_end(
+        self, manager, site, slapd_ldap_config,
+    ):
+        # Full regression pin for the {CRYPT} prefix: hash a plaintext with
+        # the real production hasher, sync it, then simple-bind as the user.
+        # Requires the host's crypt(3)/libxcrypt to support yescrypt
+        # (standard on Ubuntu 22.04+).
+        from ..operations.user import _hash_password
+
+        plaintext = 'correct-horse-battery-staple'
+        record = LDAPUserRecord(
+            username='pwbind', email='pwbind@x.test',
+            uid=10011, gid=10011, fullname='PW Bind', surname='Bind',
+            home_directory='/home/pwbind', shell='/usr/bin/bash',
+            password=_hash_password(plaintext),
+        )
+        await manager.add_user(record)
+        user_dn = manager.user_dn('pwbind')
+
+        good = bonsai.LDAPClient(slapd_ldap_config.servers[0])
+        good.set_credentials('SIMPLE', user=user_dn, password=plaintext)
+        async with good.connect(is_async=True) as conn:
+            assert 'pwbind' in await conn.whoami()
+
+        bad = bonsai.LDAPClient(slapd_ldap_config.servers[0])
+        bad.set_credentials('SIMPLE', user=user_dn, password='wrong-password')
+        with pytest.raises(bonsai.AuthenticationError):
+            async with bad.connect(is_async=True):
+                pass
+
+    async def test_update_clears_stale_ssh_keys(
+        self, manager, site, slapd_ldap_config,
+    ):
+        record = LDAPUserRecord(
+            username='keyclr', email='keyclr@x.test',
+            uid=10012, gid=10012, fullname='Key Clear', surname='Clear',
+            home_directory='/home/keyclr', shell='/usr/bin/bash',
+            ssh_keys=['ssh-ed25519 AAA keyclr@x'],
+        )
+        await manager.add_user(record)
+        dn = manager.user_dn('keyclr')
+        assert await _raw_attr(slapd_ldap_config, dn, 'sshPublicKey') == [
+            'ssh-ed25519 AAA keyclr@x',
+        ]
+
+        record.ssh_keys = []
+        await manager.update_user(record)
+        assert await _raw_attr(slapd_ldap_config, dn, 'sshPublicKey') is None
 
 
 class TestGroupCRUD:
@@ -166,7 +276,7 @@ class TestGroupCRUD:
         for n, uid in [('carol', 10003), ('dave', 10004), ('eve', 10005)]:
             await manager.add_user(LDAPUserRecord(
                 username=n, email=f'{n}@x.test',
-                uid=uid, gid=uid, fullname=n.title(),
+                uid=uid, gid=uid, fullname=n.title(), surname=n.title(),
                 home_directory=f'/home/{n}', shell='/usr/bin/bash',
             ))
         await manager.add_group(LDAPGroupRecord(
@@ -181,7 +291,7 @@ class TestGroupCRUD:
     async def test_list_user_memberships(self, manager, site):
         await manager.add_user(LDAPUserRecord(
             username='frank', email='frank@x.test',
-            uid=10006, gid=10006, fullname='Frank',
+            uid=10006, gid=10006, fullname='Frank', surname='Frank',
             home_directory='/home/frank', shell='/usr/bin/bash',
         ))
         await manager.add_group(LDAPGroupRecord(
