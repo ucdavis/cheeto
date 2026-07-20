@@ -351,34 +351,88 @@ objectclass ( 1.3.6.1.4.1.24552.500.1.1.2.0
     MAY ( sshPublicKey $ uid ) )
 '''
 
+# Standard autofs/rfc2307bis automount schema — Ubuntu's nis.schema does NOT
+# define automountMap/automount (only the distro autofs-ldap package ships
+# them), so inline the definitions like the LPK schema above. Without these,
+# automountMapName RDNs fail entry adds with "invalid DN".
+_AUTOFS_SCHEMA = '''\
+attributetype ( 1.3.6.1.1.1.1.31
+    NAME 'automountMapName'
+    DESC 'automount Map Name'
+    EQUALITY caseExactIA5Match
+    SUBSTR caseExactIA5SubstringsMatch
+    SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.1.1.1.32
+    NAME 'automountKey'
+    DESC 'Automount Key value'
+    EQUALITY caseExactIA5Match
+    SUBSTR caseExactIA5SubstringsMatch
+    SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+
+attributetype ( 1.3.6.1.1.1.1.33
+    NAME 'automountInformation'
+    DESC 'Automount information'
+    EQUALITY caseExactIA5Match
+    SUBSTR caseExactIA5SubstringsMatch
+    SYNTAX 1.3.6.1.4.1.1466.115.121.1.26 SINGLE-VALUE )
+
+objectclass ( 1.3.6.1.1.1.2.16
+    NAME 'automountMap'
+    DESC 'automount Map information'
+    SUP top STRUCTURAL
+    MUST automountMapName
+    MAY description )
+
+objectclass ( 1.3.6.1.1.1.2.17
+    NAME 'automount'
+    DESC 'automount information'
+    SUP top STRUCTURAL
+    MUST ( automountKey $ automountInformation )
+    MAY description )
+'''
+
+# `groupOfMembers` (RFC 2307bis companion class): a group that permits zero
+# members, used as the structural class for our posix groups. Not shipped in
+# any stock Ubuntu schema; OID is the canonical one from the rfc2307bis
+# draft ecosystem.
+_GOM_SCHEMA = '''\
+objectclass ( 1.3.6.1.4.1.5322.13.1.1
+    NAME 'groupOfMembers'
+    DESC 'A group with an optional member list'
+    SUP top STRUCTURAL
+    MUST cn
+    MAY ( member $ businessCategory $ seeAlso $ owner $ ou $ o $
+          description ) )
+'''
+
 
 def _slapd_config(data_dir, schema_dir, lpk_schema_path) -> str:
     """Build a slapd.conf string. Uses the older config-file style (vs.
     cn=config) so the fixture is straightforward to write inline."""
-    # Hash the admin password — slapd accepts the {SSHA} or {PLAIN} form.
-    # Passing it plain and prefixing with {CLEARTEXT} works on Ubuntu's slapd.
+    # rootpw is plain (no scheme prefix): slapd treats an unschemed value
+    # as cleartext, while a {CLEARTEXT} prefix fails to verify on current
+    # Ubuntu builds (bind gets Invalid credentials).
     return f'''\
 include {schema_dir}/core.schema
 include {schema_dir}/cosine.schema
 include {schema_dir}/inetorgperson.schema
 include {schema_dir}/nis.schema
 include {lpk_schema_path}
-
-# Automount schema (defines automount, automountMap objectClasses) is part
-# of OpenLDAP's nis.schema — already included.
-
-# Ubuntu's slapd ships backends as loadable modules.
-modulepath /usr/lib/ldap
-moduleload back_mdb.so
+include {schema_dir}/autofs.schema
+include {schema_dir}/gom.schema
 
 pidfile  {data_dir}/slapd.pid
 argsfile {data_dir}/slapd.args
 
-database   mdb
-maxsize    1073741824
+# ldif backend (built into slapd, plain files, no LMDB): Ubuntu's slapd
+# apparmor profile grants rw but NOT file_lock (k) on /var/tmp/**, so the
+# mdb backend fails mdb_db_open with EACCES on confined hosts. The ldif
+# backend takes no locks and is plenty for an ephemeral test directory.
+database   ldif
 suffix     "{SLAPD_BASE_DN}"
 rootdn     "{SLAPD_ADMIN_DN}"
-rootpw     {{CLEARTEXT}}{SLAPD_ADMIN_PASSWORD}
+rootpw     {SLAPD_ADMIN_PASSWORD}
 directory  {data_dir}
 
 # Permissive ACL — this is a test instance.
@@ -462,7 +516,13 @@ def start_slapd():
     Uses /var/tmp instead of /tmp because Ubuntu's slapd apparmor profile
     only allows /etc/ldap, /var/lib/ldap, and /var/tmp.
     '''
-    if shutil.which('slapd') is None:
+    # slapd installs to sbin, which is typically not on a non-root PATH —
+    # check there too so the integration suite doesn't silently skip on
+    # hosts that have it.
+    slapd_bin = shutil.which('slapd') or shutil.which(
+        'slapd', path='/usr/sbin:/usr/local/sbin:/sbin',
+    )
+    if slapd_bin is None:
         pytest.skip('slapd not available; install with apt install slapd')
 
     import tempfile
@@ -486,8 +546,24 @@ def start_slapd():
             pytest.skip(f'missing slapd schema {src}; install slapd properly')
         _convert_schema_ldif_to_legacy(src, schema_dir / f'{name}.schema')
 
+    # Stock nis.schema is rfc2307: posixGroup is STRUCTURAL there, which
+    # cannot combine with our structural groupOfMembers. Production
+    # directories follow rfc2307bis, where posixGroup is AUXILIARY — patch
+    # the distro definition to match.
+    nis_path = schema_dir / 'nis.schema'
+    nis_text = nis_path.read_text()
+    pg_start = nis_text.index("NAME 'posixGroup'")
+    pg_end = nis_text.index(')', nis_text.index('MAY', pg_start))
+    nis_path.write_text(
+        nis_text[:pg_start]
+        + nis_text[pg_start:pg_end].replace('STRUCTURAL', 'AUXILIARY')
+        + nis_text[pg_end:]
+    )
+
     lpk_schema_path = schema_dir / 'lpk.schema'
     lpk_schema_path.write_text(_LPK_SCHEMA)
+    (schema_dir / 'autofs.schema').write_text(_AUTOFS_SCHEMA)
+    (schema_dir / 'gom.schema').write_text(_GOM_SCHEMA)
 
     conf_path = base_dir / 'slapd.conf'
     conf_path.write_text(_slapd_config(data_dir, schema_dir, lpk_schema_path))
@@ -499,7 +575,7 @@ def start_slapd():
     # files we created under /var/tmp/cheeto-slapd-*).
     proc = subprocess.Popen(
         [
-            '/usr/sbin/slapd',
+            slapd_bin,
             '-h', f'ldap://127.0.0.1:{SLAPD_PORT}/',
             '-f', str(conf_path),
             '-d', '256',  # config processing only — quiet but reports errors
@@ -532,18 +608,15 @@ def start_slapd():
         proc.terminate()
         proc.wait()
         log_text = log_path.read_text() if log_path.exists() else '(no log)'
-        # Common dev-box failure: Ubuntu's apparmor profile for slapd
-        # denies file_lock on /var/tmp/**, which LMDB needs. Skip rather
-        # than fail when we recognize that signature so the rest of the
-        # suite still runs on locked-down hosts.
-        if 'Permission denied' in log_text and (
-            'lock.mdb' in log_text or 'mdb_db_open' in log_text
-        ):
+        # Apparmor-confined hosts can still deny the backend's file access
+        # under /var/tmp; skip rather than fail so the rest of the suite
+        # runs on locked-down hosts.
+        if 'Permission denied' in log_text:
             shutil.rmtree(base_dir, ignore_errors=True)
             pytest.skip(
-                'slapd cannot open LMDB under /var/tmp; likely apparmor '
-                'on the host. Run integration tests in a container or '
-                'disable the slapd apparmor profile.'
+                'slapd cannot open its database under /var/tmp; likely '
+                'apparmor on the host. Run integration tests in a '
+                'container or disable the slapd apparmor profile.'
             )
         raise RuntimeError(f'slapd did not start in time. Log:\n{log_text}')
 

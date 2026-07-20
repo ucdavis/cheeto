@@ -216,6 +216,13 @@ def entry_to_user(entry: LDAPEntry) -> LDAPUserRecord:
     username = _first(entry, 'uid') or ''
     shadow_expire = _first(entry, 'shadowExpire')
 
+    # userPassword has Octet String syntax, so bonsai may hand it back as
+    # bytes; normalize to str. Read-back keeps the wire form ({CRYPT}$y$…)
+    # so callers can report presence/scheme — never display the hash.
+    password = _first(entry, 'userPassword')
+    if isinstance(password, (bytes, bytearray)):
+        password = password.decode(errors='replace')
+
     try:
         expires_at = _days_to_naive_utc(int(shadow_expire)) if shadow_expire is not None else None
     except ValueError:
@@ -234,8 +241,31 @@ def entry_to_user(entry: LDAPEntry) -> LDAPUserRecord:
         ),
         shell=_first(entry, 'loginShell') or '/usr/bin/bash',
         ssh_keys=list(entry.get('sshPublicKey') or ()),
+        password=password,
         expires_at=expires_at,
     )
+
+
+def crypt_password_value(hashed: str) -> str:
+    """Wire format for `userPassword`: slapd needs the RFC-2307 `{CRYPT}`
+    scheme prefix to verify a crypt(3)-style hash (our yescrypt `$y$...`
+    MCF strings) — without it the value is compared as cleartext and every
+    bind fails. Values that already carry a scheme (`{SSHA}...`) pass
+    through untouched. Mongo stores the bare hash; the prefix is applied
+    only at this mapping layer."""
+    if hashed.startswith('{'):
+        return hashed
+    return '{CRYPT}' + hashed
+
+
+# Optional user attributes that `user_to_entry_attrs` omits when unset.
+# `update_user` clears these from the existing entry when absent from the
+# desired attrs, so unsetting a password / removing the last SSH key /
+# clearing an expiry in beanie actually propagates to LDAP. `sn` is NOT
+# here even though the builder can omit it: it is a MUST of inetOrgPerson,
+# so deleting it always fails schema check (and production records always
+# derive a surname).
+_OPTIONAL_USER_ATTRS = ('sshPublicKey', 'userPassword', 'shadowExpire')
 
 
 def user_to_entry_attrs(record: LDAPUserRecord) -> dict[str, list[Any]]:
@@ -255,7 +285,7 @@ def user_to_entry_attrs(record: LDAPUserRecord) -> dict[str, list[Any]]:
     if record.ssh_keys:
         out['sshPublicKey'] = list(record.ssh_keys)
     if record.password is not None:
-        out['userPassword'] = [record.password]
+        out['userPassword'] = [crypt_password_value(record.password)]
     if record.expires_at is not None:
         # RFC 2307: shadowExpire is days since 1970-01-01, as an int string.
         out['shadowExpire'] = [str(_days_since_epoch(record.expires_at))]
@@ -484,11 +514,15 @@ class AsyncLDAPManager:
 
     async def _modify_attrs(
         self, dn: str, attrs: dict[str, list[Any]], *,
+        clear: Iterable[str] = (),
         missing_msg: str,
     ) -> None:
-        """Patch attributes on the existing entry at `dn`. Empty `attrs`
-        no-ops. Raises `LDAPNotFound(missing_msg)` if the entry is gone."""
-        if not attrs:
+        """Patch attributes on the existing entry at `dn`: set everything in
+        `attrs`, then delete each attribute in `clear` that is present on
+        the entry. Empty `attrs` + `clear` no-ops. Raises
+        `LDAPNotFound(missing_msg)` if the entry is gone."""
+        clear = tuple(clear)
+        if not attrs and not clear:
             return
 
         async def _op(conn):
@@ -499,6 +533,9 @@ class AsyncLDAPManager:
                 raise LDAPNotFound(missing_msg)
             for k, v in attrs.items():
                 entry[k] = v
+            for k in clear:
+                if k in entry:
+                    del entry[k]
             await entry.modify()
         await self._pooled_op(_op)
 
@@ -709,11 +746,14 @@ class AsyncLDAPManager:
 
     async def update_user(self, record: LDAPUserRecord) -> None:
         """Patch the user dn to match `record`. Writes everything `add_user`
-        would write minus `objectClass`. Raises `LDAPNotFound` if absent."""
+        would write minus `objectClass`, and clears the optional attributes
+        the record no longer carries (stale password / SSH keys / surname /
+        expiry). Raises `LDAPNotFound` if absent."""
         attrs = user_to_entry_attrs(record)
         attrs.pop('objectClass', None)
         await self._modify_attrs(
             self.user_dn(record.username), attrs,
+            clear=[a for a in _OPTIONAL_USER_ATTRS if a not in attrs],
             missing_msg=f'No such user: {record.username}',
         )
 
@@ -866,7 +906,6 @@ class AsyncLDAPManager:
         out: dict[str, str] = {}
         for record in groups:
             attrs = group_to_entry_attrs(record)
-            print(attrs)
             out[record.groupname] = await self._ensure_entry(
                 self.group_dn(record.groupname), attrs,
             )

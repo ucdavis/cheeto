@@ -150,6 +150,25 @@ class TestEntryToUser:
         record = entry_to_user(entry)
         assert record.fullname == 'Carol Lastname'
 
+    def test_reads_password_str(self):
+        entry = _mock_entry({
+            'uid': ['pw'],
+            'userPassword': ['{CRYPT}$y$j9T$salt$hash'],
+        })
+        assert entry_to_user(entry).password == '{CRYPT}$y$j9T$salt$hash'
+
+    def test_reads_password_bytes(self):
+        # userPassword is Octet String syntax; bonsai may return bytes.
+        entry = _mock_entry({
+            'uid': ['pw'],
+            'userPassword': [b'{CRYPT}$y$j9T$salt$hash'],
+        })
+        assert entry_to_user(entry).password == '{CRYPT}$y$j9T$salt$hash'
+
+    def test_password_absent_is_none(self):
+        entry = _mock_entry({'uid': ['pw']})
+        assert entry_to_user(entry).password is None
+
 
 class TestUserToEntryAttrs:
 
@@ -170,7 +189,8 @@ class TestUserToEntryAttrs:
         assert attrs['mail'] == ['carol@example.test']
         assert attrs['uidNumber'] == [10003]
         assert attrs['sshPublicKey'] == ['ssh-ed25519 AAA']
-        assert attrs['userPassword'] == ['*']
+        # Schemeless values get the RFC-2307 {CRYPT} prefix on the wire.
+        assert attrs['userPassword'] == ['{CRYPT}*']
 
     def test_skips_empty_optionals(self):
         record = LDAPUserRecord(
@@ -195,6 +215,23 @@ class TestUserToEntryAttrs:
         )
         attrs = user_to_entry_attrs(record)
         assert attrs['sn'] == ['Smith']
+
+    def test_password_crypt_prefix(self):
+        # Bare yescrypt MCF hashes (what CreateUser/SetUserPassword store)
+        # get the {CRYPT} scheme prefix slapd needs to verify them as
+        # crypt(3) hashes; values already carrying a scheme pass through.
+        record = LDAPUserRecord(
+            username='pw', email='pw@x.test',
+            uid=10006, gid=10006, fullname='PW',
+            home_directory='/home/pw', shell='/usr/bin/bash',
+            password='$y$j9T$abcdefsalt$abcdefhash',
+        )
+        attrs = user_to_entry_attrs(record)
+        assert attrs['userPassword'] == ['{CRYPT}$y$j9T$abcdefsalt$abcdefhash']
+
+        record.password = '{SSHA}already-schemed'
+        attrs = user_to_entry_attrs(record)
+        assert attrs['userPassword'] == ['{SSHA}already-schemed']
 
 
 class TestShadowExpireRoundTrip:

@@ -484,6 +484,15 @@ def ldap_show_cmd(args: Namespace):
     pass
 
 
+def _password_display(password: str | None) -> str:
+    """Presence + scheme only — the hash itself must never be printed."""
+    if not password:
+        return 'not set'
+    if password.startswith('{') and '}' in password:
+        return f'set ({password[:password.index("}") + 1]})'
+    return 'set (no scheme!)'
+
+
 @site_args.apply(required=True)
 @user_args.apply(required=True)
 @yaml_args.apply()
@@ -509,6 +518,7 @@ async def ldap_show_user_cmd(args: Namespace):
             'email': record.email,
             'home_directory': record.home_directory,
             'shell': record.shell,
+            'password': _password_display(record.password),
             'ssh_keys': list(record.ssh_keys),
             'memberships': sorted(memberships),
         })
@@ -522,6 +532,11 @@ async def ldap_show_user_cmd(args: Namespace):
     table.add_row('email', record.email)
     table.add_row('home', record.home_directory)
     table.add_row('shell', record.shell)
+    table.add_row(
+        'password',
+        _password_display(record.password) if record.password
+        else '[dim]not set[/]',
+    )
     table.add_row(
         'ssh_keys',
         '\n'.join(record.ssh_keys) if record.ssh_keys else '(none)',

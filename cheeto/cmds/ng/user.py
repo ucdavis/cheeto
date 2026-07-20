@@ -110,6 +110,7 @@ async def _user_to_dict(user: User,
         'shell': user.shell,
         'type': user.type,
         'status': await resolve_status_name(user.status),
+        'has_password': user.password is not None,
         'home_directory': user.home_directory,
         'access': await resolve_access_names(user.access),
         'created_at': user.created_at,
@@ -287,6 +288,12 @@ def _render_user_panel(data: dict) -> Panel:
     for key in scalar_keys:
         if key in data and data[key] is not None:
             table.add_row(key, str(data[key]))
+
+    if 'has_password' in data:
+        table.add_row(
+            'password',
+            'set' if data['has_password'] else '[dim]not set[/]',
+        )
 
     if data.get('access'):
         table.add_row('access', ', '.join(data['access']))
