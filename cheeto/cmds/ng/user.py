@@ -1,5 +1,7 @@
+import os
 from argparse import Namespace
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from ponderosa import ArgParser
 from rich.panel import Panel
@@ -20,7 +22,7 @@ from ...operations import (
     AddUserSshKey,
     ClearOffboardingSiteStatuses,
     ClearRedundantSiteStatuses,
-    CreateClassUser,
+    CreateClassUsers,
     CreateSharedUser,
     CreateSystemUser,
     CreateUser,
@@ -46,8 +48,11 @@ from ...queries import (
 )
 from ...yaml import print_yaml
 from ._args import (
+    EXPIRABLE_CLEAR,
     email_args,
+    expirable_value,
     fullname_args,
+    group_args,
     password_args,
     site_args,
     user_args,
@@ -59,6 +64,12 @@ from ._slurm_show import user_slurm_at_site
 def _announce_password(console: Console, password: str) -> None:
     console.print(f'Password: [yellow]{password}[/]')
     console.print('[red]Save this password now \u2014 it will not be displayed again.[/]')
+
+
+def _write_class_passwords(fp, credentials: list[tuple[str, str]]) -> None:
+    # v1 format: one 'username password' line per user.
+    for name, password in credentials:
+        fp.write(f'{name} {password}\n')
 
 
 def _project_iam_dates(
@@ -397,23 +408,103 @@ async def user_new_system(args: Namespace):
         _announce_password(console, password)
 
 
-@user_args.apply(required=True)
-@email_args.apply(required=True)
-@fullname_args.apply(required=True)
-@password_args.apply()
+@email_args.apply(default='hpc-help@ucdavis.edu')
+@site_args.apply(required=True)
+@group_args.apply()
 @commands.register('ng', 'user', 'new', 'class',
-                   help='Create a new class user')
+                   help='Create a batch of class users with generated passwords')
 async def user_new_class(args: Namespace):
     console = Console()
-    password = generate_password() if args.password else None
-    user, group = await CreateClassUser.run(
-        args.db, args.author,
-        name=args.user, email=args.email, fullname=args.fullname,
-        password=password,
+    if args.expires_at is EXPIRABLE_CLEAR:
+        console.print(
+            '[red]--expires-at is mandatory for class accounts '
+            'and cannot be cleared[/]'
+        )
+        return 1
+
+    # Open the password file before creating any users: an unwritable path
+    # must fail while failing is still free (created users with lost
+    # passwords is the worst outcome).
+    fp = None
+    if args.file is not None:
+        try:
+            fd = os.open(
+                args.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
+            )
+            fp = os.fdopen(fd, 'w')
+        except OSError as e:
+            console.print(f'[red]Cannot open {args.file}: {e}[/]')
+            return 1
+
+    try:
+        results = await CreateClassUsers.run(
+            args.db, args.author,
+            prefix=args.prefix, count=args.count, email=args.email,
+            expires_at=args.expires_at, access=args.access,
+            site_name=args.site, group_name=args.group,
+        )
+    except ValueError as e:
+        if fp is not None:
+            fp.close()
+            os.unlink(args.file)
+        console.print(f'[red]{e}[/]')
+        return 1
+
+    first, _ = results[0]
+    last, _ = results[-1]
+    console.print(
+        f'Created {len(results)} class users [green]{first.name}[/]..'
+        f'[green]{last.name}[/] (uids {first.uid}..{last.uid})'
     )
-    console.print(f'Created class user [green]{user.name}[/] (uid={user.uid})')
-    if password is not None:
-        _announce_password(console, password)
+    console.print(
+        f'Added to site [bold]{args.site}[/] with home storage '
+        'from the site defaults'
+    )
+    if args.group:
+        console.print(
+            f'Added as members of [green]{args.group}[/] '
+            f'at [bold]{args.site}[/]'
+        )
+
+    credentials = [(user.name, password) for user, password in results]
+    if fp is not None:
+        with fp:
+            _write_class_passwords(fp, credentials)
+        console.print(
+            f'Passwords written to [bold]{args.file}[/] (mode 0600)'
+        )
+    else:
+        table = Table('user', 'password')
+        for name, password in credentials:
+            table.add_row(name, f'[yellow]{password}[/]')
+        console.print(table)
+        console.print(
+            '[red]Save these passwords now — '
+            'they will not be displayed again.[/]'
+        )
+
+
+@user_new_class.args()
+def _(parser: ArgParser):
+    parser.add_argument('--prefix', required=True,
+                        help='Username prefix: accounts are named '
+                             'PREFIX-1..PREFIX-N, zero-padded to the '
+                             'width of N')
+    parser.add_argument('--count', '-n', type=int, required=True,
+                        help='Number of class accounts to create')
+    parser.add_argument('--expires-at', type=expirable_value, required=True,
+                        metavar='WHEN',
+                        help="Account lifetime: ISO 8601 ('2027-01-15') or "
+                             "a relative duration from now "
+                             "('+30d', '+6mo', '+1y')")
+    parser.add_argument('--file', '-f', type=Path, default=None,
+                        help='Write plaintext "username password" lines to '
+                             'this file (created mode 0600); default prints '
+                             'them to the console')
+    parser.add_argument('--access', nargs='+', default=['login-ssh', 'slurm'],
+                        choices=list(ACCESS_TYPES),
+                        help='Access types for the accounts '
+                             '(default: login-ssh slurm)')
 
 
 @user_args.apply(required=True)
