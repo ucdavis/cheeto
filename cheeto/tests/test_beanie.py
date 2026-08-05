@@ -1134,6 +1134,67 @@ class TestCreateClassUsersOp:
         assert names[8] == 'pad-09'
         assert names[9] == 'pad-10'
 
+    async def test_start_at_extends_existing_class(self, beanie_client):
+        from cheeto.constants import MIN_CLASS_ID
+
+        await self._seed_class_site(beanie_client)
+        await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='ext', count=3, email='ext@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='ext', count=2, start_at=4, email='ext@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        assert [u.name for u, _ in results] == ['ext-4', 'ext-5']
+        assert [u.uid for u, _ in results] == [
+            MIN_CLASS_ID + 3, MIN_CLASS_ID + 4,
+        ]
+        hists = await History.find(
+            History.op == 'create_class_users',
+        ).sort('+timestamp').to_list()
+        assert len(hists) == 2
+        assert hists[0].changes['start_at'] == 1
+        assert hists[1].changes['start_at'] == 4
+
+    async def test_start_at_padding_crosses_boundary(self, beanie_client):
+        # Width comes from the largest generated number, not count.
+        await self._seed_class_site(beanie_client)
+        results = await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='xb', count=3, start_at=9, email='xb@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        assert [u.name for u, _ in results] == ['xb-09', 'xb-10', 'xb-11']
+
+    async def test_start_at_overlap_rolls_back(self, beanie_client):
+        await self._seed_class_site(beanie_client)
+        await CreateClassUsers.run(
+            beanie_client, None,
+            prefix='ov', count=3, email='ov@test.com',
+            expires_at=CLASS_EXPIRY, site_name='clsite',
+        )
+        with pytest.raises(ValueError, match=r'User\(s\) already exist: ov-3'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='ov', count=2, start_at=3, email='ov@test.com',
+                expires_at=CLASS_EXPIRY, site_name='clsite',
+            )
+        assert await User.find_one(User.name == 'ov-4') is None
+
+    async def test_start_at_zero_rejected(self, beanie_client):
+        with pytest.raises(ValueError, match='start_at must be'):
+            await CreateClassUsers.run(
+                beanie_client, None,
+                prefix='sz', count=2, start_at=0, email='sz@test.com',
+                expires_at=CLASS_EXPIRY, site_name='anysite',
+            )
+        assert await User.find_all().count() == 0
+        assert await History.find_one(
+            History.op == 'create_class_users') is None
+
     async def test_uid_blocks_are_sequential(self, beanie_client):
         from cheeto.constants import MIN_CLASS_ID
 
