@@ -282,9 +282,11 @@ DEFAULT_CLASS_ACCESS = ('login-ssh', 'slurm')
 
 
 class CreateClassUsers(Operation):
-    """Batch-create a class roster: `count` users named
-    `{prefix}-{i}` (1-indexed, zero-padded to len(str(count)) digits), each
-    type='class' with a generated password and a mandatory expiration.
+    """Batch-create a class roster: `count` users named `{prefix}-{i}` for
+    i in start_at..start_at+count-1 (default start 1), zero-padded to the
+    width of the largest generated number, each type='class' with a
+    generated password and a mandatory expiration. Pass `start_at` to
+    append additional users to an existing roster.
 
     Runs as one transaction: the uid block is allocated once up front and
     all user/personal-group name collisions are pre-checked in single
@@ -315,12 +317,15 @@ class CreateClassUsers(Operation):
         email: str,
         expires_at: datetime,
         site_name: str,
+        start_at: int = 1,
         access: list[str] | None = None,
         group_name: str | None = None,
     ) -> None:
         super().__init__(client, author)
         if count < 1:
             raise ValueError('count must be >= 1')
+        if start_at < 1:
+            raise ValueError('start_at must be >= 1')
         if not isinstance(expires_at, datetime):
             raise ValueError(
                 'class accounts require an expiration (expires_at)'
@@ -330,9 +335,10 @@ class CreateClassUsers(Operation):
                 f'Invalid prefix {prefix!r}: must start with a lowercase '
                 'letter and contain only [a-z0-9-]'
             )
-        width = len(str(count))
+        last = start_at + count - 1
+        width = len(str(last))
         self.names = [
-            f'{prefix}-{i:0{width}d}' for i in range(1, count + 1)
+            f'{prefix}-{i:0{width}d}' for i in range(start_at, last + 1)
         ]
         if len(prefix) + 1 + width > 32:
             raise ValueError(
@@ -341,6 +347,7 @@ class CreateClassUsers(Operation):
             )
         self.prefix = prefix
         self.count = count
+        self.start_at = start_at
         self.email = email
         self.expires_at = expires_at
         self.access = list(access) if access else list(DEFAULT_CLASS_ACCESS)
@@ -413,6 +420,7 @@ class CreateClassUsers(Operation):
         return {
             'prefix': self.prefix,
             'count': self.count,
+            'start_at': self.start_at,
             'usernames': self.names,
             'base_uid': self._base_uid,
             'email': self.email,

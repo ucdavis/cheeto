@@ -446,8 +446,9 @@ async def user_new_class(args: Namespace):
     try:
         results = await CreateClassUsers.run(
             args.db, args.author,
-            prefix=args.prefix, count=args.count, email=args.email,
-            expires_at=args.expires_at, access=args.access,
+            prefix=args.prefix, count=args.count, start_at=args.start_at,
+            email=args.email, expires_at=args.expires_at,
+            access=args.access,
             site_name=args.site, group_name=args.group,
         )
     except ValueError as e:
@@ -499,6 +500,10 @@ def _(parser: ArgParser):
                              'width of N')
     parser.add_argument('--count', '-n', type=int, required=True,
                         help='Number of class accounts to create')
+    parser.add_argument('--start-at', type=int, default=1,
+                        help='Number the first account PREFIX-<START-AT> '
+                             'instead of PREFIX-1 (for adding users to an '
+                             'existing class)')
     parser.add_argument('--expires-at', type=expirable_value, required=True,
                         metavar='WHEN',
                         help="Account lifetime: ISO 8601 ('2027-01-15') or "
