@@ -448,6 +448,42 @@ class TestSyncUserIAM:
         assert fetched.iam.first_missing_at is None
         assert fetched.iam.last_seen_at == now
 
+    async def test_hit_restored_from_offboarding_lapsed_expiry(
+        self, beanie_client, make_user,
+    ):
+        # The reaper may not have swept yet when a returning user's hit
+        # arrives: expires_at already lapsed but status still 'offboarding'.
+        # The hit must still restore — otherwise the next reap deactivates
+        # an IAM-present person (iam_sync/reap scheduling race).
+        from ..models.user import UCDIAMInfo
+        now = datetime(2026, 5, 1)
+        lapsed_expiry = now - timedelta(days=2)
+        user = await make_user(
+            status='offboarding',
+            expires_at=lapsed_expiry,
+            iam=UCDIAMInfo(
+                iam_status='missing',
+                person=UCDIAMPerson(iam_id=1000000001, mothra_id=1000001),
+                first_missing_at=now - timedelta(days=40),
+            ),
+        )
+        handler = make_iam_handler(
+            person=[PERSON_JANE], associations=[], division={},
+        )
+        async with make_iam_api(handler) as api:
+            result = await SyncUserIAM.run(
+                beanie_client, None,
+                username=user.name, iam_api=api,
+                grace_days=14, expiry_offset_days=30, now=now,
+            )
+        assert result.outcome == 'hit_restored'
+
+        fetched = await User.find_one(
+            User.name == user.name, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == 'active'
+        assert fetched.expires_at is None
+
     async def test_hit_does_not_resurrect_inactive_user(self, beanie_client, make_user):
         from ..models.user import UCDIAMInfo
         now = datetime(2026, 5, 1)
@@ -951,6 +987,10 @@ class TestReapOffboardedUsers:
         assert future.status.status_name == 'offboarding'
         assert no_expiry.status.status_name == 'offboarding'
         assert already.status.status_name == 'inactive'
+        # The past expiry is intentionally KEPT on the reaped user: it
+        # records the deactivation date and keeps shadowExpire blocking the
+        # inactive account. Reactivation paths clear it.
+        assert past.expires_at == now - timedelta(days=1)
 
     async def test_empty_when_nothing_due(self, beanie_client):
         now = datetime(2026, 5, 1)
@@ -1367,3 +1407,61 @@ class TestSendUserEmail:
         assert hist is not None
         assert hist.changes['sent'] is False
         assert 'jdoe' in hist.changes['body']
+
+
+class TestFindRestorableUsers:
+
+    async def _seed(self, name, uid, *, status, iam):
+        u = User(
+            name=name, email=f'{name}@example.edu',
+            uid=uid, gid=uid, fullname=name.capitalize(),
+            home_directory=f'/home/{name}', type='user',
+            status=await status_link(status), iam=iam,
+        )
+        await u.insert()
+        return u
+
+    async def test_lists_inactive_with_present_iam(self, beanie_client):
+        from ..queries import find_restorable_users
+        now = datetime(2026, 5, 1)
+        # UCDIAMInfo defaults iam_status='present'.
+        await self._seed('returned', 40001, status='inactive',
+                         iam=UCDIAMInfo(
+                             person=UCDIAMPerson(iam_id=1, mothra_id=1),
+                             last_seen_at=now,
+                         ))
+        await self._seed('stillgone', 40002, status='inactive',
+                         iam=UCDIAMInfo(iam_status='missing'))
+        await self._seed('activeuser', 40003, status='active',
+                         iam=UCDIAMInfo(
+                             person=UCDIAMPerson(iam_id=2, mothra_id=2),
+                         ))
+        await self._seed('noiam', 40004, status='inactive', iam=None)
+
+        users = await find_restorable_users()
+        assert [u.name for u in users] == ['returned']
+
+    async def test_status_names_widen_scope(self, beanie_client):
+        from ..queries import find_restorable_users
+        await self._seed('inact', 40011, status='inactive',
+                         iam=UCDIAMInfo(
+                             person=UCDIAMPerson(iam_id=3, mothra_id=3),
+                         ))
+        await self._seed('disab', 40012, status='disabled',
+                         iam=UCDIAMInfo(
+                             person=UCDIAMPerson(iam_id=4, mothra_id=4),
+                         ))
+        await self._seed('offb', 40013, status='offboarding',
+                         iam=UCDIAMInfo(
+                             person=UCDIAMPerson(iam_id=5, mothra_id=5),
+                         ))
+
+        assert [u.name for u in await find_restorable_users()] == ['inact']
+        wide = await find_restorable_users(
+            status_names=('inactive', 'disabled', 'offboarding'),
+        )
+        assert [u.name for u in wide] == ['disab', 'inact', 'offb']
+
+    async def test_unknown_status_names_empty(self, beanie_client):
+        from ..queries import find_restorable_users
+        assert await find_restorable_users(status_names=('nonesuch',)) == []

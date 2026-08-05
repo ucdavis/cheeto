@@ -1432,6 +1432,73 @@ class TestUserMutationOps:
         assert usi.status is None
         assert usi.expires_at is None
 
+    async def _set_status_with_expiry(self, beanie_client, user, status):
+        from datetime import datetime as _dt
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status=status, reason='seed',
+        )
+        fetched = await User.find_one(User.name == 'mutuser')
+        fetched.expires_at = _dt(2020, 6, 1)
+        await fetched.save()
+
+    @pytest.mark.parametrize('prior', ['inactive', 'disabled', 'offboarding'])
+    async def test_reactivation_clears_expiry(
+        self, beanie_client, user, prior,
+    ):
+        # Reactivating from ANY non-active status must drop the stale
+        # expiry, or it keeps projecting a past LDAP shadowExpire that
+        # blocks login (the reaped-then-reactivated regression).
+        await self._set_status_with_expiry(beanie_client, user, prior)
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='active', reason='back',
+        )
+        fetched = await User.find_one(
+            User.name == 'mutuser', fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.status.status_name == 'active'
+        assert fetched.expires_at is None
+
+    async def test_active_to_active_keeps_expiry(self, beanie_client, user):
+        # A deliberately-set expiry on an already-active account (class
+        # users) survives a redundant re-set to active.
+        from datetime import datetime as _dt
+        fetched = await User.find_one(User.name == 'mutuser')
+        fetched.expires_at = _dt(2030, 6, 1)
+        await fetched.save()
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='active', reason='noop',
+        )
+        fetched = await User.find_one(User.name == 'mutuser')
+        assert fetched.expires_at == _dt(2030, 6, 1)
+
+    async def test_site_reactivation_clears_site_expiry(
+        self, beanie_client, user,
+    ):
+        # Per-site mirror: explicit active override from a non-active
+        # per-site status drops usi.expires_at; global expiry untouched.
+        from datetime import datetime as _dt
+        site = await self._site_with_usi(user, usi_status='disabled')
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
+        usi.expires_at = _dt(2020, 6, 1)
+        await usi.save()
+        fetched = await User.find_one(User.name == 'mutuser')
+        fetched.expires_at = _dt(2030, 6, 1)
+        await fetched.save()
+
+        await SetUserStatus.run(
+            beanie_client, None,
+            name='mutuser', status='active', reason='r', site='mut_site',
+        )
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+        )
+        assert usi.expires_at is None
+        fetched = await User.find_one(User.name == 'mutuser')
+        assert fetched.expires_at == _dt(2030, 6, 1)
+
     async def test_set_user_status_reset_requires_site(
         self, beanie_client, user,
     ):

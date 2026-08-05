@@ -4,7 +4,10 @@ Three ops live here:
 
   - `SyncUserIAM` — single-user sync. Implements the full state machine:
       hit / hit_restored / miss_first / miss_within_grace / miss_offboarding /
-      miss_already_expiring / miss_not_active.
+      miss_already_expiring / miss_not_active. `hit_restored` fires for ANY
+      hit on an 'offboarding' user (even past its expiry — the reaper may not
+      have swept yet); operator-set inactive/disabled are never resurrected
+      (surface those with `ng iam restorable`).
   - `SyncAllUsersIAM` — driver that loops `SyncUserIAM` over candidate users
     (filtered to `IAM_SYNCABLE_USER_TYPES` so administrative `system`/`class`/
     `shared` accounts are never touched).
@@ -257,16 +260,15 @@ class SyncUserIAM(Operation):
         # the existing one wholesale (associations, user_types, etc.).
         user.iam = build_ucdiam_info(bundle, now=self.now)
 
-        # Restore from offboarding only if status is still 'offboarding' AND
-        # expires_at hasn't passed. Operator-set statuses (inactive, disabled)
-        # are NOT auto-resurrected.
+        # Restore any user still in 'offboarding' — that status is owned by
+        # this machinery, so an IAM hit always reverses it, INCLUDING when
+        # expires_at has already lapsed but the reaper hasn't swept yet
+        # (otherwise that scheduling race deactivates a returning person).
+        # Operator-set statuses (inactive, disabled) are NOT auto-resurrected;
+        # `ng iam restorable` surfaces those for manual review.
         restored = False
         current_status = await resolve_status_name(user.status)
-        if (
-            user.expires_at is not None
-            and user.expires_at > self.now
-            and current_status == 'offboarding'
-        ):
+        if current_status == 'offboarding':
             user.expires_at = None
             user.status = await find_status_group('active')
             restored = True
@@ -492,6 +494,11 @@ class SyncAllUsersIAM(Operation):
 class ReapOffboardedUsers(Operation):
     """Find users in 'offboarding' status whose expires_at has passed and
     flip them to 'inactive'. No IAM I/O.
+
+    The past `expires_at` is intentionally KEPT on the reaped user: it
+    records the deactivation date and keeps projecting a past LDAP
+    shadowExpire as defense-in-depth on the disabled account. Reactivation
+    paths (SetUserStatus -> active, IAM hit_restored) clear it.
 
     One History entry is written for the operation as a whole (with a list
     of the affected users in describe()). This is intentionally a single

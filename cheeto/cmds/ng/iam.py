@@ -24,7 +24,7 @@ from ...operations import (
     SyncUserIAM,
 )
 from ...operations.iam import maybe_notify_offboarding, maybe_notify_restored
-from ...queries import resolve_status_name
+from ...queries import find_restorable_users, resolve_status_name
 from ...yaml import print_yaml
 from ._args import user_args, yaml_args
 
@@ -308,6 +308,82 @@ def _(parser: ArgParser):
     parser.add_argument('--notify', action='store_true', default=False,
                         help='Email each user when their account is '
                              'deactivated')
+
+
+# ---------------------------------------------------------------------------
+# `ng iam restorable` — inactive/disabled accounts whose IAM record is back
+# ---------------------------------------------------------------------------
+
+
+@yaml_args.apply()
+@commands.register('ng', 'iam', 'restorable',
+                   help='List users whose IAM record is valid again but '
+                        'whose status was never restored (e.g. returned '
+                        'after the offboarding window)')
+async def iam_restorable_cmd(args: Namespace):
+    console = Console()
+    users = await find_restorable_users(status_names=tuple(args.status))
+
+    if args.yaml:
+        print_yaml([
+            {
+                'name': u.name,
+                'email': u.email,
+                'type': u.type,
+                'status': await resolve_status_name(u.status),
+                'iam_id': (
+                    u.iam.person.iam_id
+                    if u.iam and u.iam.person else None
+                ),
+                'last_seen_at': u.iam.last_seen_at if u.iam else None,
+                'iam_synced_at': u.iam.iam_synced_at if u.iam else None,
+                'expires_at': u.expires_at,
+            }
+            for u in users
+        ])
+        return 0
+
+    if not users:
+        console.print('[dim](no restorable users)[/]')
+        return
+
+    table = Table(box=None, pad_edge=False, padding=(0, 1))
+    table.add_column('user', style='bold')
+    table.add_column('email')
+    table.add_column('type', style='dim')
+    table.add_column('status', style='yellow')
+    table.add_column('iam_id')
+    table.add_column('last_seen_at', style='green')
+    table.add_column('iam_synced_at', style='dim')
+    table.add_column('expired_at')
+    for u in users:
+        iam = u.iam
+        table.add_row(
+            u.name, u.email, u.type,
+            await resolve_status_name(u.status) or '—',
+            str(iam.person.iam_id) if iam and iam.person else '—',
+            str(iam.last_seen_at) if iam and iam.last_seen_at else '—',
+            str(iam.iam_synced_at) if iam and iam.iam_synced_at else '—',
+            str(u.expires_at) if u.expires_at else '—',
+        )
+    console.print(Panel(
+        table,
+        title=f'[bold]Restorable users[/] ({len(users)})',
+        border_style='cyan', expand=False,
+    ))
+    console.print(
+        '[dim]Reactivate with: '
+        'cheeto ng user status -u <name> --status active --reason ...[/]'
+    )
+
+
+@iam_restorable_cmd.args()
+def _(parser: ArgParser):
+    parser.add_argument('--status', nargs='+',
+                        choices=('inactive', 'disabled', 'offboarding'),
+                        default=['inactive'],
+                        help='Which cheeto statuses to scan '
+                             '(default: inactive)')
 
 
 # ---------------------------------------------------------------------------
