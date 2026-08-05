@@ -51,6 +51,7 @@ from .user import (
     find_user_by_name,
     find_user_by_uid,
     find_users,
+    find_restorable_users,
     list_user_ssh_keys,
     root_authorized_keys_text,
     root_key_blocks,

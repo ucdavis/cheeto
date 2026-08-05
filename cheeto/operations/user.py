@@ -498,11 +498,15 @@ class SetUserStatus(Operation):
             raise ValueError(f'User {self.name} does not exist')
 
         if self.site is None:
-            # Clear the pending offboarding expiry when reactivating, so the
-            # next IAM sync doesn't immediately re-offboard the user.
+            # Reactivation from ANY non-active status drops the expiry: the
+            # offboarding machinery owns expires_at through the offboarding ->
+            # reaped(inactive) lifecycle, and a stale (often past) value would
+            # otherwise keep projecting to LDAP shadowExpire and block login.
+            # active -> active is untouched so a deliberately-set expiry on an
+            # active account (class users) survives a redundant re-set.
             if (
                 self.status == 'active'
-                and await resolve_status_name(user.status) == 'offboarding'
+                and await resolve_status_name(user.status) != 'active'
             ):
                 user.expires_at = None
             user.status = await _resolve_status_link(self.status)
@@ -525,9 +529,12 @@ class SetUserStatus(Operation):
                 usi.status = None
                 usi.expires_at = None
             else:
+                # Mirror the global rule: an explicit active override coming
+                # from a non-active per-site status drops the per-site expiry.
                 if (
                     self.status == 'active'
-                    and await resolve_status_name(usi.status) == 'offboarding'
+                    and await resolve_status_name(usi.status)
+                    not in (None, 'active')
                 ):
                     usi.expires_at = None
                 status_link = await _resolve_status_link(self.status)

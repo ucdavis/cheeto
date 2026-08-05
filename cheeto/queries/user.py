@@ -292,6 +292,32 @@ async def find_users(
     ).sort('+name').to_list()
 
 
+async def find_restorable_users(
+    status_names: tuple[str, ...] = ('inactive',),
+) -> list[User]:
+    """Users whose cheeto status says they are gone but whose latest IAM
+    snapshot is 'present' — people who regained UC Davis affiliation after
+    the offboarding window closed, so the IAM sync's auto-restore (which
+    only fires for 'offboarding') never reactivated them. Candidates for a
+    manual `user status --status active`.
+
+    Relies on the snapshot staying fresh: `SyncAllUsersIAM` re-syncs users
+    of syncable type regardless of status, flipping `iam.iam_status` back
+    to 'present' on a hit while leaving the status untouched.
+    """
+    sg_ids = []
+    for name in status_names:
+        sg = await StatusGroup.find_one(StatusGroup.status_name == name)
+        if sg is not None:
+            sg_ids.append(sg.id)
+    if not sg_ids:
+        return []
+    return await User.find(
+        In(User.status.id, sg_ids),
+        User.iam.iam_status == 'present',
+    ).sort('+name').to_list()
+
+
 async def find_redundant_site_statuses() -> list[tuple[str, str, str]]:
     """Per-site status overrides that merely duplicate the user's global
     status (`usi.status` and `user.status` point at the same StatusGroup).
