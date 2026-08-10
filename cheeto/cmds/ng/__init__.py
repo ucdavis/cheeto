@@ -8,6 +8,21 @@ from ...db import connect_beanie
 from ...models import User
 
 
+def parent(*path: str, help: str, aliases: list[str] | None = None):
+    """Register a namespace node that prints its own help when invoked
+    bare. Explicit `pass` bodies silently no-op (ponderosa only installs
+    the print-help default for auto-created nodes), so every grammar
+    parent goes through this instead. Must be called before any leaf
+    under it is registered."""
+    def _handler(args: Namespace):
+        # By call time the module-level name is the SubCmd ponderosa
+        # returned from register(), which carries the parser.
+        node.parser.print_help()
+
+    node = commands.register(*path, help=help, aliases=aliases)(_handler)
+    return node
+
+
 @commands.register('ng',
                    help='Next-generation database operations (beanie/async)')
 def ng_cmd(args: Namespace):

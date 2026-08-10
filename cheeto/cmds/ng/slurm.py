@@ -6,6 +6,7 @@ from ponderosa import ArgParser, arggroup
 from rich.panel import Panel
 from rich.table import Table
 
+from . import parent
 from .. import commands
 from ...args import regex_argtype
 from ...constants import QOS_TRES_REGEX, SLURM_QOS_VALID_FLAGS
@@ -43,7 +44,8 @@ from ...queries.slurm import (
 from ...operations.base import UNSET
 from ...types import parse_qos_tres
 from ...yaml import print_yaml
-from ._args import EXPIRABLE_CLEAR, expirable_args, group_args, site_args
+from ._args import (EXPIRABLE_CLEAR, expirable_args, group_args, site_args,
+                    yaml_args)
 from ._slurm_show import _tres_compact
 
 
@@ -70,40 +72,25 @@ def _expirable_kwarg(value):
     return value
 
 
-@commands.register('ng', 'slurm',
-                   help='Slurm resource operations')
-def slurm_cmd(args: Namespace):
-    pass
-
-
-# Explicit no-op parents so `ng slurm --help` shows help text next to each
-# subcommand group instead of just the bare names.
-@commands.register('ng', 'slurm', 'partition',
-                   help='Slurm partition operations')
-def slurm_partition_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'slurm', 'qos',
-                   help='Slurm QOS operations')
-def slurm_qos_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'slurm', 'association', aliases=['assoc'],
-                   help='Slurm association operations')
-def slurm_association_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'slurm', 'account',
-                   help='Slurm account operations')
-def slurm_account_cmd(args: Namespace):
-    pass
+# Grammar parents for the strict `slurm <verb> <object>` tree. Namespace
+# nodes go through the `parent` helper so invoking them bare prints their
+# help; each parent must be registered before any leaf beneath it.
+parent('ng', 'slurm', help='Slurm resource operations')
+parent('ng', 'slurm', 'new',
+       help='Create a Slurm entity (partition, qos, association, account)')
+parent('ng', 'slurm', 'add',
+       help='Add to an existing Slurm entity (allocation)')
+parent('ng', 'slurm', 'remove',
+       help='Remove a Slurm entity (partition, qos, association)')
+parent('ng', 'slurm', 'edit',
+       help='Edit a Slurm entity (qos, allocation, account)')
+parent('ng', 'slurm', 'show',
+       help='Show Slurm entities (partition, qos, association, '
+            'allocation, account)')
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'partition', 'new',
+@commands.register('ng', 'slurm', 'new', 'partition',
                    help='Create a new Slurm partition')
 async def slurm_partition_new(args: Namespace):
     console = Console()
@@ -120,7 +107,7 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'qos', 'new',
+@commands.register('ng', 'slurm', 'new', 'qos',
                    help='Create a new Slurm QOS')
 async def slurm_qos_new(args: Namespace):
     console = Console()
@@ -162,7 +149,7 @@ def _(parser: ArgParser):
 
 @group_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'association', 'new',
+@commands.register('ng', 'slurm', 'new', 'association', aliases=['assoc'],
                    help='Create a new Slurm association')
 async def slurm_association_new(args: Namespace):
     console = Console()
@@ -185,15 +172,9 @@ def _(parser: ArgParser):
     parser.add_argument('--qos', required=True)
 
 
-@commands.register('ng', 'slurm', 'allocation', aliases=['alloc'],
-                   help='Slurm allocation operations')
-def slurm_allocation_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
 @expirable_args.apply(scope='allocation')
-@commands.register('ng', 'slurm', 'allocation', 'add',
+@commands.register('ng', 'slurm', 'add', 'allocation', aliases=['alloc'],
                    help='Add an allocation to an existing QOS')
 async def slurm_allocation_add(args: Namespace):
     console = Console()
@@ -226,7 +207,7 @@ def _(parser: ArgParser):
 
 
 @expirable_args.apply(scope='allocation')
-@commands.register('ng', 'slurm', 'allocation', 'edit',
+@commands.register('ng', 'slurm', 'edit', 'allocation', aliases=['alloc'],
                    help='Edit an existing allocation by id')
 async def slurm_allocation_edit(args: Namespace):
     console = Console()
@@ -252,12 +233,12 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# partition remove
+# remove partition
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'partition', 'remove',
+@commands.register('ng', 'slurm', 'remove', 'partition',
                    help='Remove a Slurm partition')
 async def slurm_partition_remove(args: Namespace):
     console = Console()
@@ -277,12 +258,12 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# qos remove / edit / show
+# remove / edit / show qos
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'qos', 'remove',
+@commands.register('ng', 'slurm', 'remove', 'qos',
                    help='Remove a Slurm QOS and its owned allocations')
 async def slurm_qos_remove(args: Namespace):
     console = Console()
@@ -302,9 +283,9 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'qos', 'edit',
+@commands.register('ng', 'slurm', 'edit', 'qos',
                    help='Edit QOS priority and/or flags (allocation edits '
-                        'use `ng slurm allocation edit`)')
+                        'use `ng slurm edit allocation`)')
 async def slurm_qos_edit(args: Namespace):
     console = Console()
     qos = await EditSlurmQOS.run(
@@ -390,7 +371,8 @@ def _render_qos_panel(data: dict) -> Panel:
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'qos', 'show',
+@yaml_args.apply()
+@commands.register('ng', 'slurm', 'show', 'qos',
                    help='Show one or all QOSes at a site')
 async def slurm_qos_show(args: Namespace):
     console = Console()
@@ -438,17 +420,16 @@ async def slurm_qos_show(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--name', '-n', default=None,
                         help='Specific QOS to show; omit to list all at the site')
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')
 
 
 # ---------------------------------------------------------------------------
-# association remove / show
+# remove / show association
 # ---------------------------------------------------------------------------
 
 
+@group_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'association', 'remove',
+@commands.register('ng', 'slurm', 'remove', 'association', aliases=['assoc'],
                    help='Remove Slurm associations for a group at a site. '
                         '--partition and --qos are optional filters that '
                         'narrow the set; omit them to remove every '
@@ -474,15 +455,16 @@ async def slurm_association_remove(args: Namespace):
 
 @slurm_association_remove.args()
 def _(parser: ArgParser):
-    parser.add_argument('--group', '-g', required=True)
     parser.add_argument('--partition', default=None,
                         help='Optional: narrow to this partition')
     parser.add_argument('--qos', default=None,
                         help='Optional: narrow to this QOS')
 
 
+@group_args.apply()
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'association', 'show',
+@yaml_args.apply()
+@commands.register('ng', 'slurm', 'show', 'association', aliases=['assoc'],
                    help='List Slurm associations (optionally filtered)')
 async def slurm_association_show(args: Namespace):
     console = Console()
@@ -560,11 +542,8 @@ async def slurm_association_show(args: Namespace):
 
 @slurm_association_show.args()
 def _(parser: ArgParser):
-    parser.add_argument('--group', '-g', default=None)
     parser.add_argument('--partition', default=None)
     parser.add_argument('--qos', default=None)
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')
 
 
 # ---------------------------------------------------------------------------
@@ -617,7 +596,7 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# partition show
+# show partition
 # ---------------------------------------------------------------------------
 
 
@@ -631,7 +610,8 @@ def _partition_to_dict(p: SlurmPartition) -> dict:
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'partition', 'show',
+@yaml_args.apply()
+@commands.register('ng', 'slurm', 'show', 'partition',
                    help='Show one partition or list partitions at a site, '
                         'optionally filtered by group')
 async def slurm_partition_show(args: Namespace):
@@ -695,12 +675,10 @@ def _(parser: ArgParser):
     parser.add_argument('--group', '-g', default=None,
                         help='Restrict to partitions this group has '
                              'associations on')
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')
 
 
 # ---------------------------------------------------------------------------
-# allocation show
+# show allocation
 # ---------------------------------------------------------------------------
 
 
@@ -726,9 +704,10 @@ def _alloc_to_dict(qa: QOSAllocation | None,
     return data
 
 
+@group_args.apply()
 @site_args.apply()
-@commands.register('ng', 'slurm', 'allocation', 'show',
-                   aliases=['list'],
+@yaml_args.apply()
+@commands.register('ng', 'slurm', 'show', 'allocation', aliases=['alloc'],
                    help='Show a single allocation by id, or list allocations '
                         'at a site filtered by group/partition/qos/field')
 async def slurm_allocation_show(args: Namespace):
@@ -838,8 +817,6 @@ async def slurm_allocation_show(args: Namespace):
 def _(parser: ArgParser):
     parser.add_argument('--id', default=None,
                         help='Show one allocation by ObjectId (skips other filters)')
-    parser.add_argument('--group', '-g', default=None,
-                        help='Restrict to QOSes this group has associations on')
     parser.add_argument('--partition', default=None,
                         help='Restrict to QOSes referenced by associations on '
                              'this partition')
@@ -848,8 +825,6 @@ def _(parser: ArgParser):
     parser.add_argument('--field', default=None,
                         choices=list(_QOS_ALLOC_FIELDS),
                         help='Restrict to a single limit list')
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')
 
 
 @site_args.apply(required=True)
@@ -954,7 +929,7 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# slurm account
+# new / edit / show account
 # ---------------------------------------------------------------------------
 
 
@@ -989,7 +964,7 @@ def slurm_account_args(parser: ArgParser) -> None:
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @slurm_account_args.apply()
-@commands.register('ng', 'slurm', 'account', 'new',
+@commands.register('ng', 'slurm', 'new', 'account',
                    help='Create the Slurm account for a group on a site')
 async def slurm_account_new(args: Namespace):
     console = Console()
@@ -1009,7 +984,7 @@ async def slurm_account_new(args: Namespace):
 @group_args.apply(required=True)
 @site_args.apply(required=True)
 @slurm_account_args.apply()
-@commands.register('ng', 'slurm', 'account', 'edit',
+@commands.register('ng', 'slurm', 'edit', 'account',
                    help="Edit a group's Slurm account limits/coordinators "
                         'on a site')
 async def slurm_account_edit(args: Namespace):
@@ -1072,7 +1047,8 @@ def _render_account_panel(data: dict) -> Panel:
 
 @group_args.apply(required=True)
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'account', 'show',
+@yaml_args.apply()
+@commands.register('ng', 'slurm', 'show', 'account',
                    help="Show a group's Slurm account on a site")
 async def slurm_account_show(args: Namespace):
     console = Console()
@@ -1096,9 +1072,3 @@ async def slurm_account_show(args: Namespace):
     else:
         console.print(_render_account_panel(data))
     return 0
-
-
-@slurm_account_show.args()
-def _(parser: ArgParser):
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')

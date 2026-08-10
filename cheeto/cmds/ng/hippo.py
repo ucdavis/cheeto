@@ -18,6 +18,7 @@ from ...operations.hippo import (
     hippoapi_client,
 )
 from ...yaml import print_yaml
+from . import parent
 from ._args import site_args, user_args, yaml_args
 
 
@@ -54,7 +55,7 @@ def _(parser: ArgParser):
 
 
 @yaml_args.apply()
-@commands.register('ng', 'hippo', 'events',
+@commands.register('ng', 'hippo', 'list', 'pending',
                    help='List pending events from the HiPPO API (upstream)')
 async def hippo_events(args: Namespace):
     console = Console()
@@ -81,7 +82,7 @@ def _(parser: ArgParser):
 @site_args.apply()
 @user_args.apply()
 @yaml_args.apply()
-@commands.register('ng', 'hippo', 'list',
+@commands.register('ng', 'hippo', 'list', 'events',
                    help='Query locally-stored HippoEvent records')
 async def hippo_list(args: Namespace):
     console = Console()
@@ -205,7 +206,7 @@ def _(parser: ArgParser):
                              'across environments)')
 
 
-@commands.register('ng', 'hippo', 'sync-puppet',
+@commands.register('ng', 'hippo', 'sync', 'puppet-accounts',
                    help='Force a HiPPO sync from puppet YAML files')
 async def hippo_sync_puppet(args: Namespace):
     console = Console()

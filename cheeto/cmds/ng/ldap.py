@@ -37,7 +37,8 @@ from ...operations import (
     SyncUserToLDAP,
 )
 from ...yaml import print_yaml
-from ._args import group_args, site_args, user_args, yaml_args
+from . import parent
+from ._args import group_args, run_per_target, site_args, user_args, yaml_args
 
 
 @commands.register('ng', 'ldap',
@@ -96,12 +97,12 @@ async def ldap_backfill_cmd(args: Namespace):
 
 
 # ---------------------------------------------------------------------------
-# `ng ldap sync-site`
+# `ng ldap sync site`
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'ldap', 'sync-site',
+@commands.register('ng', 'ldap', 'sync', 'site',
                    help='Sync all users, groups, and automounts for a site')
 async def ldap_sync_site_cmd(args: Namespace):
     console = Console()
@@ -169,7 +170,7 @@ def _print_sync_site_result(console: Console, sitename: str, result: dict):
                 ) or '(none)',
             )
     console.print(Panel(panel_table,
-                        title=f'[bold]ng ldap sync-site:[/] [green]{sitename}[/]',
+                        title=f'[bold]ng ldap sync site:[/] [green]{sitename}[/]',
                         border_style='green', expand=False))
 
 
@@ -197,37 +198,50 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng ldap sync-user`
+# `ng ldap sync user`
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
-@commands.register('ng', 'ldap', 'sync-user',
-                   help='Sync one user to LDAP (upsert dn + reconcile groups)')
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'ldap', 'sync', 'user',
+                   help='Sync users to LDAP (upsert dn + reconcile groups)')
 async def ldap_sync_user_cmd(args: Namespace):
     console = Console()
     cfg = args.config.ldap
+    failed: list[str] = []
     async with AsyncLDAPManager(cfg, sitename=args.site) as ldap:
-        result = await SyncUserToLDAP.run(
-            args.db, args.author,
-            username=args.user, sitename=args.site,
-            ldap=ldap, force=args.force, full=args.full,
+        for username in args.user:
+            try:
+                result = await SyncUserToLDAP.run(
+                    args.db, args.author,
+                    username=username, sitename=args.site,
+                    ldap=ldap, force=args.force, full=args.full,
+                )
+            except ValueError as e:
+                console.print(f'  [red]{username}: {e}[/]')
+                failed.append(username)
+                continue
+            style = {
+                'created': 'green', 'updated': 'cyan', 'recreated': 'yellow',
+                'memberships_only': 'cyan', 'no_op': 'dim',
+            }.get(result.outcome, 'magenta')
+            added = result.extra.get('added_groups') or []
+            removed = result.extra.get('removed_groups') or []
+            console.print(
+                f'  [bold]{result.name}[/] -> [{style}]{result.outcome}[/]',
+            )
+            if added:
+                console.print(f'    [green]+ groups:[/] {", ".join(added)}')
+            if removed:
+                console.print(f'    [red]- groups:[/] {", ".join(removed)}')
+    if failed:
+        console.print(
+            f'[red]{len(failed)}/{len(args.user)} failed:[/] '
+            f'{", ".join(failed)}'
         )
-
-    style = {
-        'created': 'green', 'updated': 'cyan', 'recreated': 'yellow',
-        'memberships_only': 'cyan', 'no_op': 'dim',
-    }.get(result.outcome, 'magenta')
-    added = result.extra.get('added_groups') or []
-    removed = result.extra.get('removed_groups') or []
-    console.print(
-        f'[bold]{result.name}[/] -> [{style}]{result.outcome}[/]',
-    )
-    if added:
-        console.print(f'  [green]+ groups:[/] {", ".join(added)}')
-    if removed:
-        console.print(f'  [red]- groups:[/] {", ".join(removed)}')
+        return 1
+    return 0
 
 
 @ldap_sync_user_cmd.args()
@@ -240,28 +254,41 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng ldap sync-group`
+# `ng ldap sync group`
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@group_args.apply(required=True)
-@commands.register('ng', 'ldap', 'sync-group',
-                   help='Sync one beanie Group to LDAP (regular groups only)')
+@group_args.apply(required=True, multiple=True)
+@commands.register('ng', 'ldap', 'sync', 'group',
+                   help='Sync beanie Groups to LDAP (regular groups only)')
 async def ldap_sync_group_cmd(args: Namespace):
     console = Console()
     cfg = args.config.ldap
+    failed: list[str] = []
     async with AsyncLDAPManager(cfg, sitename=args.site) as ldap:
-        result = await SyncGroupToLDAP.run(
-            args.db, args.author,
-            groupname=args.group, sitename=args.site,
-            ldap=ldap, force=args.force, full=args.full,
+        for groupname in args.group:
+            try:
+                result = await SyncGroupToLDAP.run(
+                    args.db, args.author,
+                    groupname=groupname, sitename=args.site,
+                    ldap=ldap, force=args.force, full=args.full,
+                )
+            except ValueError as e:
+                console.print(f'  [red]{groupname}: {e}[/]')
+                failed.append(groupname)
+                continue
+            console.print(
+                f'  [bold]{result.name}[/] -> [cyan]{result.outcome}[/] '
+                f'(members={result.extra.get("member_count", 0)})',
+            )
+    if failed:
+        console.print(
+            f'[red]{len(failed)}/{len(args.group)} failed:[/] '
+            f'{", ".join(failed)}'
         )
-
-    console.print(
-        f'[bold]{result.name}[/] -> [cyan]{result.outcome}[/] '
-        f'(members={result.extra.get("member_count", 0)})',
-    )
+        return 1
+    return 0
 
 
 @ldap_sync_group_cmd.args()
@@ -274,12 +301,12 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng ldap prune-site`
+# `ng ldap prune`
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'ldap', 'prune-site',
+@commands.register('ng', 'ldap', 'prune',
                    help='Delete LDAP entries that have no beanie record')
 async def ldap_prune_site_cmd(args: Namespace):
     console = Console()
@@ -478,10 +505,7 @@ def _(parser: ArgParser):
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'ldap', 'show',
-                   help='Read-only inspection of LDAP-side state')
-def ldap_show_cmd(args: Namespace):
-    pass
+parent('ng', 'ldap', 'show', help='Read-only inspection of LDAP-side state')
 
 
 def _password_display(password: str | None) -> str:
@@ -494,85 +518,103 @@ def _password_display(password: str | None) -> str:
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @yaml_args.apply()
 @commands.register('ng', 'ldap', 'show', 'user',
-                   help='Show LDAP record for a user')
+                   help='Show LDAP record(s) for one or more users')
 async def ldap_show_user_cmd(args: Namespace):
     console = Console()
     cfg = args.config.ldap
+    missing: list[str] = []
+    yaml_out: list[dict] = []
     async with AsyncLDAPManager(cfg, sitename=args.site) as ldap:
-        record = await ldap.get_user(args.user)
-        memberships = (
-            await ldap.list_user_memberships(args.user)
-            if record is not None else set()
-        )
-    if record is None:
-        console.print(f'[red]No LDAP entry for {args.user}[/]')
-        return 1
+        for username in args.user:
+            record = await ldap.get_user(username)
+            if record is None:
+                if not args.yaml:
+                    console.print(f'[red]No LDAP entry for {username}[/]')
+                missing.append(username)
+                continue
+            memberships = await ldap.list_user_memberships(username)
+            if args.yaml:
+                yaml_out.append({
+                    'username': record.username,
+                    'uid': record.uid,
+                    'gid': record.gid,
+                    'email': record.email,
+                    'home_directory': record.home_directory,
+                    'shell': record.shell,
+                    'password': _password_display(record.password),
+                    'ssh_keys': list(record.ssh_keys),
+                    'memberships': sorted(memberships),
+                })
+                continue
+            table = Table.grid(padding=(0, 1))
+            table.add_column(style='bold cyan', no_wrap=True)
+            table.add_column()
+            table.add_row('username', record.username)
+            table.add_row('uid', str(record.uid))
+            table.add_row('gid', str(record.gid))
+            table.add_row('email', record.email)
+            table.add_row('home', record.home_directory)
+            table.add_row('shell', record.shell)
+            table.add_row(
+                'password',
+                _password_display(record.password) if record.password
+                else '[dim]not set[/]',
+            )
+            table.add_row(
+                'ssh_keys',
+                '\n'.join(record.ssh_keys) if record.ssh_keys else '(none)',
+            )
+            table.add_row(
+                'memberships',
+                ', '.join(sorted(memberships)) if memberships else '(none)',
+            )
+            console.print(Panel(
+                table,
+                title=f'[bold]LDAP user:[/] [green]{record.username}[/]',
+                border_style='green', expand=False,
+            ))
     if args.yaml:
-        print_yaml({
-            'username': record.username,
-            'uid': record.uid,
-            'gid': record.gid,
-            'email': record.email,
-            'home_directory': record.home_directory,
-            'shell': record.shell,
-            'password': _password_display(record.password),
-            'ssh_keys': list(record.ssh_keys),
-            'memberships': sorted(memberships),
-        })
-        return 0
-    table = Table.grid(padding=(0, 1))
-    table.add_column(style='bold cyan', no_wrap=True)
-    table.add_column()
-    table.add_row('username', record.username)
-    table.add_row('uid', str(record.uid))
-    table.add_row('gid', str(record.gid))
-    table.add_row('email', record.email)
-    table.add_row('home', record.home_directory)
-    table.add_row('shell', record.shell)
-    table.add_row(
-        'password',
-        _password_display(record.password) if record.password
-        else '[dim]not set[/]',
-    )
-    table.add_row(
-        'ssh_keys',
-        '\n'.join(record.ssh_keys) if record.ssh_keys else '(none)',
-    )
-    table.add_row(
-        'memberships',
-        ', '.join(sorted(memberships)) if memberships else '(none)',
-    )
-    console.print(Panel(table, title=f'[bold]LDAP user:[/] [green]{args.user}[/]',
-                        border_style='green', expand=False))
+        print_yaml(yaml_out[0] if len(yaml_out) == 1 and not missing
+                   else yaml_out)
+    return 1 if missing else 0
 
 
 @site_args.apply(required=True)
-@group_args.apply(required=True)
+@group_args.apply(required=True, multiple=True)
 @yaml_args.apply()
 @commands.register('ng', 'ldap', 'show', 'group',
-                   help='Show LDAP record for a group')
+                   help='Show LDAP record(s) for one or more groups')
 async def ldap_show_group_cmd(args: Namespace):
     console = Console()
     cfg = args.config.ldap
+    missing: list[str] = []
+    yaml_out: list[dict] = []
     async with AsyncLDAPManager(cfg, sitename=args.site) as ldap:
-        record = await ldap.get_group(args.group)
-    if record is None:
-        console.print(f'[red]No LDAP entry for {args.group}[/]')
-        return 1
+        for groupname in args.group:
+            record = await ldap.get_group(groupname)
+            if record is None:
+                if not args.yaml:
+                    console.print(f'[red]No LDAP entry for {groupname}[/]')
+                missing.append(groupname)
+                continue
+            if args.yaml:
+                yaml_out.append({
+                    'groupname': record.groupname,
+                    'gid': record.gid,
+                    'members': sorted(record.members),
+                })
+                continue
+            console.print(
+                f'[bold]{record.groupname}[/] gid={record.gid} '
+                f'members=[dim]{", ".join(sorted(record.members)) or "(none)"}[/]',
+            )
     if args.yaml:
-        print_yaml({
-            'groupname': record.groupname,
-            'gid': record.gid,
-            'members': sorted(record.members),
-        })
-        return 0
-    console.print(
-        f'[bold]{record.groupname}[/] gid={record.gid} '
-        f'members=[dim]{", ".join(sorted(record.members)) or "(none)"}[/]',
-    )
+        print_yaml(yaml_out[0] if len(yaml_out) == 1 and not missing
+                   else yaml_out)
+    return 1 if missing else 0
 
 
 @site_args.apply(required=True)

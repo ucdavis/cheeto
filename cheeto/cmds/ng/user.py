@@ -47,6 +47,7 @@ from ...queries import (
     user_site_overrides,
 )
 from ...yaml import print_yaml
+from . import parent
 from ._args import (
     EXPIRABLE_CLEAR,
     email_args,
@@ -54,6 +55,7 @@ from ._args import (
     fullname_args,
     group_args,
     password_args,
+    run_per_target,
     site_args,
     user_args,
     yaml_args,
@@ -353,16 +355,11 @@ def _render_user_panel(data: dict) -> Panel:
                  border_style='green', expand=False)
 
 
-@commands.register('ng', 'user',
-                   help='User operations')
-def user_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'user', 'new',
-                   help='Create a new user')
-def user_new_cmd(args: Namespace):
-    pass
+parent('ng', 'user', help='User operations')
+parent('ng', 'user', 'new', help='Create new users')
+parent('ng', 'user', 'set', help='Set user properties')
+parent('ng', 'user', 'add', help='Attach access, keys, sites, comments')
+parent('ng', 'user', 'remove', help='Detach access, keys, sites')
 
 
 @user_args.apply(required=True)
@@ -576,10 +573,10 @@ def _(parser: ArgParser):
 
 
 @site_args.apply()
-@user_args.apply(required=True)
-@commands.register('ng', 'user', 'status',
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'user', 'set', 'status',
                    help='Set user status')
-async def user_status(args: Namespace):
+async def user_set_status(args: Namespace):
     console = Console()
     if args.reset:
         if args.site is None:
@@ -592,21 +589,21 @@ async def user_status(args: Namespace):
         console.print('[red]--status is required (or use --reset with --site)[/]')
         return 1
 
-    await SetUserStatus.run(
-        args.db, args.author,
-        name=args.user, status=args.status,
-        reason=args.reason, site=args.site, reset=args.reset,
-    )
-    if args.reset:
-        console.print(
-            f'Reset [green]{args.user}[/] per-site status override ({args.site})'
+    async def _one(name: str) -> None:
+        await SetUserStatus.run(
+            args.db, args.author,
+            name=name, status=args.status,
+            reason=args.reason, site=args.site, reset=args.reset,
         )
+
+    if args.reset:
+        label = f'reset per-site override ({args.site})'
     else:
-        scope = args.site or 'global'
-        console.print(f'Set [green]{args.user}[/] status to [yellow]{args.status}[/] ({scope})')
+        label = f'status={args.status} ({args.site or "global"})'
+    return await run_per_target(console, args.user, _one, ok=label)
 
 
-@user_status.args()
+@user_set_status.args()
 def _(parser: ArgParser):
     parser.add_argument('--status', default=None, choices=list(USER_STATUSES),
                         help='New status (required unless --reset)')
@@ -616,42 +613,52 @@ def _(parser: ArgParser):
     parser.add_argument('--reason', required=True)
 
 
-@user_args.apply(required=True)
-@commands.register('ng', 'user', 'type',
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'user', 'set', 'type',
                    help='Set user type')
-async def user_type(args: Namespace):
+async def user_set_type(args: Namespace):
     console = Console()
-    await SetUserType.run(
-        args.db, args.author,
-        name=args.user, type=args.type,
+
+    async def _one(name: str) -> None:
+        await SetUserType.run(
+            args.db, args.author,
+            name=name, type=args.type,
+        )
+
+    return await run_per_target(
+        console, args.user, _one, ok=f'type={args.type}',
     )
-    console.print(f'Set [green]{args.user}[/] type to [yellow]{args.type}[/]')
 
 
-@user_type.args()
+@user_set_type.args()
 def _(parser: ArgParser):
     parser.add_argument('--type', required=True, choices=list(USER_TYPES))
 
 
-@user_args.apply(required=True)
-@commands.register('ng', 'user', 'shell',
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'user', 'set', 'shell',
                    help='Set user shell')
-async def user_shell(args: Namespace):
+async def user_set_shell(args: Namespace):
     console = Console()
-    await SetUserShell.run(
-        args.db, args.author,
-        name=args.user, shell=args.shell,
+
+    async def _one(name: str) -> None:
+        await SetUserShell.run(
+            args.db, args.author,
+            name=name, shell=args.shell,
+        )
+
+    return await run_per_target(
+        console, args.user, _one, ok=f'shell={args.shell}',
     )
-    console.print(f'Set [green]{args.user}[/] shell to [yellow]{args.shell}[/]')
 
 
-@user_shell.args()
+@user_set_shell.args()
 def _(parser: ArgParser):
     parser.add_argument('--shell', required=True)
 
 
 @user_args.apply(required=True)
-@commands.register('ng', 'user', 'password',
+@commands.register('ng', 'user', 'set', 'password',
                    help='Generate and set a new password for a user')
 async def user_password(args: Namespace):
     console = Console()
@@ -665,16 +672,21 @@ async def user_password(args: Namespace):
 
 
 @site_args.apply()
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @commands.register('ng', 'user', 'add', 'access',
-                   help='Add access type(s) to a user')
+                   help='Add access type(s) to one or more users')
 async def user_add_access(args: Namespace):
     console = Console()
-    await AddUserAccess.run(
-        args.db, args.author,
-        name=args.user, access=args.access, site=args.site,
+
+    async def _one(name: str) -> None:
+        await AddUserAccess.run(
+            args.db, args.author,
+            name=name, access=args.access, site=args.site,
+        )
+
+    return await run_per_target(
+        console, args.user, _one, ok=f'added {", ".join(args.access)}',
     )
-    console.print(f'Added access {args.access} to [green]{args.user}[/]')
 
 
 @user_add_access.args()
@@ -684,16 +696,21 @@ def _(parser: ArgParser):
 
 
 @site_args.apply()
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @commands.register('ng', 'user', 'remove', 'access',
-                   help='Remove access type(s) from a user')
+                   help='Remove access type(s) from one or more users')
 async def user_remove_access(args: Namespace):
     console = Console()
-    await RemoveUserAccess.run(
-        args.db, args.author,
-        name=args.user, access=args.access, site=args.site,
+
+    async def _one(name: str) -> None:
+        await RemoveUserAccess.run(
+            args.db, args.author,
+            name=name, access=args.access, site=args.site,
+        )
+
+    return await run_per_target(
+        console, args.user, _one, ok=f'removed {", ".join(args.access)}',
     )
-    console.print(f'Removed access {args.access} from [green]{args.user}[/]')
 
 
 @user_remove_access.args()
@@ -798,24 +815,31 @@ async def user_remove_ssh_key(args: Namespace):
     console.print(f'Removed ssh key from [green]{args.user}[/]')
 
 
-@user_args.apply(required=True)
-@commands.register('ng', 'user', 'comment',
-                   help='Add a comment to a user')
-async def user_comment(args: Namespace):
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'user', 'add', 'comment',
+                   help='Add a comment to one or more users')
+async def user_add_comment(args: Namespace):
     console = Console()
-    await AddUserComment.run(
-        args.db, args.author,
-        name=args.user, comment=args.comment,
+
+    async def _one(name: str) -> None:
+        await AddUserComment.run(
+            args.db, args.author,
+            name=name, comment=args.comment,
+        )
+
+    return await run_per_target(
+        console, args.user, _one, ok='comment added',
     )
-    console.print(f'Added comment to [green]{args.user}[/]')
 
 
-@user_comment.args()
+@user_add_comment.args()
 def _(parser: ArgParser):
     parser.add_argument('--comment', required=True)
 
 
 @site_args.apply()
+@user_args.apply()
+@yaml_args.apply()
 @commands.register('ng', 'user', 'show',
                    help='Show one user, identified by name, uid, or email')
 async def user_show(args: Namespace):
@@ -887,11 +911,8 @@ async def user_show(args: Namespace):
 
 @user_show.args()
 def _(parser: ArgParser):
-    parser.add_argument('--user', '-u', default=None, help='Username')
     parser.add_argument('--uid', type=int, default=None, help='Numeric UID')
     parser.add_argument('--email', default=None, help='Email address')
-    parser.add_argument('--yaml', action='store_true', default=False,
-                        help='Output as YAML')
 
 
 @commands.register('ng', 'user', 'list',

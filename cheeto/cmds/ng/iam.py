@@ -26,13 +26,12 @@ from ...operations import (
 from ...operations.iam import maybe_notify_offboarding, maybe_notify_restored
 from ...queries import find_restorable_users, resolve_status_name
 from ...yaml import print_yaml
+from . import parent
 from ._args import user_args, yaml_args
 
 
-@commands.register('ng', 'iam',
-                   help='UC Davis IAM sync operations (async/beanie)')
-def iam_cmd(args: Namespace):
-    pass
+parent('ng', 'iam', help='UC Davis IAM sync operations (async/beanie)')
+parent('ng', 'iam', 'list', help='IAM reconciliation reports')
 
 
 # ---------------------------------------------------------------------------
@@ -40,111 +39,103 @@ def iam_cmd(args: Namespace):
 # ---------------------------------------------------------------------------
 
 
-@user_args.apply(required=True)
+@user_args.apply(multiple=True)
 @commands.register('ng', 'iam', 'sync',
-                   help='Sync a single user against the IAM API')
+                   help='Sync users against the IAM API '
+                        '(-u USER... or --all)')
 async def iam_sync_cmd(args: Namespace):
     console = Console()
+    if bool(args.user) == bool(args.all):
+        console.print('[red]Specify either -u/--user or --all[/]')
+        return 1
+
     cfg = args.config.ucdiam
     grace = args.grace_days if args.grace_days is not None else cfg.grace_days
     offset = (
         args.expiry_offset_days if args.expiry_offset_days is not None
         else cfg.expiry_offset_days
     )
+
+    if args.all:
+        types = args.type or list(IAM_SYNCABLE_USER_TYPES)
+        async with AsyncIAMAPI(cfg) as iam_api:
+            with email_notifier(args.config.hippo, db=args.db,
+                                author=args.author,
+                                enabled=args.notify) as notify:
+                tally = await SyncAllUsersIAM.run(
+                    args.db, args.author,
+                    iam_api=iam_api,
+                    grace_days=grace,
+                    expiry_offset_days=offset,
+                    types=types,
+                    max_users=args.max_users,
+                    concurrency=args.concurrency,
+                    notifier=notify,
+                )
+        table = Table(title='IAM sync summary', show_header=True)
+        table.add_column('outcome', style='cyan')
+        table.add_column('count', justify='right')
+        for key in sorted(tally.keys()):
+            table.add_row(key, str(tally[key]))
+        console.print(table)
+        return 0
+
+    failed: list[str] = []
     async with AsyncIAMAPI(cfg) as iam_api:
-        try:
-            result = await SyncUserIAM.run(
-                args.db, args.author,
-                username=args.user,
-                iam_api=iam_api,
-                grace_days=grace,
-                expiry_offset_days=offset,
-            )
-        except ValueError as e:
-            console.print(f'[red]{e}[/]')
-            return 1
-
-    with email_notifier(args.config.hippo, db=args.db, author=args.author,
-                        enabled=args.notify) as notify:
-        if await maybe_notify_offboarding(result, notify):
-            console.print('[dim]sent offboarding notification[/]')
-        if await maybe_notify_restored(result, notify):
-            console.print('[dim]sent restoration notification[/]')
-
-    style = _outcome_style(result.outcome)
-    console.print(
-        f'[bold]{result.username}[/] -> [{style}]{result.outcome}[/] '
-        f'(status={result.status}, '
-        f'expires_at={result.expires_at or "—"})'
-    )
+        with email_notifier(args.config.hippo, db=args.db, author=args.author,
+                            enabled=args.notify) as notify:
+            for username in args.user:
+                try:
+                    result = await SyncUserIAM.run(
+                        args.db, args.author,
+                        username=username,
+                        iam_api=iam_api,
+                        grace_days=grace,
+                        expiry_offset_days=offset,
+                    )
+                except ValueError as e:
+                    console.print(f'  [red]{username}: {e}[/]')
+                    failed.append(username)
+                    continue
+                if await maybe_notify_offboarding(result, notify):
+                    console.print('[dim]sent offboarding notification[/]')
+                if await maybe_notify_restored(result, notify):
+                    console.print('[dim]sent restoration notification[/]')
+                style = _outcome_style(result.outcome)
+                console.print(
+                    f'  [bold]{result.username}[/] -> '
+                    f'[{style}]{result.outcome}[/] '
+                    f'(status={result.status}, '
+                    f'expires_at={result.expires_at or "—"})'
+                )
+    if failed:
+        console.print(
+            f'[red]{len(failed)}/{len(args.user)} failed:[/] '
+            f'{", ".join(failed)}'
+        )
+        return 1
+    return 0
 
 
 @iam_sync_cmd.args()
 def _(parser: ArgParser):
-    parser.add_argument('--grace-days', type=int, default=None,
-                        help='Override IAMConfig.grace_days for this run')
-    parser.add_argument('--expiry-offset-days', type=int, default=None,
-                        help='Override IAMConfig.expiry_offset_days for this run')
-    parser.add_argument('--notify', action='store_true', default=False,
-                        help='Email the user if this sync moves them into '
-                             'offboarding or restores them from it')
-
-
-# ---------------------------------------------------------------------------
-# `ng iam sync-all`
-# ---------------------------------------------------------------------------
-
-
-@commands.register('ng', 'iam', 'sync-all',
-                   help='Sync all eligible users against the IAM API')
-async def iam_sync_all_cmd(args: Namespace):
-    console = Console()
-    cfg = args.config.ucdiam
-    grace = args.grace_days if args.grace_days is not None else cfg.grace_days
-    offset = (
-        args.expiry_offset_days if args.expiry_offset_days is not None
-        else cfg.expiry_offset_days
-    )
-    types = args.type or list(IAM_SYNCABLE_USER_TYPES)
-
-    async with AsyncIAMAPI(cfg) as iam_api:
-        with email_notifier(args.config.hippo, db=args.db, author=args.author,
-                            enabled=args.notify) as notify:
-            tally = await SyncAllUsersIAM.run(
-                args.db, args.author,
-                iam_api=iam_api,
-                grace_days=grace,
-                expiry_offset_days=offset,
-                types=types,
-                max_users=args.max_users,
-                concurrency=args.concurrency,
-                notifier=notify,
-            )
-
-    table = Table(title='IAM sync summary', show_header=True)
-    table.add_column('outcome', style='cyan')
-    table.add_column('count', justify='right')
-    for key in sorted(tally.keys()):
-        table.add_row(key, str(tally[key]))
-    console.print(table)
-
-
-@iam_sync_all_cmd.args()
-def _(parser: ArgParser):
+    parser.add_argument('--all', action='store_true', default=False,
+                        help='Sync every IAM-syncable user (bulk mode)')
     parser.add_argument('--type', action='append', default=None,
                         choices=list(IAM_SYNCABLE_USER_TYPES),
-                        help='Restrict to user.type (repeatable; default: all '
-                             'IAM-syncable types)')
+                        help='With --all: restrict to user.type (repeatable; '
+                             'default: all IAM-syncable types)')
     parser.add_argument('--max-users', type=int, default=None,
-                        help='Cap the number of users synced (for testing)')
+                        help='With --all: cap the number of users synced')
     parser.add_argument('--concurrency', type=int, default=1,
-                        help='Concurrent IAM lookups (default: 1)')
+                        help='With --all: concurrent IAM lookups (default: 1)')
     parser.add_argument('--grace-days', type=int, default=None,
                         help='Override IAMConfig.grace_days for this run')
     parser.add_argument('--expiry-offset-days', type=int, default=None,
                         help='Override IAMConfig.expiry_offset_days for this run')
     parser.add_argument('--notify', action='store_true', default=False,
-                        help='Email users moved into offboarding by this run')
+                        help='Email users this sync moves into offboarding '
+                             'or restores from it')
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +307,7 @@ def _(parser: ArgParser):
 
 
 @yaml_args.apply()
-@commands.register('ng', 'iam', 'restorable',
+@commands.register('ng', 'iam', 'list', 'restorable',
                    help='List users whose IAM record is valid again but '
                         'whose status was never restored (e.g. returned '
                         'after the offboarding window)')
@@ -373,7 +364,7 @@ async def iam_restorable_cmd(args: Namespace):
     ))
     console.print(
         '[dim]Reactivate with: '
-        'cheeto ng user status -u <name> --status active --reason ...[/]'
+        'cheeto ng user set status -u <name> --status active --reason ...[/]'
     )
 
 

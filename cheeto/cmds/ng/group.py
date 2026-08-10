@@ -28,7 +28,8 @@ from ...operations import (
 )
 from ...queries import group_members_at_site
 from ...yaml import print_yaml
-from ._args import group_args, site_args, user_args
+from . import parent
+from ._args import group_args, run_per_target, site_args, user_args, yaml_args
 from ._slurm_show import group_slurm_at_site
 
 
@@ -133,16 +134,27 @@ def _render_group_panel(data: dict) -> Panel:
                  border_style='green', expand=False)
 
 
-@commands.register('ng', 'group',
-                   help='Group operations')
-def group_cmd(args: Namespace):
-    pass
+parent('ng', 'group', help='Group operations')
+parent('ng', 'group', 'new', help='Create new groups')
+parent('ng', 'group', 'add', help='Add users to group roles at a site')
+parent('ng', 'group', 'remove', help='Remove users from group roles at a site')
 
 
-@commands.register('ng', 'group', 'new',
-                   help='Create a new group')
-def group_new_cmd(args: Namespace):
-    pass
+async def _run_membership(args: Namespace, op, verbed: str) -> int:
+    """Shared driver for the eight membership-role commands: loop the
+    per-(user, group, site) operation over every target user."""
+    console = Console()
+
+    async def _one(name: str) -> None:
+        await op.run(
+            args.db, args.author,
+            group_name=args.group, user_name=name, site_name=args.site,
+        )
+
+    return await run_per_target(
+        console, args.user, _one,
+        ok=f'{verbed} {args.group} at {args.site}',
+    )
 
 
 @group_args.apply(required=True)
@@ -213,139 +225,75 @@ async def group_from_sponsor(args: Namespace):
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'member',
-                   help='Add a user to a group as a member at a site')
+                   help='Add users to a group as members at a site')
 async def group_add_member(args: Namespace):
-    console = Console()
-    await AddGroupMember.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Added [green]{args.user}[/] to group [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, AddGroupMember, 'added to')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'member',
-                   help='Remove a user from a group at a site')
+                   help='Remove member users from a group at a site')
 async def group_remove_member(args: Namespace):
-    console = Console()
-    await RemoveGroupMember.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Removed [green]{args.user}[/] from group [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, RemoveGroupMember, 'removed from')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'sponsor',
-                   help='Add a user as a group sponsor at a site')
+                   help='Add users as group sponsors at a site')
 async def group_add_sponsor(args: Namespace):
-    console = Console()
-    await AddGroupSponsor.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Added [green]{args.user}[/] as sponsor of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, AddGroupSponsor, 'added as sponsor of')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'sponsor',
-                   help='Remove a user as a group sponsor at a site')
+                   help='Remove sponsor role from users at a site')
 async def group_remove_sponsor(args: Namespace):
-    console = Console()
-    await RemoveGroupSponsor.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Removed [green]{args.user}[/] as sponsor of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, RemoveGroupSponsor, 'removed as sponsor of')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'sudoer',
-                   help='Add a user as a group sudoer at a site')
+                   help='Add users as group sudoers at a site')
 async def group_add_sudoer(args: Namespace):
-    console = Console()
-    await AddGroupSudoer.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Added [green]{args.user}[/] as sudoer of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, AddGroupSudoer, 'added as sudoer of')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'sudoer',
-                   help='Remove a user as a group sudoer at a site')
+                   help='Remove sudoer role from users at a site')
 async def group_remove_sudoer(args: Namespace):
-    console = Console()
-    await RemoveGroupSudoer.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Removed [green]{args.user}[/] as sudoer of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, RemoveGroupSudoer, 'removed as sudoer of')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'add', 'slurmer',
-                   help='Add a user as a group slurmer at a site')
+                   help='Add users as group slurmers at a site')
 async def group_add_slurmer(args: Namespace):
-    console = Console()
-    await AddGroupSlurmer.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Added [green]{args.user}[/] as slurmer of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, AddGroupSlurmer, 'added as slurmer of')
 
 
 @site_args.apply(required=True)
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @group_args.apply(required=True)
 @commands.register('ng', 'group', 'remove', 'slurmer',
-                   help='Remove a user as a group slurmer at a site')
+                   help='Remove slurmer role from users at a site')
 async def group_remove_slurmer(args: Namespace):
-    console = Console()
-    await RemoveGroupSlurmer.run(
-        args.db, args.author,
-        group_name=args.group, user_name=args.user, site_name=args.site,
-    )
-    console.print(
-        f'Removed [green]{args.user}[/] as slurmer of [green]{args.group}[/] '
-        f'at [bold]{args.site}[/]'
-    )
+    return await _run_membership(args, RemoveGroupSlurmer, 'removed as slurmer of')
 
 
 @site_args.apply()
