@@ -21,15 +21,23 @@ from ...operations import (
     CreateGroupFromSponsor,
     CreateLabGroup,
     CreateSystemGroup,
+    DeleteGroup,
     RemoveGroupMember,
     RemoveGroupSlurmer,
     RemoveGroupSponsor,
     RemoveGroupSudoer,
 )
-from ...queries import group_members_at_site
+from ...queries import gather_group_references, group_members_at_site
 from ...yaml import print_yaml
 from . import parent
-from ._args import group_args, run_per_target, site_args, user_args, yaml_args
+from ._args import (
+    confirm_typed,
+    group_args,
+    run_per_target,
+    site_args,
+    user_args,
+    yaml_args,
+)
 from ._slurm_show import group_slurm_at_site
 
 
@@ -138,6 +146,77 @@ parent('ng', 'group', help='Group operations')
 parent('ng', 'group', 'new', help='Create new groups')
 parent('ng', 'group', 'add', help='Add users to group roles at a site')
 parent('ng', 'group', 'remove', help='Remove users from group roles at a site')
+
+
+@group_args.apply(required=True)
+@commands.register('ng', 'group', 'delete',
+                   help='Delete a group and all of its references (cascade)')
+async def group_delete(args: Namespace):
+    from ...queries import find_group_by_name
+    console = Console()
+    group = await find_group_by_name(args.group)
+    if group is None:
+        console.print(f'[red]Group {args.group} not found[/]')
+        return 1
+
+    refs = await gather_group_references(group)
+    table = Table(
+        title=f'Records linked to [bold]{args.group}[/] (will be deleted)',
+        show_header=False, box=None, pad_edge=False, padding=(0, 1),
+    )
+    table.add_column(style='cyan', no_wrap=True)
+    table.add_column(justify='right')
+    for label, n in refs.counts().items():
+        table.add_row(label, str(n))
+    console.print(table)
+
+    if refs.storages and not args.force:
+        names = ', '.join(sorted(st.name for st in refs.storages))
+        console.print(
+            f'[yellow]This group has {len(refs.storages)} storage '
+            f'record(s) ({names}) — deleting them removes the exported '
+            f'mount/quota configuration.[/]'
+        )
+        try:
+            answer = input(
+                'Also delete these storage records? [y/N]: '
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[yellow]Aborted[/]')
+            return 1
+        if answer != 'y':
+            console.print(
+                '[yellow]Aborted — storage records cannot be left behind '
+                '(their group link would dangle)[/]'
+            )
+            return 1
+
+    if not confirm_typed(console, 'group', args.group, force=args.force):
+        return 1
+
+    try:
+        await DeleteGroup.run(
+            args.db, args.author,
+            name=args.group, reason=args.reason, cascade_storage=True,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(f'Deleted group [green]{args.group}[/]')
+    console.print(
+        '[dim]LDAP entries persist until the next `ng ldap prune`/site '
+        'sync; Slurm state until the next `ng slurm sync`.[/]'
+    )
+
+
+@group_delete.args()
+def _(parser: ArgParser):
+    parser.add_argument('--reason', required=True,
+                        help='Why the group is being deleted (recorded in '
+                             'History)')
+    parser.add_argument('--force', '-f', action='store_true', default=False,
+                        help='Skip all confirmation prompts (cascades '
+                             'storage records)')
 
 
 async def _run_membership(args: Namespace, op, verbed: str) -> int:

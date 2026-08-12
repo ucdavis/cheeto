@@ -21,7 +21,7 @@ from ...operations import (
     ExportPuppetStorage,
     ExportRootSSHKeys,
     ExportSympaEmails,
-    RemoveSite,
+    DeleteSite,
     RemoveSiteAlias,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
@@ -41,7 +41,7 @@ from ...queries import (
     site_to_puppet_legacy,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml, print_yaml
-from ._args import group_args, run_per_target, site_args
+from ._args import confirm_typed, group_args, run_per_target, site_args
 
 
 # ---------------------------------------------------------------------------
@@ -104,10 +104,10 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'remove', 'site',
-                   help='Remove a site and all of its per-site records '
+@commands.register('ng', 'site', 'delete',
+                   help='Delete a site and all of its per-site records '
                         '(cascade)')
-async def site_remove_site(args: Namespace):
+async def site_delete(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -115,7 +115,6 @@ async def site_remove_site(args: Namespace):
         return 1
 
     counts = await count_site_dependents(site)
-    total = sum(counts.values())
     table = Table(
         title=f'Records linked to [bold]{args.site}[/] (will be deleted)',
         show_header=False, box=None, pad_edge=False, padding=(0, 1),
@@ -126,32 +125,24 @@ async def site_remove_site(args: Namespace):
         table.add_row(label, str(n))
     console.print(table)
 
-    if not args.force:
-        console.print(
-            f'[red]This permanently deletes site [bold]{args.site}[/] and '
-            f'the {total} record(s) above.[/]'
-        )
-        try:
-            answer = input(f'Remove site {args.site}? [y/N]: ').strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            console.print('\n[red]Aborted.[/]')
-            return 1
-        if answer != 'y':
-            console.print('[red]Aborted.[/]')
-            return 1
+    if not confirm_typed(console, 'site', args.site, force=args.force):
+        return 1
 
-    result = await RemoveSite.run(
-        args.db, args.author, sitename=args.site,
+    result = await DeleteSite.run(
+        args.db, args.author, sitename=args.site, reason=args.reason,
     )
     deleted = sum(result.values())
     console.print(
-        f'Removed site [green]{args.site}[/] and {deleted} associated '
+        f'Deleted site [green]{args.site}[/] and {deleted} associated '
         f'record(s)'
     )
 
 
-@site_remove_site.args()
+@site_delete.args()
 def _(parser: ArgParser):
+    parser.add_argument('--reason', required=True,
+                        help='Why the site is being deleted (recorded in '
+                             'History)')
     parser.add_argument('--force', '-f', action='store_true', default=False,
                         help='Skip the confirmation prompt')
 

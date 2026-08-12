@@ -121,7 +121,7 @@ class User(LDAPSyncable, BaseDocument, Expirable):
 
     sites: list[BackLink['UserSiteInfo']] = Field(
         default_factory=list,
-        json_schema_extra={'original_field': 'site'},
+        json_schema_extra={'original_field': 'user'},
     )
 
     ssh_keys: list[BackLink['SshKey']] = Field(

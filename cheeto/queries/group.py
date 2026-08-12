@@ -20,7 +20,10 @@ from beanie.operators import In
 from ..models.base import link_target_id
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
+from ..models.hippo import HippoEvent
 from ..models.site import Site
+from ..models.slurm import SlurmAccount, SlurmAssociation
+from ..models.storage import Storage, StorageVolume
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
 
@@ -236,3 +239,82 @@ async def user_groups_at_site(
         UserGroupRoles(group=g, roles=roles_by_group[g.id])
         for g in groups
     ]
+
+
+@dataclass
+class GroupRefs:
+    """Every document that references a Group — the single source of truth
+    shared by `DeleteGroup`'s cascade and the CLI's deletion preview."""
+
+    memberships: list
+    storages: list
+    storage_volumes: list
+    slurm_accounts: list
+    slurm_associations: list
+    sticky_sites: list
+    hippo_events: list
+
+    def counts(self) -> dict[str, int]:
+        return {
+            'group_memberships': len(self.memberships),
+            'storages': len(self.storages),
+            'storage_volumes': len(self.storage_volumes),
+            'slurm_accounts': len(self.slurm_accounts),
+            'slurm_associations': len(self.slurm_associations),
+            'sticky_site_references': len(self.sticky_sites),
+            'hippo_events': len(self.hippo_events),
+        }
+
+
+async def gather_group_references(group: Group) -> GroupRefs:
+    """Collect every document referencing `group`: membership edges, group
+    storages (+ their volumes), the group's SlurmAccounts across all sites
+    and their associations, sites holding bare-DocRef sticky/default
+    references (to the group or its accounts), and HippoEvents targeting
+    the group."""
+    memberships = await GroupMembership.find(
+        GroupMembership.group.id == group.id,
+    ).to_list()
+
+    storages = await Storage.find(Storage.group.id == group.id).to_list()
+    volume_ids = {
+        vid for s in storages
+        if (vid := link_target_id(s.volume)) is not None
+    }
+    storage_volumes = (
+        await StorageVolume.find(In(StorageVolume.id, list(volume_ids)))
+        .to_list()
+        if volume_ids else []
+    )
+
+    slurm_accounts = await SlurmAccount.find(
+        SlurmAccount.group.id == group.id,
+    ).to_list()
+    acct_ids = {a.id for a in slurm_accounts}
+    slurm_associations = (
+        await SlurmAssociation.find(
+            In(SlurmAssociation.account.id, list(acct_ids)),
+        ).to_list()
+        if acct_ids else []
+    )
+
+    # Sticky/default references are bare DocRef ObjectIds inside embedded
+    # settings — invisible to link queries, so scan the (few) Site docs.
+    sticky_sites = [
+        site for site in await Site.find_all().to_list()
+        if group.id in set(site.group.sticky)
+        or (acct_ids & set(site.slurm.sticky))
+        or site.slurm.default_account in acct_ids
+    ]
+
+    hippo_events = await HippoEvent.find(
+        HippoEvent.target_groups.id == group.id,
+    ).to_list()
+
+    return GroupRefs(
+        memberships=memberships,
+        storages=storages, storage_volumes=storage_volumes,
+        slurm_accounts=slurm_accounts,
+        slurm_associations=slurm_associations,
+        sticky_sites=sticky_sites, hippo_events=hippo_events,
+    )

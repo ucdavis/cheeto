@@ -611,7 +611,7 @@ class ExportSympaEmails(Operation):
 # ---------------------------------------------------------------------------
 
 
-class RemoveSite(Operation):
+class DeleteSite(Operation):
     """Remove a site and every per-site record that links to it.
 
     Beanie has no reverse cascade, so each linking collection
@@ -621,7 +621,7 @@ class RemoveSite(Operation):
     commits atomically.
     """
 
-    op_name = 'remove_site'
+    op_name = 'delete_site'
 
     def __init__(
         self,
@@ -629,9 +629,11 @@ class RemoveSite(Operation):
         author: User | None,
         *,
         sitename: str,
+        reason: str,
     ) -> None:
         super().__init__(client, author)
         self.sitename = sitename
+        self.reason = reason
         self._deleted: dict[str, int] = {}
 
     async def execute(self, session: AsyncClientSession) -> dict[str, int]:
@@ -665,4 +667,5 @@ class RemoveSite(Operation):
         return deleted
 
     def describe(self) -> dict[str, Any]:
-        return {'sitename': self.sitename, **self._deleted}
+        return {'sitename': self.sitename, 'reason': self.reason,
+                **self._deleted}

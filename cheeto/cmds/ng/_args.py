@@ -157,6 +157,27 @@ def yaml_args(parser: ArgParser):
                         help='Output as YAML to stdout')
 
 
+def confirm_typed(console, kind: str, name: str, force: bool = False) -> bool:
+    """Typed-name confirmation for destructive commands: the operator must
+    re-type the object's exact name. `force=True` skips the prompt.
+    Returns False (after printing the abort) on mismatch or EOF/interrupt."""
+    if force:
+        return True
+    console.print(
+        f'[bold red]DANGER:[/] this permanently deletes {kind} '
+        f'[bold]{name}[/] and its references.'
+    )
+    try:
+        answer = input(f"Type the {kind}'s name to confirm: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print('\n[yellow]Aborted[/]')
+        return False
+    if answer != name:
+        console.print('[yellow]Name mismatch — aborted[/]')
+        return False
+    return True
+
+
 async def run_per_target(console, targets, fn, *,
                          ok: str = 'done') -> int:
     """Drive a multi-target command: `await fn(target)` for each target,

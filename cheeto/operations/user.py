@@ -28,7 +28,11 @@ from ..queries.access_status import (
     find_status_group,
     resolve_status_name,
 )
-from ..queries.user import find_redundant_site_statuses, find_users
+from ..queries.user import (
+    find_redundant_site_statuses,
+    find_users,
+    gather_user_references,
+)
 from .base import Operation
 from .storage import _provision_home_storage
 
@@ -924,3 +928,145 @@ class ClearRedundantSiteStatuses(Operation):
 
     def describe(self) -> dict[str, Any]:
         return {'cleared': self._cleared}
+
+
+class DeleteUser(Operation):
+    """Delete a user and every document that references them: SSH keys,
+    site memberships, group-membership edges (per-doc deletes, so the LDAP
+    dirty hooks refresh the affected groups), coordinator seats on
+    SlurmAccounts, HippoEvent target links (nulled; the string twin
+    preserves the audit trail), the personal group, and — only with
+    `cascade_storage=True` — the user's Storage records and their volumes.
+    History.author links are deliberately left in place. The user's LDAP
+    entries persist until the next prune.
+    """
+
+    op_name = 'delete_user'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        name: str,
+        reason: str,
+        cascade_storage: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        self.name = name
+        self.reason = reason
+        self.cascade_storage = cascade_storage
+        self._counts: dict[str, int] = {}
+        self._uid: int | None = None
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        user = await User.find_one(User.name == self.name)
+        if user is None:
+            raise ValueError(f'User {self.name} does not exist')
+        self._uid = user.uid
+
+        refs = await gather_user_references(user)
+        if refs.storages and not self.cascade_storage:
+            names = ', '.join(sorted(s.name for s in refs.storages))
+            raise ValueError(
+                f'User {self.name} still owns storage records ({names}); '
+                f'pass cascade_storage/--force to delete them too'
+            )
+
+        for key in refs.ssh_keys:
+            await key.delete(session=session)
+        for usi in refs.usis:
+            await usi.delete(session=session)
+        for edge in refs.memberships:
+            await edge.delete(session=session)
+        for storage in refs.storages:
+            await storage.delete(session=session)
+        for volume in refs.storage_volumes:
+            await volume.delete(session=session)
+        for acct in refs.coordinator_accounts:
+            acct.coordinators = [
+                c for c in acct.coordinators
+                if link_target_id(c) != user.id
+            ]
+            await acct.save(session=session)
+        for event in refs.hippo_events:
+            event.target_user = None
+            await event.save(session=session)
+
+        if refs.personal_group is not None:
+            for site in await Site.find_all().to_list():
+                if refs.personal_group.id in set(site.group.sticky):
+                    site.group.sticky = [
+                        g for g in site.group.sticky
+                        if g != refs.personal_group.id
+                    ]
+                    await site.save(session=session)
+            await refs.personal_group.delete(session=session)
+
+        await user.delete(session=session)
+        self._counts = refs.counts()
+        return dict(self._counts)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'username': self.name,
+            'uid': self._uid,
+            'reason': self.reason,
+            'cascade_storage': self.cascade_storage,
+            **self._counts,
+        }
+
+
+class ClearUserExpiry(Operation):
+    """Null out a user's expiration: the global `User.expires_at` (which
+    projects to LDAP shadowExpire and blocks login when past), or the
+    per-site `UserSiteInfo.expires_at` when `site` is given."""
+
+    op_name = 'clear_user_expiry'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        name: str,
+        site: str | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.name = name
+        self.site = site
+        self._cleared_from: datetime | None = None
+
+    async def execute(self, session: AsyncClientSession) -> None:
+        user = await User.find_one(User.name == self.name)
+        if user is None:
+            raise ValueError(f'User {self.name} does not exist')
+
+        if self.site is None:
+            self._cleared_from = user.expires_at
+            user.expires_at = None
+            await user.save(session=session)
+            return
+
+        site = await Site.find_one(Site.name == self.site)
+        if site is None:
+            raise ValueError(f'Site {self.site} does not exist')
+        usi = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site.id,
+        )
+        if usi is None:
+            raise ValueError(f'User {self.name} not on site {self.site}')
+        self._cleared_from = usi.expires_at
+        usi.expires_at = None
+        await usi.save(session=session)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'username': self.name,
+            'site': self.site,
+            'cleared_from': (
+                self._cleared_from.isoformat()
+                if self._cleared_from is not None else None
+            ),
+        }

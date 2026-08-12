@@ -22,10 +22,12 @@ from ...operations import (
     AddUserSshKey,
     ClearOffboardingSiteStatuses,
     ClearRedundantSiteStatuses,
+    ClearUserExpiry,
     CreateClassUsers,
     CreateSharedUser,
     CreateSystemUser,
     CreateUser,
+    DeleteUser,
     RemoveUserAccess,
     RemoveUserSshKey,
     SetUserPassword,
@@ -36,6 +38,7 @@ from ...operations import (
 )
 from ...queries import (
     effective_access_links,
+    gather_user_references,
     find_redundant_site_statuses,
     find_site_by_name,
     find_user,
@@ -50,6 +53,7 @@ from ...yaml import print_yaml
 from . import parent
 from ._args import (
     EXPIRABLE_CLEAR,
+    confirm_typed,
     email_args,
     expirable_value,
     fullname_args,
@@ -360,6 +364,95 @@ parent('ng', 'user', 'new', help='Create new users')
 parent('ng', 'user', 'set', help='Set user properties')
 parent('ng', 'user', 'add', help='Attach access, keys, sites, comments')
 parent('ng', 'user', 'remove', help='Detach access, keys, sites')
+
+
+@user_args.apply(required=True)
+@commands.register('ng', 'user', 'delete',
+                   help='Delete a user and all of their references (cascade)')
+async def user_delete(args: Namespace):
+    console = Console()
+    user = await find_user(name=args.user)
+    if user is None:
+        console.print(f'[red]User {args.user} not found[/]')
+        return 1
+
+    refs = await gather_user_references(user)
+    table = Table(
+        title=f'Records linked to [bold]{args.user}[/] (will be deleted)',
+        show_header=False, box=None, pad_edge=False, padding=(0, 1),
+    )
+    table.add_column(style='cyan', no_wrap=True)
+    table.add_column(justify='right')
+    for label, n in refs.counts().items():
+        table.add_row(label, str(n))
+    console.print(table)
+
+    if refs.storages and not args.force:
+        names = ', '.join(sorted(st.name for st in refs.storages))
+        console.print(
+            f'[yellow]This user owns {len(refs.storages)} storage '
+            f'record(s) ({names}) — deleting them removes the exported '
+            f'mount/quota configuration.[/]'
+        )
+        try:
+            answer = input(
+                'Also delete these storage records? [y/N]: '
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[yellow]Aborted[/]')
+            return 1
+        if answer != 'y':
+            console.print(
+                '[yellow]Aborted — storage records cannot be left behind '
+                '(their owner link would dangle)[/]'
+            )
+            return 1
+
+    if not confirm_typed(console, 'user', args.user, force=args.force):
+        return 1
+
+    try:
+        await DeleteUser.run(
+            args.db, args.author,
+            name=args.user, reason=args.reason, cascade_storage=True,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(f'Deleted user [green]{args.user}[/]')
+    console.print(
+        '[dim]LDAP entries persist until the next '
+        '`ng ldap prune`/site sync.[/]'
+    )
+
+
+@user_delete.args()
+def _(parser: ArgParser):
+    parser.add_argument('--reason', required=True,
+                        help='Why the user is being deleted (recorded in '
+                             'History)')
+    parser.add_argument('--force', '-f', action='store_true', default=False,
+                        help='Skip all confirmation prompts (cascades '
+                             'storage records)')
+
+
+@site_args.apply()
+@user_args.apply(required=True, multiple=True)
+@commands.register('ng', 'user', 'remove', 'expiry',
+                   help='Clear expires_at for one or more users '
+                        '(global, or per-site with --site)')
+async def user_remove_expiry(args: Namespace):
+    console = Console()
+
+    async def _one(name: str) -> None:
+        await ClearUserExpiry.run(
+            args.db, args.author, name=name, site=args.site,
+        )
+
+    scope = f'({args.site})' if args.site else '(global)'
+    return await run_per_target(
+        console, args.user, _one, ok=f'expiry cleared {scope}',
+    )
 
 
 @user_args.apply(required=True)

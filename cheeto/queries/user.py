@@ -16,7 +16,10 @@ from beanie.operators import In
 from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
+from ..models.hippo import HippoEvent
 from ..models.site import Site
+from ..models.slurm import SlurmAccount
+from ..models.storage import Storage, StorageVolume
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
 from .access_status import resolve_access_names, resolve_status_name
@@ -409,3 +412,80 @@ def root_authorized_keys_text(blocks: list[RootKeyBlock]) -> str:
         lines.append(f'# {block.name} <{block.email}>')
         lines.extend(block.entries)
     return '\n'.join(lines) + '\n' if lines else ''
+
+
+@dataclass
+class UserRefs:
+    """Every document that references a User — the single source of truth
+    shared by `DeleteUser`'s cascade and the CLI's deletion preview, so the
+    two can never drift."""
+
+    usis: list
+    memberships: list
+    ssh_keys: list
+    storages: list
+    storage_volumes: list
+    coordinator_accounts: list
+    hippo_events: list
+    personal_group: Group | None
+
+    def counts(self) -> dict[str, int]:
+        return {
+            'site_memberships': len(self.usis),
+            'group_memberships': len(self.memberships),
+            'ssh_keys': len(self.ssh_keys),
+            'storages': len(self.storages),
+            'storage_volumes': len(self.storage_volumes),
+            'slurm_coordinator_seats': len(self.coordinator_accounts),
+            'hippo_events': len(self.hippo_events),
+            'personal_group': 1 if self.personal_group is not None else 0,
+        }
+
+
+async def gather_user_references(user: User) -> UserRefs:
+    """Collect every document referencing `user`, including storages owned
+    by the user or belonging to their personal group, those storages'
+    volumes, and SlurmAccounts where the user holds a coordinator seat
+    (no index on coordinators — filtered in Python via link_target_id)."""
+    usis = await UserSiteInfo.find(UserSiteInfo.user.id == user.id).to_list()
+    memberships = await GroupMembership.find(
+        GroupMembership.user.id == user.id,
+    ).to_list()
+    ssh_keys = await SshKey.find(SshKey.user.id == user.id).to_list()
+
+    personal_group = await Group.find_one(
+        Group.name == user.name, Group.type == 'user',
+    )
+
+    storages = await Storage.find(Storage.owner.id == user.id).to_list()
+    if personal_group is not None:
+        seen = {s.id for s in storages}
+        group_storages = await Storage.find(
+            Storage.group.id == personal_group.id,
+        ).to_list()
+        storages.extend(s for s in group_storages if s.id not in seen)
+    volume_ids = {
+        vid for s in storages
+        if (vid := link_target_id(s.volume)) is not None
+    }
+    storage_volumes = (
+        await StorageVolume.find(In(StorageVolume.id, list(volume_ids)))
+        .to_list()
+        if volume_ids else []
+    )
+
+    coordinator_accounts = [
+        acct for acct in await SlurmAccount.find_all().to_list()
+        if any(link_target_id(c) == user.id for c in acct.coordinators)
+    ]
+
+    hippo_events = await HippoEvent.find(
+        HippoEvent.target_user.id == user.id,
+    ).to_list()
+
+    return UserRefs(
+        usis=usis, memberships=memberships, ssh_keys=ssh_keys,
+        storages=storages, storage_volumes=storage_volumes,
+        coordinator_accounts=coordinator_accounts,
+        hippo_events=hippo_events, personal_group=personal_group,
+    )

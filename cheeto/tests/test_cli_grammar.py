@@ -5,6 +5,7 @@ Guards the CLI normalization against drift.
 
 Grammar:
   new    — create a standalone document (`user new class`, `slurm new qos`)
+  delete — destroy a document and cascade its references (`user delete`)
   add    — attach a relationship or sub-resource (`group add member`)
   remove — detach one (`user remove access`)
   set    — overwrite a single property (`user set status`)
@@ -18,7 +19,8 @@ Grammar:
 import argparse
 
 VERBS = {
-    'new', 'add', 'remove', 'set', 'edit', 'show', 'list', 'sync', 'export',
+    'new', 'delete', 'add', 'remove', 'set', 'edit', 'show', 'list',
+    'sync', 'export',
 }
 
 # Operational task commands that don't map onto the CRUD verbs. Keep this
