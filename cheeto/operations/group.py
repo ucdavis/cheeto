@@ -16,7 +16,9 @@ from ..constants import (
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
 from ..models.site import Site
+from ..models.base import link_target_id
 from ..models.user import User
+from ..queries.group import find_group_by_name, gather_group_references
 from .base import Operation
 
 
@@ -319,4 +321,105 @@ class SeedAccessStatusGroups(Operation):
             'access_count': len(self.access_groups),
             'status_count': len(self.status_groups),
             'created': dict(self._created),
+        }
+
+
+class DeleteGroup(Operation):
+    """Delete a group and every document that references it: membership
+    edges (per-doc deletes fire the LDAP dirty hooks), the group's
+    SlurmAccounts and their associations (always cascaded — QOSes and
+    partitions are site-owned and survive), sticky/default DocRefs on
+    Sites, HippoEvent target links (pulled), and — only with
+    `cascade_storage=True` — group storages and their volumes.
+
+    Refuses AccessGroup/StatusGroup rows (seeded infrastructure) and
+    `type='user'` personal groups (delete the user instead). LDAP entries
+    persist until the next prune; Slurm state until the next slurm sync.
+    """
+
+    op_name = 'delete_group'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        name: str,
+        reason: str,
+        cascade_storage: bool = False,
+    ) -> None:
+        super().__init__(client, author)
+        self.name = name
+        self.reason = reason
+        self.cascade_storage = cascade_storage
+        self._counts: dict[str, int] = {}
+        self._gid: int | None = None
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, int]:
+        group = await find_group_by_name(self.name)
+        if group is None:
+            raise ValueError(f'Group {self.name} does not exist')
+        if isinstance(group, (AccessGroup, StatusGroup)):
+            raise ValueError(
+                f'Group {self.name} is a seeded access/status group and '
+                f'cannot be deleted'
+            )
+        if group.type == 'user':
+            raise ValueError(
+                f'Group {self.name} is a personal group; delete the user '
+                f'instead'
+            )
+        self._gid = group.gid
+
+        refs = await gather_group_references(group)
+        if refs.storages and not self.cascade_storage:
+            names = ', '.join(sorted(s.name for s in refs.storages))
+            raise ValueError(
+                f'Group {self.name} still has storage records ({names}); '
+                f'pass cascade_storage/--force to delete them too'
+            )
+
+        acct_ids = {a.id for a in refs.slurm_accounts}
+        for site in refs.sticky_sites:
+            site.group.sticky = [
+                g for g in site.group.sticky if g != group.id
+            ]
+            # Clear default_account BEFORE filtering sticky would orphan it:
+            # the site validator requires default_account to appear in
+            # sticky, so drop both together in one save.
+            if site.slurm.default_account in acct_ids:
+                site.slurm.default_account = None
+            site.slurm.sticky = [
+                a for a in site.slurm.sticky if a not in acct_ids
+            ]
+            await site.save(session=session)
+
+        for assoc in refs.slurm_associations:
+            await assoc.delete(session=session)
+        for acct in refs.slurm_accounts:
+            await acct.delete(session=session)
+        for edge in refs.memberships:
+            await edge.delete(session=session)
+        for storage in refs.storages:
+            await storage.delete(session=session)
+        for volume in refs.storage_volumes:
+            await volume.delete(session=session)
+        for event in refs.hippo_events:
+            event.target_groups = [
+                g for g in event.target_groups
+                if link_target_id(g) != group.id
+            ]
+            await event.save(session=session)
+
+        await group.delete(session=session)
+        self._counts = refs.counts()
+        return dict(self._counts)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'groupname': self.name,
+            'gid': self._gid,
+            'reason': self.reason,
+            'cascade_storage': self.cascade_storage,
+            **self._counts,
         }

@@ -104,15 +104,27 @@ def site_args(parser: ArgParser, required: bool = False):
 
 
 @arggroup('user')
-def user_args(parser: ArgParser, required: bool = False):
-    parser.add_argument('--user', '-u', default=None, required=required,
-                        help='Username')
+def user_args(parser: ArgParser, required: bool = False,
+              multiple: bool = False):
+    if multiple:
+        parser.add_argument('--user', '-u', nargs='+', default=None,
+                            required=required, metavar='USER',
+                            help='Username(s)')
+    else:
+        parser.add_argument('--user', '-u', default=None, required=required,
+                            help='Username')
 
 
 @arggroup('group')
-def group_args(parser: ArgParser, required: bool = False):
-    parser.add_argument('--group', '-g', default=None, required=required,
-                        help='Group name')
+def group_args(parser: ArgParser, required: bool = False,
+               multiple: bool = False):
+    if multiple:
+        parser.add_argument('--group', '-g', nargs='+', default=None,
+                            required=required, metavar='GROUP',
+                            help='Group name(s)')
+    else:
+        parser.add_argument('--group', '-g', default=None, required=required,
+                            help='Group name')
 
 
 @arggroup('email')
@@ -143,3 +155,49 @@ def password_args(parser: ArgParser):
 def yaml_args(parser: ArgParser):
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML to stdout')
+
+
+def confirm_typed(console, kind: str, name: str, force: bool = False) -> bool:
+    """Typed-name confirmation for destructive commands: the operator must
+    re-type the object's exact name. `force=True` skips the prompt.
+    Returns False (after printing the abort) on mismatch or EOF/interrupt."""
+    if force:
+        return True
+    console.print(
+        f'[bold red]DANGER:[/] this permanently deletes {kind} '
+        f'[bold]{name}[/] and its references.'
+    )
+    try:
+        answer = input(f"Type the {kind}'s name to confirm: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        console.print('\n[yellow]Aborted[/]')
+        return False
+    if answer != name:
+        console.print('[yellow]Name mismatch — aborted[/]')
+        return False
+    return True
+
+
+async def run_per_target(console, targets, fn, *,
+                         ok: str = 'done') -> int:
+    """Drive a multi-target command: `await fn(target)` for each target,
+    continuing past per-target ValueErrors. Each Operation.run() is its
+    own transaction + History row, so one target's failure never affects
+    another's write. Prints one line per target and a failure summary;
+    returns 1 if any target failed, else 0."""
+    failed: list[str] = []
+    for target in targets:
+        try:
+            await fn(target)
+        except ValueError as e:
+            console.print(f'  [red]{target}: {e}[/]')
+            failed.append(target)
+        else:
+            console.print(f'  [green]{target}[/]: {ok}')
+    if failed:
+        console.print(
+            f'[red]{len(failed)}/{len(targets)} failed:[/] '
+            f'{", ".join(failed)}'
+        )
+        return 1
+    return 0

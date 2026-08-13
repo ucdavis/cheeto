@@ -35,13 +35,26 @@ from ...queries.storage import (
     list_site_volumes,
     mount_mechanism_label,
 )
+from . import parent
 from ._args import group_args, site_args, user_args, yaml_args
 
 
-@commands.register('ng', 'storage',
-                   help='Storage operations')
-def storage_cmd(args: Namespace):
-    pass
+parent('ng', 'storage', help='Storage operations')
+parent('ng', 'storage', 'new',
+       help='Create storage records, volumes, static mounts, and automount '
+            'maps')
+parent('ng', 'storage', 'list',
+       help='List storage-related records at a site')
+parent('ng', 'storage', 'show',
+       help='Show a storage-related record in detail')
+parent('ng', 'storage', 'set',
+       help='Set mount mechanisms on storages')
+parent('ng', 'storage', 'add',
+       help='Add sub-records (volume quota allocations)')
+parent('ng', 'storage', 'remove',
+       help='Remove sub-records (volume quota allocations)')
+parent('ng', 'storage', 'edit',
+       help='Edit sub-records (volume quota allocations)')
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +167,7 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage list`
+# `ng storage list storages`
 # ---------------------------------------------------------------------------
 
 
@@ -184,10 +197,10 @@ def _storage_to_dict(s: Storage) -> dict:
 @user_args.apply()
 @group_args.apply()
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'list',
+@commands.register('ng', 'storage', 'list', 'storages',
                    help='List storage records at a site, optionally filtered '
                         'by owner (--user), group, host, and/or category')
-async def storage_list(args: Namespace):
+async def storage_list_storages(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -251,7 +264,7 @@ async def storage_list(args: Namespace):
     console.print(table)
 
 
-@storage_list.args()
+@storage_list_storages.args()
 def _(parser: ArgParser):
     parser.add_argument('--category', default=None,
                         choices=list(STORAGE_CATEGORIES))
@@ -260,7 +273,7 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage show`
+# `ng storage show storage`
 # ---------------------------------------------------------------------------
 
 
@@ -283,7 +296,7 @@ def _prop(fn):
 
 def _alloc_lines(volume: StorageVolume) -> str:
     """One line per allocation, prefixed with its 0-based index — the key
-    used by `storage volume alloc remove/edit`."""
+    used by `storage remove/edit allocation`."""
     return '\n'.join(
         f'[cyan]\\[{i}][/] {a.quota}  [dim]{a.comment}[/]'
         for i, a in enumerate(volume.allocations)
@@ -354,8 +367,8 @@ def _render_static_subtable(sm: StaticMount) -> Table:
 
 def _volume_to_dict(volume: StorageVolume, *, n_children: int | None = None) -> dict:
     """Plain dict of a StorageVolume for --yaml output (mirrors the show panel).
-    `parent` resolves to a name only when the link was fetched (volume list);
-    `volume show` reports the child count via `n_children`."""
+    `parent` resolves to a name only when the link was fetched (list volumes);
+    `show volume` reports the child count via `n_children`."""
     d = {
         'name': volume.name,
         'backend': volume.backend,
@@ -460,10 +473,10 @@ def _render_storage_panel(storage: Storage) -> Panel:
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'show',
+@commands.register('ng', 'storage', 'show', 'storage',
                    help='Show a storage record in full detail, including its '
                         'backing volume and mount mechanism')
-async def storage_show(args: Namespace):
+async def storage_show_storage(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -482,7 +495,7 @@ async def storage_show(args: Namespace):
     console.print(_render_storage_panel(storage))
 
 
-@storage_show.args()
+@storage_show_storage.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
     parser.add_argument('--category', default=None,
@@ -492,12 +505,12 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage set-mount`
+# `ng storage set mount`
 # ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'set-mount',
+@commands.register('ng', 'storage', 'set', 'mount',
                    help="Set, change, or clear a storage's mount mechanism")
 async def storage_set_mount(args: Namespace):
     console = Console()
@@ -519,7 +532,7 @@ async def storage_set_mount(args: Namespace):
 
 @storage_set_mount.args()
 def _(parser: ArgParser):
-    parser.add_argument('--name', required=True, help='Storage name')
+    parser.add_argument('name', help='Storage name')
     parser.add_argument('--category', default=None,
                         choices=list(STORAGE_CATEGORIES),
                         help='Disambiguate when a name exists in multiple '
@@ -562,7 +575,7 @@ async def storage_rehome(args: Namespace):
     if default_id is None:
         console.print(
             f'[red]Site {args.site} has no default home volume; set one with '
-            f'`ng site storage set-defaults`[/]'
+            f'`ng site set storage-defaults`[/]'
         )
         return 1
 
@@ -621,21 +634,15 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage volume ...`
+# `ng storage new volume`
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'storage', 'volume',
-                   help='Storage volume (backing entity) operations')
-def storage_volume_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'volume', 'new',
+@commands.register('ng', 'storage', 'new', 'volume',
                    help='Create a storage volume (ZFS dataset / QuoByte '
                         'volume record)')
-async def storage_volume_new(args: Namespace):
+async def storage_new_volume(args: Namespace):
     console = Console()
     try:
         volume = await CreateStorageVolume.run(
@@ -656,7 +663,7 @@ async def storage_volume_new(args: Namespace):
     )
 
 
-@storage_volume_new.args()
+@storage_new_volume.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
     parser.add_argument('--backend', required=True,
@@ -670,11 +677,16 @@ def _(parser: ArgParser):
     parser.add_argument('--export-ranges', nargs='+', default=None)
 
 
+# ---------------------------------------------------------------------------
+# `ng storage list volumes` / `ng storage show volume`
+# ---------------------------------------------------------------------------
+
+
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'volume', 'list',
+@commands.register('ng', 'storage', 'list', 'volumes',
                    help='List storage volumes at a site')
-async def storage_volume_list(args: Namespace):
+async def storage_list_volumes(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -701,9 +713,9 @@ async def storage_volume_list(args: Namespace):
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'volume', 'show',
+@commands.register('ng', 'storage', 'show', 'volume',
                    help='Show one storage volume')
-async def storage_volume_show(args: Namespace):
+async def storage_show_volume(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -745,21 +757,21 @@ async def storage_volume_show(args: Namespace):
     ))
 
 
-@storage_volume_list.args()
-def _(parser: ArgParser):
-    pass
-
-
-@storage_volume_show.args()
+@storage_show_volume.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
 
 
+# ---------------------------------------------------------------------------
+# `ng storage set volume-mounts`
+# ---------------------------------------------------------------------------
+
+
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'volume', 'set-mounts',
+@commands.register('ng', 'storage', 'set', 'volume-mounts',
                    help='Set the mount mechanism on every storage backed by a '
                         "volume's full descendant subtree")
-async def storage_volume_set_mounts(args: Namespace):
+async def storage_set_volume_mounts(args: Namespace):
     console = Console()
     try:
         result = await SetVolumeStorageMounts.run(
@@ -779,7 +791,7 @@ async def storage_volume_set_mounts(args: Namespace):
         console.print(f'[yellow]warning:[/] {warning}')
 
 
-@storage_volume_set_mounts.args()
+@storage_set_volume_mounts.args()
 def _(parser: ArgParser):
     parser.add_argument('name', help='Parent volume name (subtree root)')
     mech = parser.add_mutually_exclusive_group(required=True)
@@ -792,14 +804,8 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage volume alloc ...`
+# `ng storage add/remove/edit allocation`
 # ---------------------------------------------------------------------------
-
-
-@commands.register('ng', 'storage', 'volume', 'alloc',
-                   help="Manage a volume's quota allocations")
-def storage_volume_alloc_cmd(args: Namespace):
-    pass
 
 
 def _print_allocs(console: Console, volume: StorageVolume) -> None:
@@ -817,9 +823,9 @@ def _print_allocs(console: Console, volume: StorageVolume) -> None:
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'volume', 'alloc', 'add',
+@commands.register('ng', 'storage', 'add', 'allocation',
                    help='Add a quota allocation to a volume')
-async def storage_volume_alloc_add(args: Namespace):
+async def storage_add_allocation(args: Namespace):
     console = Console()
     try:
         volume = await AddVolumeAllocation.run(
@@ -837,7 +843,7 @@ async def storage_volume_alloc_add(args: Namespace):
     _print_allocs(console, volume)
 
 
-@storage_volume_alloc_add.args()
+@storage_add_allocation.args()
 def _(parser: ArgParser):
     parser.add_argument('name', help='Volume name')
     parser.add_argument('--quota', required=True,
@@ -847,9 +853,9 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'volume', 'alloc', 'remove',
+@commands.register('ng', 'storage', 'remove', 'allocation',
                    help='Remove a quota allocation from a volume by index')
-async def storage_volume_alloc_remove(args: Namespace):
+async def storage_remove_allocation(args: Namespace):
     console = Console()
     try:
         volume = await RemoveVolumeAllocation.run(
@@ -866,18 +872,19 @@ async def storage_volume_alloc_remove(args: Namespace):
     _print_allocs(console, volume)
 
 
-@storage_volume_alloc_remove.args()
+@storage_remove_allocation.args()
 def _(parser: ArgParser):
     parser.add_argument('name', help='Volume name')
     parser.add_argument('--index', type=int, required=True,
-                        help='0-based allocation index (see `volume show`)')
+                        help='0-based allocation index (see `storage show '
+                             'volume`)')
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'volume', 'alloc', 'edit',
+@commands.register('ng', 'storage', 'edit', 'allocation',
                    help="Edit a quota allocation's quota (and optionally its "
                         'comment) by index')
-async def storage_volume_alloc_edit(args: Namespace):
+async def storage_edit_allocation(args: Namespace):
     console = Console()
     try:
         volume = await EditVolumeAllocation.run(
@@ -895,31 +902,26 @@ async def storage_volume_alloc_edit(args: Namespace):
     _print_allocs(console, volume)
 
 
-@storage_volume_alloc_edit.args()
+@storage_edit_allocation.args()
 def _(parser: ArgParser):
     parser.add_argument('name', help='Volume name')
     parser.add_argument('--index', type=int, required=True,
-                        help='0-based allocation index (see `volume show`)')
+                        help='0-based allocation index (see `storage show '
+                             'volume`)')
     parser.add_argument('--quota', required=True, help='New quota (e.g. 2T)')
     parser.add_argument('--comment', default=None,
                         help='Optionally relabel the allocation')
 
 
 # ---------------------------------------------------------------------------
-# `ng storage static-mount ...`
+# `ng storage new static-mount` / `ng storage list static-mounts`
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'storage', 'static-mount',
-                   help='Static (fstab-style) mount operations')
-def storage_static_mount_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'static-mount', 'new',
+@commands.register('ng', 'storage', 'new', 'static-mount',
                    help='Create a static mount record')
-async def static_mount_new(args: Namespace):
+async def storage_new_static_mount(args: Namespace):
     console = Console()
     try:
         mount = await CreateStaticMount.run(
@@ -938,7 +940,7 @@ async def static_mount_new(args: Namespace):
     )
 
 
-@static_mount_new.args()
+@storage_new_static_mount.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
     parser.add_argument('--fstype', required=True,
@@ -956,9 +958,9 @@ def _(parser: ArgParser):
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'static-mount', 'list',
+@commands.register('ng', 'storage', 'list', 'static-mounts',
                    help='List static mounts at a site')
-async def static_mount_list(args: Namespace):
+async def storage_list_static_mounts(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -983,20 +985,14 @@ async def static_mount_list(args: Namespace):
 
 
 # ---------------------------------------------------------------------------
-# `ng storage automount-map ...`
+# `ng storage new automount-map` / `list automount-maps` / `show automount-map`
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'storage', 'automount-map',
-                   help='Automount table (autofs map) operations')
-def storage_automount_map_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'storage', 'automount-map', 'new',
+@commands.register('ng', 'storage', 'new', 'automount-map',
                    help='Create an automount map (autofs table)')
-async def automount_map_new(args: Namespace):
+async def storage_new_automount_map(args: Namespace):
     console = Console()
     try:
         amap = await CreateAutomountMap.run(
@@ -1013,7 +1009,7 @@ async def automount_map_new(args: Namespace):
     )
 
 
-@automount_map_new.args()
+@storage_new_automount_map.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
     parser.add_argument('--prefix', required=True,
@@ -1024,9 +1020,9 @@ def _(parser: ArgParser):
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'automount-map', 'list',
+@commands.register('ng', 'storage', 'list', 'automount-maps',
                    help='List automount maps at a site')
-async def automount_map_list(args: Namespace):
+async def storage_list_automount_maps(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -1053,10 +1049,10 @@ async def automount_map_list(args: Namespace):
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'storage', 'automount-map', 'show',
+@commands.register('ng', 'storage', 'show', 'automount-map',
                    help='Show an automount map and its entries (the storages '
                         'mounted under it)')
-async def automount_map_show(args: Namespace):
+async def storage_show_automount_map(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -1102,6 +1098,6 @@ async def automount_map_show(args: Namespace):
     console.print(table)
 
 
-@automount_map_show.args()
+@storage_show_automount_map.args()
 def _(parser: ArgParser):
     parser.add_argument('name')

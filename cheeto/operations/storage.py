@@ -247,7 +247,7 @@ async def _resolve_home_parent(
         raise ValueError(
             f'Site {site.name} has no default home volume; pass '
             f'parent_volume/--parent-volume or host/--host, or set one '
-            f'with `ng site storage set-defaults`'
+            f'with `ng site set storage-defaults`'
         )
     parent = await StorageVolume.get(default_id)
     if parent is None:
@@ -788,7 +788,7 @@ class RehomeUser(Operation):
         if default_id is None:
             raise ValueError(
                 f'Site {self.site_name} has no default home volume; set one '
-                f'with `ng site storage set-defaults`'
+                f'with `ng site set storage-defaults`'
             )
         if link_target_id(current.volume.parent) == default_id:
             raise ValueError(

@@ -8,11 +8,14 @@ from .access_status import (
 )
 from .history import find_history
 from .group import (
+    GroupRefs,
     GroupRole,
     UserGroupRoles,
+    gather_group_references,
     effective_group_members,
     effective_user_groups,
     find_group_by_name,
+    find_groups,
     group_members_at_site,
     is_sticky_group,
     resolve_group_names,
@@ -43,6 +46,8 @@ from .storage import (
 )
 from .user import (
     RootKeyBlock,
+    UserRefs,
+    gather_user_references,
     effective_access_links,
     effective_status_link,
     find_redundant_site_statuses,

@@ -9,6 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .. import commands
+from . import parent
 from ...log import Console
 from ...models.site import Site
 from ...operations import (
@@ -20,7 +21,7 @@ from ...operations import (
     ExportPuppetStorage,
     ExportRootSSHKeys,
     ExportSympaEmails,
-    RemoveSite,
+    DeleteSite,
     RemoveSiteAlias,
     RemoveStickyGroup,
     RemoveStickySlurmAccount,
@@ -40,13 +41,22 @@ from ...queries import (
     site_to_puppet_legacy,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml, print_yaml
-from ._args import group_args, site_args
+from ._args import confirm_typed, group_args, run_per_target, site_args
 
 
-@commands.register('ng', 'site',
-                   help='Site operations')
-def site_cmd(args: Namespace):
-    pass
+# ---------------------------------------------------------------------------
+# Grammar parents: every `ng site` verb namespace is registered before its
+# leaves (ponderosa registrations execute top-to-bottom at import).
+# ---------------------------------------------------------------------------
+
+
+parent('ng', 'site', help='Site operations')
+parent('ng', 'site', 'add',
+       help='Attach aliases and sticky records to a site')
+parent('ng', 'site', 'remove',
+       help='Detach site sub-resources or delete a site', aliases=['rm'])
+parent('ng', 'site', 'set', help='Set site-level properties')
+parent('ng', 'site', 'sync', help='Site synchronization tasks')
 
 
 @site_args.apply(required=True)
@@ -67,7 +77,7 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng site list` / `ng site remove`
+# `ng site list` / `ng site remove site`
 # ---------------------------------------------------------------------------
 
 
@@ -94,10 +104,10 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'remove', aliases=['rm'],
-                   help='Remove a site and all of its per-site records '
+@commands.register('ng', 'site', 'delete',
+                   help='Delete a site and all of its per-site records '
                         '(cascade)')
-async def site_remove(args: Namespace):
+async def site_delete(args: Namespace):
     console = Console()
     site = await find_site_by_name(args.site)
     if site is None:
@@ -105,7 +115,6 @@ async def site_remove(args: Namespace):
         return 1
 
     counts = await count_site_dependents(site)
-    total = sum(counts.values())
     table = Table(
         title=f'Records linked to [bold]{args.site}[/] (will be deleted)',
         show_header=False, box=None, pad_edge=False, padding=(0, 1),
@@ -116,32 +125,24 @@ async def site_remove(args: Namespace):
         table.add_row(label, str(n))
     console.print(table)
 
-    if not args.force:
-        console.print(
-            f'[red]This permanently deletes site [bold]{args.site}[/] and '
-            f'the {total} record(s) above.[/]'
-        )
-        try:
-            answer = input(f'Remove site {args.site}? [y/N]: ').strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            console.print('\n[red]Aborted.[/]')
-            return 1
-        if answer != 'y':
-            console.print('[red]Aborted.[/]')
-            return 1
+    if not confirm_typed(console, 'site', args.site, force=args.force):
+        return 1
 
-    result = await RemoveSite.run(
-        args.db, args.author, sitename=args.site,
+    result = await DeleteSite.run(
+        args.db, args.author, sitename=args.site, reason=args.reason,
     )
     deleted = sum(result.values())
     console.print(
-        f'Removed site [green]{args.site}[/] and {deleted} associated '
+        f'Deleted site [green]{args.site}[/] and {deleted} associated '
         f'record(s)'
     )
 
 
-@site_remove.args()
+@site_delete.args()
 def _(parser: ArgParser):
+    parser.add_argument('--reason', required=True,
+                        help='Why the site is being deleted (recorded in '
+                             'History)')
     parser.add_argument('--force', '-f', action='store_true', default=False,
                         help='Skip the confirmation prompt')
 
@@ -248,65 +249,56 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng site sticky` — manage Site.group.sticky and Site.slurm.sticky
+# `ng site {add,remove} sticky-group` — manage Site.group.sticky
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'site', 'sticky',
-                   help='Manage per-site sticky groups and slurm accounts')
-def site_sticky_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'site', 'sticky', 'add',
-                   help='Add a sticky group or slurm account to a site')
-def site_sticky_add_cmd(args: Namespace):
-    pass
-
-
-@commands.register('ng', 'site', 'sticky', 'remove',
-                   help='Remove a sticky group or slurm account from a site')
-def site_sticky_remove_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@group_args.apply(required=True)
-@commands.register('ng', 'site', 'sticky', 'add', 'group',
-                   help="Add a Group to site.group.sticky; every user at "
+@group_args.apply(required=True, multiple=True)
+@commands.register('ng', 'site', 'add', 'sticky-group',
+                   help="Add Groups to site.group.sticky; every user at "
                         "the site is then implicitly a member")
-async def site_sticky_add_group(args: Namespace):
+async def site_add_sticky_group(args: Namespace):
     console = Console()
-    await AddStickyGroup.run(
-        args.db, args.author,
-        sitename=args.site, groupname=args.group,
-    )
-    console.print(
-        f'Added [green]{args.group}[/] to [bold]{args.site}[/].group.sticky'
-    )
+
+    async def add(group: str):
+        await AddStickyGroup.run(
+            args.db, args.author,
+            sitename=args.site, groupname=group,
+        )
+
+    console.print(f'Adding to [bold]{args.site}[/].group.sticky:')
+    return await run_per_target(console, args.group, add, ok='added')
+
+
+@site_args.apply(required=True)
+@group_args.apply(required=True, multiple=True)
+@commands.register('ng', 'site', 'remove', 'sticky-group',
+                   help='Remove Groups from site.group.sticky')
+async def site_remove_sticky_group(args: Namespace):
+    console = Console()
+
+    async def remove(group: str):
+        await RemoveStickyGroup.run(
+            args.db, args.author,
+            sitename=args.site, groupname=group,
+        )
+
+    console.print(f'Removing from [bold]{args.site}[/].group.sticky:')
+    return await run_per_target(console, args.group, remove, ok='removed')
+
+
+# ---------------------------------------------------------------------------
+# `ng site {add,remove} sticky-slurm` — manage Site.slurm.sticky
+# ---------------------------------------------------------------------------
 
 
 @site_args.apply(required=True)
 @group_args.apply(required=True)
-@commands.register('ng', 'site', 'sticky', 'remove', 'group',
-                   help='Remove a Group from site.group.sticky')
-async def site_sticky_remove_group(args: Namespace):
-    console = Console()
-    await RemoveStickyGroup.run(
-        args.db, args.author,
-        sitename=args.site, groupname=args.group,
-    )
-    console.print(
-        f'Removed [yellow]{args.group}[/] from [bold]{args.site}[/].group.sticky'
-    )
-
-
-@site_args.apply(required=True)
-@group_args.apply(required=True)
-@commands.register('ng', 'site', 'sticky', 'add', 'slurm',
+@commands.register('ng', 'site', 'add', 'sticky-slurm',
                    help="Add a group's SlurmAccount to site.slurm.sticky; "
                         "every user at the site is then implicitly a slurmer")
-async def site_sticky_add_slurm(args: Namespace):
+async def site_add_sticky_slurm(args: Namespace):
     console = Console()
     await AddStickySlurmAccount.run(
         args.db, args.author,
@@ -318,7 +310,7 @@ async def site_sticky_add_slurm(args: Namespace):
     )
 
 
-@site_sticky_add_slurm.args()
+@site_add_sticky_slurm.args()
 def _(parser: ArgParser):
     parser.add_argument(
         '--default', action='store_true', default=False,
@@ -328,9 +320,9 @@ def _(parser: ArgParser):
 
 @site_args.apply(required=True)
 @group_args.apply(required=True)
-@commands.register('ng', 'site', 'sticky', 'remove', 'slurm',
+@commands.register('ng', 'site', 'remove', 'sticky-slurm',
                    help="Remove a group's SlurmAccount from site.slurm.sticky")
-async def site_sticky_remove_slurm(args: Namespace):
+async def site_remove_sticky_slurm(args: Namespace):
     console = Console()
     try:
         await RemoveStickySlurmAccount.run(
@@ -348,7 +340,7 @@ async def site_sticky_remove_slurm(args: Namespace):
     )
 
 
-@site_sticky_remove_slurm.args()
+@site_remove_sticky_slurm.args()
 def _(parser: ArgParser):
     parser.add_argument(
         '--clear-default', action='store_true', default=False,
@@ -357,122 +349,109 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng site alias` — manage Site.aliases
+# `ng site {add,remove} alias` — manage Site.aliases
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'site', 'alias',
-                   help='Manage a site\'s aliases (extra names it resolves by)')
-def site_alias_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'alias', 'add',
-                   help='Add an alias the site resolves by (name/fqdn/alias)')
-async def site_alias_add(args: Namespace):
+@commands.register('ng', 'site', 'add', 'alias',
+                   help='Add aliases the site resolves by (name/fqdn/alias)')
+async def site_add_alias(args: Namespace):
     console = Console()
-    try:
+
+    async def add(alias: str):
         await AddSiteAlias.run(
-            args.db, args.author, sitename=args.site, alias=args.alias,
+            args.db, args.author, sitename=args.site, alias=alias,
         )
-    except ValueError as e:
-        console.print(f'[red]{e}[/]')
-        return 1
-    console.print(f'Added alias [green]{args.alias}[/] to [bold]{args.site}[/]')
+
+    console.print(f'Adding alias(es) to [bold]{args.site}[/]:')
+    return await run_per_target(console, args.alias, add, ok='added')
 
 
-@site_alias_add.args()
+@site_add_alias.args()
 def _(parser: ArgParser):
-    parser.add_argument('alias', help='The alias to add')
+    parser.add_argument('alias', nargs='+', help='The alias(es) to add')
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'alias', 'remove', aliases=['rm'],
-                   help='Remove an alias from a site')
-async def site_alias_remove(args: Namespace):
+@commands.register('ng', 'site', 'remove', 'alias',
+                   help='Remove aliases from a site')
+async def site_remove_alias(args: Namespace):
     console = Console()
-    try:
+
+    async def remove(alias: str):
         await RemoveSiteAlias.run(
-            args.db, args.author, sitename=args.site, alias=args.alias,
+            args.db, args.author, sitename=args.site, alias=alias,
         )
-    except ValueError as e:
-        console.print(f'[red]{e}[/]')
-        return 1
-    console.print(
-        f'Removed alias [yellow]{args.alias}[/] from [bold]{args.site}[/]'
-    )
+
+    console.print(f'Removing alias(es) from [bold]{args.site}[/]:')
+    return await run_per_target(console, args.alias, remove, ok='removed')
 
 
-@site_alias_remove.args()
+@site_remove_alias.args()
 def _(parser: ArgParser):
-    parser.add_argument('alias', help='The alias to remove')
+    parser.add_argument('alias', nargs='+', help='The alias(es) to remove')
 
 
 # ---------------------------------------------------------------------------
-# `ng site slurm` — per-site slurm defaults
+# `ng site set slurm-default` — the site's default slurm account
 # ---------------------------------------------------------------------------
-
-
-@commands.register('ng', 'site', 'slurm',
-                   help='Per-site Slurm settings')
-def site_slurm_cmd(args: Namespace):
-    pass
 
 
 @site_args.apply(required=True)
-@group_args.apply(required=True)
-@commands.register('ng', 'site', 'slurm', 'set-default',
+@group_args.apply()
+@commands.register('ng', 'site', 'set', 'slurm-default',
                    help="Set a group's SlurmAccount as the site's default "
-                        "account (also adds it to site.slurm.sticky if needed)")
-async def site_slurm_set_default(args: Namespace):
+                        "account (also adds it to site.slurm.sticky if "
+                        "needed), or --clear the default")
+async def site_set_slurm_default(args: Namespace):
     console = Console()
+    if bool(args.group) == bool(args.clear):
+        console.print('[red]Pass exactly one of --group/-g or --clear[/]')
+        return 1
     try:
-        await SetSiteDefaultSlurmAccount.run(
-            args.db, args.author,
-            sitename=args.site, groupname=args.group,
-        )
+        if args.clear:
+            await ClearSiteDefaultSlurmAccount.run(
+                args.db, args.author, sitename=args.site,
+            )
+        else:
+            await SetSiteDefaultSlurmAccount.run(
+                args.db, args.author,
+                sitename=args.site, groupname=args.group,
+            )
     except ValueError as e:
         console.print(f'[red]{e}[/]')
         return 1
-    console.print(
-        f'Set [green]{args.group}[/] as the default slurm account for '
-        f'[bold]{args.site}[/]'
+    if args.clear:
+        console.print(
+            f'Cleared the default slurm account for [bold]{args.site}[/]'
+        )
+    else:
+        console.print(
+            f'Set [green]{args.group}[/] as the default slurm account for '
+            f'[bold]{args.site}[/]'
+        )
+
+
+@site_set_slurm_default.args()
+def _(parser: ArgParser):
+    parser.add_argument(
+        '--clear', action='store_true', default=False,
+        help="Clear the site's default slurm account "
+             '(leaves it in site.slurm.sticky)',
     )
 
 
-@site_args.apply(required=True)
-@commands.register('ng', 'site', 'slurm', 'clear-default',
-                   help="Clear the site's default slurm account "
-                        "(leaves it in site.slurm.sticky)")
-async def site_slurm_clear_default(args: Namespace):
-    console = Console()
-    try:
-        await ClearSiteDefaultSlurmAccount.run(
-            args.db, args.author, sitename=args.site,
-        )
-    except ValueError as e:
-        console.print(f'[red]{e}[/]')
-        return 1
-    console.print(f'Cleared the default slurm account for [bold]{args.site}[/]')
-
-
 # ---------------------------------------------------------------------------
-# `ng site storage` — per-site storage defaults
+# `ng site set storage-defaults` — per-site storage defaults
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'site', 'storage',
-                   help='Per-site storage settings')
-def site_storage_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'storage', 'set-defaults',
+@commands.register('ng', 'site', 'set', 'storage-defaults',
                    help="Set the site's home-provisioning defaults "
                         "(parent volume, quota, mount mechanism)")
-async def site_storage_set_defaults(args: Namespace):
+async def site_set_storage_defaults(args: Namespace):
     console = Console()
     if not any((args.home_volume, args.home_quota,
                 args.home_automount_map, args.home_static_mount)):
@@ -499,7 +478,7 @@ async def site_storage_set_defaults(args: Namespace):
     console.print(f'Updated storage defaults for [bold]{args.site}[/]')
 
 
-@site_storage_set_defaults.args()
+@site_set_storage_defaults.args()
 def _(parser: ArgParser):
     parser.add_argument('--home-volume', default=None,
                         help='Parent volume new homes are provisioned under')
@@ -512,43 +491,12 @@ def _(parser: ArgParser):
 
 
 # ---------------------------------------------------------------------------
-# `ng site export` — read-only exports of site data
+# `ng site sync old-puppet` — sync site to the puppet.hpc YAML repo
 # ---------------------------------------------------------------------------
 
 
-@commands.register('ng', 'site', 'export',
-                   help='Export site data in various formats')
-def site_export_cmd(args: Namespace):
-    pass
-
-
 @site_args.apply(required=True)
-@commands.register('ng', 'site', 'export', 'puppet-legacy',
-                   help="Export site users/groups/storage as "
-                        "v1-compatible puppet.hpc YAML")
-async def site_export_puppet_legacy(args: Namespace):
-    console = Console()
-    site = await find_site_by_name(args.site)
-    if site is None:
-        console.print(f'[red]Site {args.site} not found[/]')
-        return 1
-    puppet_map = await site_to_puppet_legacy(site)
-    yaml_text = PuppetAccountMap.Schema().dumps(puppet_map)
-    if args.output:
-        Path(args.output).write_text(yaml_text)
-        console.print(f'Wrote puppet YAML to [green]{args.output}[/]')
-    else:
-        console.print(highlight_yaml(yaml_text))
-
-
-@site_export_puppet_legacy.args()
-def _(parser: ArgParser):
-    parser.add_argument('--output', '-o', default=None,
-                        help='Write YAML to this path (default: stdout)')
-
-
-@site_args.apply(required=True)
-@commands.register('ng', 'site', 'sync-old-puppet',
+@commands.register('ng', 'site', 'sync', 'old-puppet',
                    help='Fully sync site from database to the puppet.hpc '
                         'YAML repo')
 async def site_sync_old_puppet(args: Namespace):
@@ -596,6 +544,39 @@ def _(parser: ArgParser):
                         action=BooleanOptionalAction,
                         help='Delete the working branch after a successful '
                              'push + merge')
+
+
+# ---------------------------------------------------------------------------
+# `ng site export` — read-only exports of site data
+# ---------------------------------------------------------------------------
+
+
+parent('ng', 'site', 'export', help='Export site data in various formats')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'site', 'export', 'puppet-legacy',
+                   help="Export site users/groups/storage as "
+                        "v1-compatible puppet.hpc YAML")
+async def site_export_puppet_legacy(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+    puppet_map = await site_to_puppet_legacy(site)
+    yaml_text = PuppetAccountMap.Schema().dumps(puppet_map)
+    if args.output:
+        Path(args.output).write_text(yaml_text)
+        console.print(f'Wrote puppet YAML to [green]{args.output}[/]')
+    else:
+        console.print(highlight_yaml(yaml_text))
+
+
+@site_export_puppet_legacy.args()
+def _(parser: ArgParser):
+    parser.add_argument('--output', '-o', default=None,
+                        help='Write YAML to this path (default: stdout)')
 
 
 @site_args.apply(required=True)

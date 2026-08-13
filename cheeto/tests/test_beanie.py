@@ -78,11 +78,14 @@ from ..operations import (
     CreateSystemGroup,
     CreateSystemUser,
     CreateUser,
+    DeleteGroup,
+    DeleteUser,
     RemoveGroupMember,
     RemoveSiteUser,
     RemoveUserAccess,
     ClearOffboardingSiteStatuses,
     ClearRedundantSiteStatuses,
+    ClearUserExpiry,
     SetUserPassword,
     SetUserShell,
     SetUserStatus,
@@ -95,7 +98,7 @@ from ..operations import (
     ExportRootSSHKeys,
     ExportSympaEmails,
     AddSiteAlias,
-    RemoveSite,
+    DeleteSite,
     RemoveSiteAlias,
     SyncGroupToLDAP,
     SyncSiteAutomounts,
@@ -5754,8 +5757,8 @@ class TestExportPuppetStorage:
             await ExportPuppetStorage.run(beanie_client, None, sitename='nope')
 
 
-class TestRemoveSite:
-    """`RemoveSite` cascade-deletes every per-site record (beanie has no
+class TestDeleteSite:
+    """`DeleteSite` cascade-deletes every per-site record (beanie has no
     reverse cascade) and the site, leaving other sites and global records
     untouched."""
 
@@ -5817,7 +5820,12 @@ class TestRemoveSite:
             'slurm_allocations': 1,
         }
 
-        result = await RemoveSite.run(beanie_client, None, sitename='slsite')
+        result = await DeleteSite.run(
+            beanie_client, None, sitename='slsite', reason='decommissioned',
+        )
+        hist = await History.find_one(History.op == 'delete_site')
+        assert hist is not None
+        assert hist.changes['reason'] == 'decommissioned'
         assert result['site'] == 1
         assert result['user_site_info'] == 2
         assert result['slurm_allocations'] == 1
@@ -5849,7 +5857,9 @@ class TestRemoveSite:
 
     async def test_remove_unknown_site_errors(self, beanie_client):
         with pytest.raises(ValueError):
-            await RemoveSite.run(beanie_client, None, sitename='nope')
+            await DeleteSite.run(
+                beanie_client, None, sitename='nope', reason='r',
+            )
 
 
 class TestSiteStorageSettings:
@@ -8358,3 +8368,331 @@ class TestCreateAccountHomeStorage:
         user = await User.find_one(User.name == 'hippouser')
         keys = await SshKey.find(SshKey.user.id == user.id).to_list()
         assert keys == []
+
+
+class TestDeleteUserOp:
+
+    async def _seed(self, beanie_client):
+        """User + personal group + site presence + lab membership + ssh key
+        + home storage/volume + coordinator seat + hippo event."""
+        from cheeto.models.hippo import HippoEvent
+        from cheeto.models.slurm import SlurmAccount
+
+        site = Site(name='delsite', fqdn='del.test')
+        await site.insert()
+        user = User(
+            name='deluser', email='del@test.com', uid=77001, gid=77001,
+            fullname='Del User', home_directory='/home/deluser',
+            status=await status_link('active'),
+        )
+        await user.insert()
+        personal = Group(name='deluser', gid=77001, type='user')
+        await personal.insert()
+        lab = Group(name='dellab', gid=77100)
+        await lab.insert()
+        await UserSiteInfo(
+            user=user, site=site, status=await status_link('active'),
+        ).insert()
+        await GroupMembership(
+            user=user, group=lab, site=site, roles=['member'],
+        ).insert()
+        await SshKey(key='ssh-ed25519 AAA del@x', user=user).insert()
+
+        volume = await _seed_volume(site, name='home/deluser')
+        storage = Storage(
+            name='deluser', site=site, category='home',
+            owner=user, group=personal, volume=volume, subpath='',
+        )
+        await storage.insert()
+
+        acct = SlurmAccount(group=lab, site=site, coordinators=[user])
+        await acct.insert()
+        event = HippoEvent(
+            hippo_id=99, hippo_endpoint='https://hippo.test',
+            action='CreateAccount', site=site,
+            target_username='deluser', target_user=user,
+        )
+        await event.insert()
+        return user, lab, site
+
+    async def test_refuses_with_storage_unless_cascade(self, beanie_client):
+        await self._seed(beanie_client)
+        with pytest.raises(ValueError, match='storage records'):
+            await DeleteUser.run(
+                beanie_client, None, name='deluser', reason='r',
+            )
+        # Nothing was deleted (transaction rolled back / pre-check fired).
+        assert await User.find_one(User.name == 'deluser') is not None
+        assert await SshKey.find_all().count() == 1
+
+    async def test_full_cascade(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        from cheeto.models.hippo import HippoEvent
+        from cheeto.models.slurm import SlurmAccount
+
+        user, lab, site = await self._seed(beanie_client)
+        await DeleteUser.run(
+            beanie_client, None,
+            name='deluser', reason='left the university',
+            cascade_storage=True,
+        )
+        assert await User.find_one(User.name == 'deluser') is None
+        assert await Group.find_one(Group.name == 'deluser') is None
+        assert await SshKey.find_all().count() == 0
+        assert await UserSiteInfo.find_all().count() == 0
+        assert await GroupMembership.find_all().count() == 0
+        assert await Storage.find_all().count() == 0
+        assert await StorageVolume.find_all().count() == 0
+        # Lab group survives; coordinator seat pulled.
+        assert await Group.find_one(Group.name == 'dellab') is not None
+        acct = await SlurmAccount.find_one(SlurmAccount.group.id == lab.id)
+        assert acct.coordinators == []
+        # Hippo target nulled; string twin preserved.
+        event = await HippoEvent.find_one(HippoEvent.hippo_id == 99)
+        assert event.target_user is None
+        assert event.target_username == 'deluser'
+
+        hist = await History.find_one(History.op == 'delete_user')
+        assert hist is not None
+        assert hist.changes['reason'] == 'left the university'
+        assert hist.changes['storages'] == 1
+        assert hist.changes['personal_group'] == 1
+
+    async def test_unknown_user_errors(self, beanie_client):
+        with pytest.raises(ValueError, match='does not exist'):
+            await DeleteUser.run(
+                beanie_client, None, name='ghost', reason='r',
+            )
+
+
+class TestDeleteGroupOp:
+
+    async def test_slurm_and_sticky_cascade(self, beanie_client):
+        from cheeto.models.slurm import (
+            SlurmAccount,
+            SlurmAssociation,
+            SlurmPartition,
+            SlurmQOS,
+        )
+
+        site = await _seed_slurm_site(with_default=True)
+        await DeleteGroup.run(
+            beanie_client, None, name='sllab', reason='lab dissolved',
+        )
+        assert await Group.find_one(Group.name == 'sllab') is None
+        assert await GroupMembership.find_all().count() == 0
+        assert await SlurmAccount.find_all().count() == 0
+        assert await SlurmAssociation.find_all().count() == 0
+        # QOS and partition are site-owned — they survive.
+        assert await SlurmQOS.find_all().count() == 1
+        assert await SlurmPartition.find_all().count() == 1
+        # Sticky/default refs cleared, validator satisfied.
+        fetched = await Site.find_one(Site.name == 'slsite')
+        assert fetched.slurm.sticky == []
+        assert fetched.slurm.default_account is None
+        # Member users survive.
+        assert await User.find_one(User.name == 'sl_alice') is not None
+
+        hist = await History.find_one(History.op == 'delete_group')
+        assert hist.changes['reason'] == 'lab dissolved'
+        assert hist.changes['slurm_accounts'] == 1
+
+    async def test_storage_gate(self, beanie_client):
+        site = Site(name='gdelsite', fqdn='gdel.test')
+        await site.insert()
+        owner = User(
+            name='gdelowner', email='o@test.com', uid=77200, gid=77200,
+            fullname='Owner', home_directory='/home/gdelowner',
+        )
+        await owner.insert()
+        lab = Group(name='gdellab', gid=77201)
+        await lab.insert()
+        volume = await _seed_volume(site, name='group/gdellab')
+        await Storage(
+            name='gdellab', site=site, category='group',
+            owner=owner, group=lab, volume=volume, subpath='',
+        ).insert()
+
+        with pytest.raises(ValueError, match='storage records'):
+            await DeleteGroup.run(
+                beanie_client, None, name='gdellab', reason='r',
+            )
+        await DeleteGroup.run(
+            beanie_client, None, name='gdellab', reason='r',
+            cascade_storage=True,
+        )
+        assert await Group.find_one(Group.name == 'gdellab') is None
+        assert await Storage.find_all().count() == 0
+        assert await StorageVolume.find_all().count() == 0
+        # The owner user is untouched.
+        assert await User.find_one(User.name == 'gdelowner') is not None
+
+    async def test_refusals(self, beanie_client):
+        await Group(name='persg', gid=77300, type='user').insert()
+        with pytest.raises(ValueError, match='personal group'):
+            await DeleteGroup.run(
+                beanie_client, None, name='persg', reason='r',
+            )
+        # Seeded access/status groups are protected.
+        with pytest.raises(ValueError, match='access/status'):
+            await DeleteGroup.run(
+                beanie_client, None, name='active-users', reason='r',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await DeleteGroup.run(
+                beanie_client, None, name='nonesuch', reason='r',
+            )
+
+
+class TestClearUserExpiry:
+
+    async def _seed(self, beanie_client):
+        user = User(
+            name='expuser', email='e@test.com', uid=77400, gid=77400,
+            fullname='Exp User', home_directory='/home/expuser',
+            expires_at=datetime.datetime(2020, 1, 1),
+        )
+        await user.insert()
+        return user
+
+    async def test_clears_global_expiry(self, beanie_client):
+        await self._seed(beanie_client)
+        await ClearUserExpiry.run(beanie_client, None, name='expuser')
+        fetched = await User.find_one(User.name == 'expuser')
+        assert fetched.expires_at is None
+
+        hist = await History.find_one(History.op == 'clear_user_expiry')
+        assert hist.changes['cleared_from'] == '2020-01-01T00:00:00'
+        assert hist.changes['site'] is None
+
+    async def test_clears_site_expiry_only(self, beanie_client):
+        user = await self._seed(beanie_client)
+        site = Site(name='expsite', fqdn='exp.test')
+        await site.insert()
+        await UserSiteInfo(
+            user=user, site=site,
+            expires_at=datetime.datetime(2021, 6, 1),
+        ).insert()
+
+        await ClearUserExpiry.run(
+            beanie_client, None, name='expuser', site='expsite',
+        )
+        usi = await UserSiteInfo.find_one(UserSiteInfo.user.id == user.id)
+        assert usi.expires_at is None
+        fetched = await User.find_one(User.name == 'expuser')
+        assert fetched.expires_at == datetime.datetime(2020, 1, 1)
+
+    async def test_noop_when_unset(self, beanie_client):
+        user = await self._seed(beanie_client)
+        user.expires_at = None
+        await user.save()
+        await ClearUserExpiry.run(beanie_client, None, name='expuser')
+        hist = await History.find_one(History.op == 'clear_user_expiry')
+        assert hist.changes['cleared_from'] is None
+
+    async def test_errors(self, beanie_client):
+        with pytest.raises(ValueError, match='does not exist'):
+            await ClearUserExpiry.run(beanie_client, None, name='ghost')
+        await self._seed(beanie_client)
+        with pytest.raises(ValueError, match='does not exist'):
+            await ClearUserExpiry.run(
+                beanie_client, None, name='expuser', site='nope',
+            )
+
+
+class TestFindGroups:
+
+    async def _seed(self, beanie_client):
+        from cheeto.models.base import DocRef
+
+        site_a = Site(name='fga', fqdn='fga.test')
+        site_b = Site(name='fgb', fqdn='fgb.test')
+        alice = User(
+            name='fg_alice', email='fa@test.com', uid=78001, gid=78001,
+            fullname='FG Alice', home_directory='/home/fg_alice',
+        )
+        await alice.insert()
+
+        lab_a = Group(name='fg_lab_a', gid=78100)
+        lab_b = Group(name='fg_lab_b', gid=78101)
+        sticky = Group(name='fg_sticky', gid=78102)
+        sysg = Group(name='fg_sys', gid=78103, type='system')
+        personal = Group(name='fg_alice', gid=78001, type='user')
+        for g in (lab_a, lab_b, sticky, sysg, personal):
+            await g.insert()
+
+        site_a.group.sticky.append(sticky.id)
+        await site_a.insert()
+        await site_b.insert()
+
+        await GroupMembership(
+            user=alice, group=lab_a, site=site_a, roles=['member'],
+        ).insert()
+        await GroupMembership(
+            user=alice, group=lab_b, site=site_b, roles=['member'],
+        ).insert()
+        return alice
+
+    async def test_default_hides_infra_and_personal(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups()]
+        assert names == ['fg_lab_a', 'fg_lab_b', 'fg_sticky', 'fg_sys']
+
+        all_names = {g.name for g in await find_groups(include_hidden=True)}
+        assert 'fg_alice' in all_names            # personal group
+        assert 'active-users' in all_names        # seeded status group
+
+    async def test_type_filter_reveals_hidden_types(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        assert [g.name for g in await find_groups(type='user')] == ['fg_alice']
+        access = await find_groups(type='access')
+        assert {g.name for g in access} >= {'login-ssh-users'}
+        assert [g.name for g in await find_groups(type='system')] == ['fg_sys']
+
+    async def test_site_filter_includes_sticky(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups(site='fga')]
+        assert names == ['fg_lab_a', 'fg_sticky']
+
+    async def test_user_filter_and_site_narrowing(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups(user='fg_alice')]
+        assert names == ['fg_lab_a', 'fg_lab_b']
+        narrowed = [
+            g.name for g in await find_groups(user='fg_alice', site='fgb')
+        ]
+        assert narrowed == ['fg_lab_b']
+
+    async def test_operator_or_unions(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        # system groups OR alice's groups — clean union, no site coupling.
+        names = [
+            g.name for g in await find_groups(
+                type='system', user='fg_alice', operator='OR',
+            )
+        ]
+        assert names == ['fg_lab_a', 'fg_lab_b', 'fg_sys']
+
+    async def test_site_narrows_user_filter_even_under_or(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        # Mirrors find_users: a site filter also scopes the user filter's
+        # membership edges, so alice's fgb-only group is excluded.
+        names = [
+            g.name for g in await find_groups(
+                site='fga', user='fg_alice', operator='OR',
+            )
+        ]
+        assert names == ['fg_lab_a', 'fg_sticky']
+
+    async def test_no_match_and_bad_operator(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        assert await find_groups(user='nonesuch') == []
+        with pytest.raises(ValueError, match='AND or OR'):
+            await find_groups(operator='XOR')
