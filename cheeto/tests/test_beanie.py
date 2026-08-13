@@ -8598,3 +8598,101 @@ class TestClearUserExpiry:
             await ClearUserExpiry.run(
                 beanie_client, None, name='expuser', site='nope',
             )
+
+
+class TestFindGroups:
+
+    async def _seed(self, beanie_client):
+        from cheeto.models.base import DocRef
+
+        site_a = Site(name='fga', fqdn='fga.test')
+        site_b = Site(name='fgb', fqdn='fgb.test')
+        alice = User(
+            name='fg_alice', email='fa@test.com', uid=78001, gid=78001,
+            fullname='FG Alice', home_directory='/home/fg_alice',
+        )
+        await alice.insert()
+
+        lab_a = Group(name='fg_lab_a', gid=78100)
+        lab_b = Group(name='fg_lab_b', gid=78101)
+        sticky = Group(name='fg_sticky', gid=78102)
+        sysg = Group(name='fg_sys', gid=78103, type='system')
+        personal = Group(name='fg_alice', gid=78001, type='user')
+        for g in (lab_a, lab_b, sticky, sysg, personal):
+            await g.insert()
+
+        site_a.group.sticky.append(sticky.id)
+        await site_a.insert()
+        await site_b.insert()
+
+        await GroupMembership(
+            user=alice, group=lab_a, site=site_a, roles=['member'],
+        ).insert()
+        await GroupMembership(
+            user=alice, group=lab_b, site=site_b, roles=['member'],
+        ).insert()
+        return alice
+
+    async def test_default_hides_infra_and_personal(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups()]
+        assert names == ['fg_lab_a', 'fg_lab_b', 'fg_sticky', 'fg_sys']
+
+        all_names = {g.name for g in await find_groups(include_hidden=True)}
+        assert 'fg_alice' in all_names            # personal group
+        assert 'active-users' in all_names        # seeded status group
+
+    async def test_type_filter_reveals_hidden_types(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        assert [g.name for g in await find_groups(type='user')] == ['fg_alice']
+        access = await find_groups(type='access')
+        assert {g.name for g in access} >= {'login-ssh-users'}
+        assert [g.name for g in await find_groups(type='system')] == ['fg_sys']
+
+    async def test_site_filter_includes_sticky(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups(site='fga')]
+        assert names == ['fg_lab_a', 'fg_sticky']
+
+    async def test_user_filter_and_site_narrowing(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        names = [g.name for g in await find_groups(user='fg_alice')]
+        assert names == ['fg_lab_a', 'fg_lab_b']
+        narrowed = [
+            g.name for g in await find_groups(user='fg_alice', site='fgb')
+        ]
+        assert narrowed == ['fg_lab_b']
+
+    async def test_operator_or_unions(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        # system groups OR alice's groups — clean union, no site coupling.
+        names = [
+            g.name for g in await find_groups(
+                type='system', user='fg_alice', operator='OR',
+            )
+        ]
+        assert names == ['fg_lab_a', 'fg_lab_b', 'fg_sys']
+
+    async def test_site_narrows_user_filter_even_under_or(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        # Mirrors find_users: a site filter also scopes the user filter's
+        # membership edges, so alice's fgb-only group is excluded.
+        names = [
+            g.name for g in await find_groups(
+                site='fga', user='fg_alice', operator='OR',
+            )
+        ]
+        assert names == ['fg_lab_a', 'fg_sticky']
+
+    async def test_no_match_and_bad_operator(self, beanie_client):
+        from cheeto.queries import find_groups
+        await self._seed(beanie_client)
+        assert await find_groups(user='nonesuch') == []
+        with pytest.raises(ValueError, match='AND or OR'):
+            await find_groups(operator='XOR')

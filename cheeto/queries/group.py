@@ -318,3 +318,91 @@ async def gather_group_references(group: Group) -> GroupRefs:
         slurm_associations=slurm_associations,
         sticky_sites=sticky_sites, hippo_events=hippo_events,
     )
+
+
+async def _gids_with_type(type_str: str) -> set[PydanticObjectId]:
+    groups = await Group.find(
+        Group.type == type_str, with_children=True,
+    ).to_list()
+    return {g.id for g in groups}
+
+
+async def _gids_at_site(sitename: str) -> set[PydanticObjectId]:
+    """Groups present at a site: any membership edge there, plus the
+    site's sticky groups."""
+    site = await Site.find_one(Site.name == sitename)
+    if site is None:
+        return set()
+    edges = await GroupMembership.find(
+        GroupMembership.site.id == site.id,
+    ).to_list()
+    ids = {link_target_id(e.group) for e in edges}
+    ids |= _sticky_group_ids(site)
+    ids.discard(None)
+    return ids
+
+
+async def _gids_with_user(
+    username: str, sitename: str | None = None,
+) -> set[PydanticObjectId]:
+    user = await User.find_one(User.name == username)
+    if user is None:
+        return set()
+    query = [GroupMembership.user.id == user.id]
+    if sitename is not None:
+        site = await Site.find_one(Site.name == sitename)
+        if site is None:
+            return set()
+        query.append(GroupMembership.site.id == site.id)
+    edges = await GroupMembership.find(*query).to_list()
+    ids = {link_target_id(e.group) for e in edges}
+    ids.discard(None)
+    return ids
+
+
+# Group types hidden from an unfiltered listing: personal groups (one per
+# user) and the seeded access/status infrastructure rows. An explicit
+# --type or include_hidden reveals them.
+_HIDDEN_GROUP_TYPES = ('user', 'access', 'status')
+
+
+async def find_groups(
+    *,
+    type: str | None = None,
+    site: str | None = None,
+    user: str | None = None,
+    operator: str = 'AND',
+    include_hidden: bool = False,
+) -> list[Group]:
+    """Return groups matching the given filters combined by `operator`,
+    mirroring `find_users`. With no filters, every group (minus the hidden
+    types unless `include_hidden`). When `site` is also supplied, the
+    `user` filter narrows to that site's membership edges.
+    """
+    if operator not in ('AND', 'OR'):
+        raise ValueError(f'operator must be AND or OR; got {operator!r}')
+
+    id_sets: list[set[PydanticObjectId]] = []
+    if type is not None:
+        id_sets.append(await _gids_with_type(type))
+    if site is not None:
+        id_sets.append(await _gids_at_site(site))
+    if user is not None:
+        id_sets.append(await _gids_with_user(user, sitename=site))
+
+    if not id_sets:
+        groups = await Group.find_all(with_children=True).to_list()
+    else:
+        ids = (
+            set.intersection(*id_sets) if operator == 'AND'
+            else set.union(*id_sets)
+        )
+        if not ids:
+            return []
+        groups = await Group.find(
+            In(Group.id, list(ids)), with_children=True,
+        ).to_list()
+
+    if type is None and not include_hidden:
+        groups = [g for g in groups if g.type not in _HIDDEN_GROUP_TYPES]
+    return sorted(groups, key=lambda g: g.name)

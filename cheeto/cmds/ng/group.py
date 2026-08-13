@@ -7,9 +7,12 @@ from rich.table import Table
 from rich.text import Text
 
 from .. import commands
+from beanie.operators import In
+
 from ...constants import GROUP_TYPES
 from ...log import Console
 from ...models.group import Group
+from ...models.group_membership import GroupMembership
 from ...models.site import Site
 from ...operations import (
     AddGroupMember,
@@ -27,7 +30,11 @@ from ...operations import (
     RemoveGroupSponsor,
     RemoveGroupSudoer,
 )
-from ...queries import gather_group_references, group_members_at_site
+from ...queries import (
+    find_groups,
+    gather_group_references,
+    group_members_at_site,
+)
 from ...yaml import print_yaml
 from . import parent
 from ._args import (
@@ -146,6 +153,87 @@ parent('ng', 'group', help='Group operations')
 parent('ng', 'group', 'new', help='Create new groups')
 parent('ng', 'group', 'add', help='Add users to group roles at a site')
 parent('ng', 'group', 'remove', help='Remove users from group roles at a site')
+
+
+@yaml_args.apply()
+@commands.register('ng', 'group', 'list',
+                   help='List groups matching one or more filters '
+                        '(combined by --operator)')
+async def group_list(args: Namespace):
+    console = Console()
+    operator = (args.operator or 'AND').upper()
+    if operator not in ('AND', 'OR'):
+        console.print(
+            f'[red]--operator must be AND or OR (got {args.operator!r})[/]'
+        )
+        return 1
+
+    groups = await find_groups(
+        type=args.type,
+        site=args.site,
+        user=args.user,
+        operator=operator,
+        include_hidden=args.all,
+    )
+    if args.limit is not None and args.limit > 0:
+        groups = groups[:args.limit]
+
+    member_counts: dict = {}
+    if args.long and groups:
+        from ...models.site import Site as _Site
+        query = [In(GroupMembership.group.id, [g.id for g in groups])]
+        if args.site:
+            site = await _Site.find_one(_Site.name == args.site)
+            if site is not None:
+                query.append(GroupMembership.site.id == site.id)
+        from ...models.base import link_target_id
+        for edge in await GroupMembership.find(*query).to_list():
+            gid = link_target_id(edge.group)
+            member_counts[gid] = member_counts.get(gid, 0) + 1
+
+    if args.yaml:
+        rows = [{
+            'name': g.name,
+            'gid': g.gid,
+            'type': g.type,
+            **({'members': member_counts.get(g.id, 0)} if args.long else {}),
+        } for g in groups]
+        print_yaml(rows)
+        return
+
+    title = f'Groups (count={len(groups)}, operator={operator})'
+    table = Table(title=title)
+    table.add_column('name', style='green', no_wrap=True)
+    table.add_column('gid', justify='right')
+    table.add_column('type', style='cyan')
+    if args.long:
+        table.add_column('members', justify='right')
+    for g in groups:
+        row = [g.name, str(g.gid), g.type]
+        if args.long:
+            row.append(str(member_counts.get(g.id, 0)))
+        table.add_row(*row)
+    console.print(table)
+
+
+@group_list.args()
+def _(parser: ArgParser):
+    parser.add_argument('--type', default=None, choices=list(GROUP_TYPES),
+                        help='Filter by group type')
+    parser.add_argument('--site', '-s', default=None,
+                        help='Filter to groups present at a site '
+                             '(membership edges or sticky)')
+    parser.add_argument('--user', '-u', default=None,
+                        help='Filter to groups a user is a member of')
+    parser.add_argument('--operator', default='AND',
+                        help='Combine filters with AND (default) or OR')
+    parser.add_argument('--limit', '-n', type=int, default=None,
+                        help='Maximum number of rows')
+    parser.add_argument('--long', action='store_true', default=False,
+                        help='Include a member-count column')
+    parser.add_argument('--all', action='store_true', default=False,
+                        help='Include personal (user-type) and access/'
+                             'status infrastructure groups')
 
 
 @group_args.apply(required=True)

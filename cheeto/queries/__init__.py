@@ -15,6 +15,7 @@ from .group import (
     effective_group_members,
     effective_user_groups,
     find_group_by_name,
+    find_groups,
     group_members_at_site,
     is_sticky_group,
     resolve_group_names,
