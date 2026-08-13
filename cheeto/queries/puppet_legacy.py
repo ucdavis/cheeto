@@ -40,6 +40,7 @@ from ..puppet import (
     PuppetUserRecord,
 )
 from ..utils import removed_nones
+from .group import site_present_group_ids
 from .storage import list_automap_storages_grouped
 from .user import effective_access_links
 
@@ -119,12 +120,10 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         GroupMembership.site.id == site.id,
     ).to_list()
 
-    # Sponsor edges may reference users who aren't present at the site
-    # (no UserSiteInfo); v1 emitted sponsor usernames regardless. So we
-    # collect every group id referenced by any edge, plus sticky groups.
-    referenced_group_ids = {link_target_id(e.group) for e in edges}
-    referenced_group_ids |= sticky_group_ids
-    referenced_group_ids.discard(None)
+    # Which groups exist at this site is authoritative: exactly the
+    # GroupSiteInfo records. Edges only drive the member/sudoer/sponsor
+    # attribution below — an edge to a detached group no longer renders.
+    referenced_group_ids = await site_present_group_ids(site)
 
     raw_groups = (
         await Group.find(
@@ -153,11 +152,18 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     for s in automap_storages.get('group', []):
         gid = link_target_id(s.group)
         storages_by_group_id.setdefault(gid, []).append(s)
-        # v1 exported every SiteGroup; a group whose only site presence is
-        # its storage must still appear in the group map.
+        # A storage-owning group should always carry a GroupSiteInfo (the
+        # provisioning ops ensure one); include strays so the export stays
+        # v1-correct, but surface the drift.
         if gid not in group_by_id and not isinstance(
             s.group, (AccessGroup, StatusGroup),
         ):
+            logger.warning(
+                'Group %s owns storage %s at %s but has no GroupSiteInfo; '
+                'including in export — run `ng group backfill-sites` or '
+                '`ng group add site`',
+                s.group.name, s.name, site.name,
+            )
             group_by_id[gid] = s.group
             candidate_groups.append(s.group)
 
@@ -165,9 +171,9 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         automap_storages.get('share', []), key=lambda s: s.name,
     )
 
-    # Groups with a slurm account at this site are site-present even with
-    # no member edges (v1 had a SiteGroup for every sponsor group with an
-    # account); they must appear in the group map.
+    # An account-owning group should always carry a GroupSiteInfo (the
+    # slurm ops ensure one); include strays so the export stays v1-correct,
+    # but surface the drift.
     slurm_accounts = await SlurmAccount.find(
         SlurmAccount.site.id == site.id,
         fetch_links=True,
@@ -178,6 +184,12 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         if g.id not in group_by_id and not isinstance(
             g, (AccessGroup, StatusGroup),
         ):
+            logger.warning(
+                'Group %s owns a SlurmAccount at %s but has no '
+                'GroupSiteInfo; including in export — run `ng group '
+                'backfill-sites` or `ng group add site`',
+                g.name, site.name,
+            )
             group_by_id[g.id] = g
             candidate_groups.append(g)
 

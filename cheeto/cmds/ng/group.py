@@ -11,8 +11,10 @@ from beanie.operators import In
 
 from ...constants import GROUP_TYPES
 from ...log import Console
+from ...models.base import link_target_id
 from ...models.group import Group
 from ...models.group_membership import GroupMembership
+from ...models.group_site_info import GroupSiteInfo
 from ...models.site import Site
 from ...operations import (
     AddGroupMember,
@@ -118,6 +120,16 @@ def _render_group_panel(data: dict) -> Panel:
         if key in data and data[key] is not None:
             table.add_row(key, str(data[key]))
 
+    if 'sites' in data:
+        names = data['sites']
+        table.add_row('sites', ', '.join(names) if names else '[dim](none)[/]')
+    if data.get('site') and data.get('on_site') is False:
+        table.add_row(
+            'presence',
+            f"[yellow]not attached to site {data['site']} "
+            f"(`group add site`)[/]",
+        )
+
     # Membership is per-site; the roster keys are only present when the
     # command was given a --site.
     if 'members' not in data:
@@ -180,13 +192,11 @@ async def group_list(args: Namespace):
 
     member_counts: dict = {}
     if args.long and groups:
-        from ...models.site import Site as _Site
         query = [In(GroupMembership.group.id, [g.id for g in groups])]
         if args.site:
-            site = await _Site.find_one(_Site.name == args.site)
+            site = await Site.find_one(Site.name == args.site)
             if site is not None:
                 query.append(GroupMembership.site.id == site.id)
-        from ...models.base import link_target_id
         for edge in await GroupMembership.find(*query).to_list():
             gid = link_target_id(edge.group)
             member_counts[gid] = member_counts.get(gid, 0) + 1
@@ -221,8 +231,8 @@ def _(parser: ArgParser):
     parser.add_argument('--type', default=None, choices=list(GROUP_TYPES),
                         help='Filter by group type')
     parser.add_argument('--site', '-s', default=None,
-                        help='Filter to groups present at a site '
-                             '(membership edges or sticky)')
+                        help='Filter to groups attached to a site '
+                             '(GroupSiteInfo presence records)')
     parser.add_argument('--user', '-u', default=None,
                         help='Filter to groups a user is a member of')
     parser.add_argument('--operator', default='AND',
@@ -469,13 +479,25 @@ async def group_remove_slurmer(args: Namespace):
                    help='Show group information')
 async def group_show(args: Namespace):
     console = Console()
-    group = await Group.find_one(Group.name == args.group, 
+    group = await Group.find_one(Group.name == args.group,
                                  fetch_links=True,
                                  with_children=True,
                                  nesting_depth=1)
     if group is None:
         console.print(f'[red]Group {args.group} not found[/]')
         return 1
+
+    gsis = await GroupSiteInfo.find(
+        GroupSiteInfo.group.id == group.id,
+    ).to_list()
+    gsi_site_ids = {
+        sid for g in gsis
+        if (sid := link_target_id(g.site)) is not None
+    }
+    gsi_sites = (
+        await Site.find(In(Site.id, list(gsi_site_ids))).to_list()
+        if gsi_site_ids else []
+    )
 
     if args.site:
         site = await Site.find_one(Site.name == args.site)
@@ -485,9 +507,11 @@ async def group_show(args: Namespace):
         roster = await group_members_at_site(group, site)
         data = _group_to_dict(group, roster=roster)
         data['site'] = args.site
+        data['on_site'] = site.id in gsi_site_ids
         data['slurm_at_site'] = await group_slurm_at_site(group, site)
     else:
         data = _group_to_dict(group)
+    data['sites'] = sorted(s.name for s in gsi_sites)
 
     if args.yaml:
         print_yaml(data)

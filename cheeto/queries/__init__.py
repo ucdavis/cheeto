@@ -17,8 +17,10 @@ from .group import (
     find_group_by_name,
     find_groups,
     group_members_at_site,
+    imputed_group_ids_at_site,
     is_sticky_group,
     resolve_group_names,
+    site_present_group_ids,
     user_groups_at_site,
 )
 from .puppet_legacy import site_to_puppet_legacy

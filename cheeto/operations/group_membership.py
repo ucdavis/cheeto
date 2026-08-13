@@ -10,6 +10,7 @@ from ..models.group_membership import GroupMembership, MembershipRole
 from ..models.site import Site
 from ..models.user import User
 from .base import Operation
+from .group_site import ensure_group_site
 
 
 class _GroupMembershipOp(Operation):
@@ -71,6 +72,8 @@ class _AddToGroup(_GroupMembershipOp):
 
     async def execute(self, session: AsyncClientSession) -> None:
         group, user, site = await self._resolve()
+        # Any role edge implies the group is present at the site.
+        await ensure_group_site(group, site, session)
         edge = await self._find_edge(user, group, site)
         if edge is None:
             edge = GroupMembership(

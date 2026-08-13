@@ -1,10 +1,14 @@
-"""Group-membership query helpers over per-site `GroupMembership` edges.
+"""Group query helpers: presence via `GroupSiteInfo`, membership via
+per-site `GroupMembership` edges.
 
-Membership is per-site: a `GroupMembership(user, group, site, roles)` edge
-records the capacities in which a user participates in a group at a site.
-`effective_group_members(group, site)` is the central join — it also unions
-in `site.group.sticky` so that when `group` is sticky, every user with a
-`UserSiteInfo` at the site counts as a member even without an explicit edge.
+Presence and membership are distinct: a `GroupSiteInfo(group, site)` record
+is the authority on *which groups exist at a site* (LDAP projection, puppet
+export, `find_groups --site`), while `GroupMembership(user, group, site,
+roles)` edges record the capacities in which users participate in a present
+group. `effective_group_members(group, site)` is the central membership
+join — it also unions in `site.group.sticky` so that when `group` is sticky,
+every user with a `UserSiteInfo` at the site counts as a member even without
+an explicit edge (sticky is a membership modifier, not a presence source).
 Used by LDAP projection (`SyncGroupToLDAP._members_at_site`) and the
 `--site`-scoped group filter on `find_users`.
 """
@@ -18,8 +22,9 @@ from beanie import PydanticObjectId
 from beanie.operators import In
 
 from ..models.base import link_target_id
-from ..models.group import Group
+from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
+from ..models.group_site_info import GroupSiteInfo
 from ..models.hippo import HippoEvent
 from ..models.site import Site
 from ..models.slurm import SlurmAccount, SlurmAssociation
@@ -45,6 +50,61 @@ def _sticky_group_ids(site: Site) -> set[PydanticObjectId]:
 def is_sticky_group(group: Group, site: Site) -> bool:
     """True when `group` appears in `site.group.sticky`."""
     return group.id in _sticky_group_ids(site)
+
+
+async def site_present_group_ids(site: Site) -> set[PydanticObjectId]:
+    """The presence authority: ids of groups with a `GroupSiteInfo` at
+    `site`. Every reader that needs "which groups are on this site" goes
+    through here so the definition can never drift."""
+    gsis = await GroupSiteInfo.find(GroupSiteInfo.site.id == site.id).to_list()
+    ids = {link_target_id(g.group) for g in gsis}
+    ids.discard(None)
+    return ids
+
+
+async def imputed_group_ids_at_site(site: Site) -> set[PydanticObjectId]:
+    """Group ids whose presence at `site` is *implied* by existing records:
+    membership edges ∪ `site.group.sticky` ∪ SlurmAccount(group, site) ∪
+    Storage.group at the site ∪ personal groups of users with a
+    UserSiteInfo. Access/status rows are excluded. This is the presence
+    definition the GroupSiteInfo backfill materializes; live reads use
+    `site_present_group_ids` instead."""
+    ids: set[PydanticObjectId] = set()
+
+    edges = await GroupMembership.find(
+        GroupMembership.site.id == site.id,
+    ).to_list()
+    ids |= {link_target_id(e.group) for e in edges}
+
+    ids |= _sticky_group_ids(site)
+
+    accounts = await SlurmAccount.find(
+        SlurmAccount.site.id == site.id,
+    ).to_list()
+    ids |= {link_target_id(a.group) for a in accounts}
+
+    storages = await Storage.find(Storage.site.id == site.id).to_list()
+    ids |= {link_target_id(s.group) for s in storages}
+
+    user_ids = await _users_at_site_ids(site)
+    if user_ids:
+        users = await User.find(In(User.id, list(user_ids))).to_list()
+        personal = await Group.find(
+            In(Group.name, [u.name for u in users]),
+            Group.type == 'user',
+        ).to_list()
+        ids |= {g.id for g in personal}
+
+    ids.discard(None)
+    if ids:
+        groups = await Group.find(
+            In(Group.id, list(ids)), with_children=True,
+        ).to_list()
+        ids = {
+            g.id for g in groups
+            if not isinstance(g, (AccessGroup, StatusGroup))
+        }
+    return ids
 
 
 async def find_group_by_name(
@@ -185,6 +245,20 @@ async def effective_user_groups(
         group_ids |= sticky_ids
     else:
         sticky_ids = set()
+    group_ids.discard(None)
+
+    # Presence gate: only groups attached to the site (GroupSiteInfo) are
+    # projected there — an edge or sticky ref to a detached group must not
+    # resurrect its LDAP entry. Scoped In() query: O(user's groups), not
+    # O(site's groups).
+    if group_ids:
+        gsis = await GroupSiteInfo.find(
+            In(GroupSiteInfo.group.id, list(group_ids)),
+            GroupSiteInfo.site.id == site.id,
+        ).to_list()
+        present = {link_target_id(g.group) for g in gsis}
+        group_ids &= present
+        sticky_ids &= present
 
     groups = (
         await Group.find(In(Group.id, list(group_ids))).to_list()
@@ -247,6 +321,7 @@ class GroupRefs:
     shared by `DeleteGroup`'s cascade and the CLI's deletion preview."""
 
     memberships: list
+    site_infos: list
     storages: list
     storage_volumes: list
     slurm_accounts: list
@@ -257,6 +332,7 @@ class GroupRefs:
     def counts(self) -> dict[str, int]:
         return {
             'group_memberships': len(self.memberships),
+            'group_site_infos': len(self.site_infos),
             'storages': len(self.storages),
             'storage_volumes': len(self.storage_volumes),
             'slurm_accounts': len(self.slurm_accounts),
@@ -274,6 +350,10 @@ async def gather_group_references(group: Group) -> GroupRefs:
     the group."""
     memberships = await GroupMembership.find(
         GroupMembership.group.id == group.id,
+    ).to_list()
+
+    site_infos = await GroupSiteInfo.find(
+        GroupSiteInfo.group.id == group.id,
     ).to_list()
 
     storages = await Storage.find(Storage.group.id == group.id).to_list()
@@ -312,7 +392,7 @@ async def gather_group_references(group: Group) -> GroupRefs:
     ).to_list()
 
     return GroupRefs(
-        memberships=memberships,
+        memberships=memberships, site_infos=site_infos,
         storages=storages, storage_volumes=storage_volumes,
         slurm_accounts=slurm_accounts,
         slurm_associations=slurm_associations,
@@ -328,18 +408,11 @@ async def _gids_with_type(type_str: str) -> set[PydanticObjectId]:
 
 
 async def _gids_at_site(sitename: str) -> set[PydanticObjectId]:
-    """Groups present at a site: any membership edge there, plus the
-    site's sticky groups."""
+    """Groups present at a site: exactly the `GroupSiteInfo` records."""
     site = await Site.find_one(Site.name == sitename)
     if site is None:
         return set()
-    edges = await GroupMembership.find(
-        GroupMembership.site.id == site.id,
-    ).to_list()
-    ids = {link_target_id(e.group) for e in edges}
-    ids |= _sticky_group_ids(site)
-    ids.discard(None)
-    return ids
+    return await site_present_group_ids(site)
 
 
 async def _gids_with_user(

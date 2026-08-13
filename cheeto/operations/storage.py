@@ -28,6 +28,7 @@ from ..models.user import User
 from ..queries.storage import get_storage, list_site_volumes
 from ..utils import size_to_megs_exact
 from .base import Operation
+from .group_site import ensure_group_site
 
 
 def _backend_config_kwargs(backend: str) -> dict[str, Any]:
@@ -382,6 +383,8 @@ async def _provision_home_storage(
         static_mount=smount,
     )
     await storage.insert(session=session)
+    # The home's personal group must be present at the site.
+    await ensure_group_site(group, site, session)
     return storage, mechanism
 
 
@@ -607,6 +610,7 @@ async def _provision_group_storage(
         static_mount=smount,
     )
     await storage.insert(session=session)
+    await ensure_group_site(group, site, session)
     return storage, mechanism
 
 
