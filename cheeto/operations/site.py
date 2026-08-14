@@ -13,6 +13,7 @@ from ..models.slurm import SlurmAccount, SlurmAllocation
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
 from .base import Operation
+from .group_site import ensure_group_site
 
 
 class CreateSite(Operation):
@@ -94,6 +95,9 @@ class AddStickyGroup(Operation):
                 f'Group {self.groupname!r} is an access/status group; not '
                 f'eligible for site.group.sticky'
             )
+        # Before the idempotency early-return so a re-run heals a missing
+        # presence record.
+        await ensure_group_site(group, site, session)
         if group.id in set(site.group.sticky):
             return  # idempotent
         site.group.sticky.append(group.id)

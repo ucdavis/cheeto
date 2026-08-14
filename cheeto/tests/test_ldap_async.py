@@ -288,6 +288,14 @@ class TestGroupCRUD:
         fetched = await manager.get_group('eng')
         assert fetched.members == {'carol', 'eve'}
 
+        # Replace-with-empty deletes the memberUid attribute entirely; the
+        # entry survives member-less (GSI-present groups with no members on
+        # a site are projected as empty entries).
+        await manager.set_group_members('eng', set())
+        fetched = await manager.get_group('eng')
+        assert fetched is not None
+        assert fetched.members == set()
+
     async def test_list_user_memberships(self, manager, site):
         await manager.add_user(LDAPUserRecord(
             username='frank', email='frank@x.test',

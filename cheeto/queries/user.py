@@ -16,6 +16,7 @@ from beanie.operators import In
 from ..models.base import link_target_id
 from ..models.group import AccessGroup, Group, StatusGroup
 from ..models.group_membership import GroupMembership
+from ..models.group_site_info import GroupSiteInfo
 from ..models.hippo import HippoEvent
 from ..models.site import Site
 from ..models.slurm import SlurmAccount
@@ -428,6 +429,7 @@ class UserRefs:
     coordinator_accounts: list
     hippo_events: list
     personal_group: Group | None
+    personal_group_site_infos: list
 
     def counts(self) -> dict[str, int]:
         return {
@@ -439,6 +441,7 @@ class UserRefs:
             'slurm_coordinator_seats': len(self.coordinator_accounts),
             'hippo_events': len(self.hippo_events),
             'personal_group': 1 if self.personal_group is not None else 0,
+            'group_site_infos': len(self.personal_group_site_infos),
         }
 
 
@@ -455,6 +458,12 @@ async def gather_user_references(user: User) -> UserRefs:
 
     personal_group = await Group.find_one(
         Group.name == user.name, Group.type == 'user',
+    )
+    personal_group_site_infos = (
+        await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == personal_group.id,
+        ).to_list()
+        if personal_group is not None else []
     )
 
     storages = await Storage.find(Storage.owner.id == user.id).to_list()
@@ -488,4 +497,5 @@ async def gather_user_references(user: User) -> UserRefs:
         storages=storages, storage_volumes=storage_volumes,
         coordinator_accounts=coordinator_accounts,
         hippo_events=hippo_events, personal_group=personal_group,
+        personal_group_site_infos=personal_group_site_infos,
     )

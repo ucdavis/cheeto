@@ -565,7 +565,12 @@ class AsyncLDAPManager:
                 new = (current | add_set) - remove_set
             if new == current:
                 return
-            entry[members_attr] = sorted(new)
+            if new:
+                entry[members_attr] = sorted(new)
+            else:
+                # Replace-with-empty deletes the attribute per RFC 4511;
+                # be explicit about it (mirrors _modify_attrs' clear path).
+                del entry[members_attr]
             await entry.modify()
         await self._pooled_op(_op)
 

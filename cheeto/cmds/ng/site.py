@@ -11,6 +11,7 @@ from rich.table import Table
 from .. import commands
 from . import parent
 from ...log import Console
+from ...models.group_site_info import GroupSiteInfo
 from ...models.site import Site
 from ...operations import (
     AddSiteAlias,
@@ -161,10 +162,17 @@ async def _site_to_dict(site: Site) -> dict:
             resolve_site_storage_settings(site.storage),
         )
     )
+    # Count, not names: post-backfill every personal group at the site has
+    # a presence record — the list would be thousands long. Names via
+    # `ng group list --site`.
+    group_count = await GroupSiteInfo.find(
+        GroupSiteInfo.site.id == site.id,
+    ).count()
     return {
         'name': site.name,
         'fqdn': site.fqdn,
         'aliases': site.aliases,
+        'group_count': group_count,
         'sticky_groups': sticky_groups,
         'sticky_slurm_accounts': sticky_accounts,
         'default_slurm_account': default_account,
@@ -185,6 +193,11 @@ def _render_site_panel(data: dict) -> Panel:
 
     aliases = data.get('aliases')
     table.add_row('aliases', ', '.join(aliases) if aliases else '[dim](none)[/]')
+
+    table.add_row(
+        'groups',
+        f"{data['group_count']} [dim](`group list --site` for names)[/]",
+    )
 
     groups = data['sticky_groups']
     table.add_row(

@@ -32,6 +32,7 @@ from ..slurm_sync import (
     reconcile,
 )
 from .base import UNSET, Operation
+from .group_site import ensure_group_site
 
 
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
@@ -464,6 +465,7 @@ class CreateSlurmAccount(Operation):
             group=group, site=site, limits=limits, coordinators=coordinators,
         )
         await account.insert(session=session)
+        await ensure_group_site(group, site, session)
         self._account = account
         return account
 
@@ -819,6 +821,8 @@ class ProvisionSlurmAllocation(Operation):
             account = SlurmAccount(group=group, site=site)
             await account.insert(session=session)
             self.created_account = True
+        # Unconditional: also self-heals presence for pre-existing accounts.
+        await ensure_group_site(group, site, session)
         partition = await SlurmPartition.find_one(
             SlurmPartition.name == self.partition_name,
             SlurmPartition.site.id == site.id,

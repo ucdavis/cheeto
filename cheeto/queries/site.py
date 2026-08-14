@@ -42,10 +42,12 @@ def _build_site_linked_models() -> list[tuple[str, type]]:
     from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
     from ..models.user_site_info import UserSiteInfo
     from ..models.group_membership import GroupMembership
+    from ..models.group_site_info import GroupSiteInfo
     from ..models.hippo import HippoEvent
     return [
         ('user_site_info', UserSiteInfo),
         ('group_membership', GroupMembership),
+        ('group_site_info', GroupSiteInfo),
         ('slurm_associations', SlurmAssociation),
         ('slurm_qos', SlurmQOS),
         ('slurm_partitions', SlurmPartition),

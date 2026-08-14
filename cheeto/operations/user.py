@@ -34,6 +34,7 @@ from ..queries.user import (
     gather_user_references,
 )
 from .base import Operation
+from .group_site import ensure_group_site
 from .storage import _provision_home_storage
 
 
@@ -395,6 +396,11 @@ class CreateClassUsers(Operation):
             )
         self._base_uid = base_uid
 
+        if group is not None:
+            # The direct GroupMembership inserts below bypass _AddToGroup,
+            # so materialize the class group's presence here.
+            await ensure_group_site(group, site, session)
+
         results: list[tuple[User, str]] = []
         for i, (name, password) in enumerate(zip(self.names, self.passwords)):
             op = CreateUser(
@@ -408,6 +414,9 @@ class CreateClassUsers(Operation):
             await UserSiteInfo(
                 user=user, site=site, status=active_sg,
             ).insert(session=session)
+            # Explicit even though home provisioning also ensures it —
+            # presence must not depend on the home-storage configuration.
+            await ensure_group_site(personal_group, site, session)
             if group is not None:
                 await GroupMembership(
                     user=user, group=group, site=site, roles=['member'],
@@ -1001,6 +1010,8 @@ class DeleteUser(Operation):
                         if g != refs.personal_group.id
                     ]
                     await site.save(session=session)
+            for gsi in refs.personal_group_site_infos:
+                await gsi.delete(session=session)
             await refs.personal_group.delete(session=session)
 
         await user.delete(session=session)

@@ -22,6 +22,7 @@ from ..models.site import Site
 from ..models.user import UCDIAMInfo, User, SshKey
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
+from ..models.group_site_info import GroupSiteInfo
 from ..models.slurm import (
     SlurmAccount,
     SlurmAccountLimits,
@@ -1259,6 +1260,20 @@ class TestCreateClassUsersOp:
         ).to_list()
         assert all(e.roles == ['member'] for e in edges)
 
+        # Presence records: one for the class group, one per personal group.
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count() == 1
+        for user, _ in results:
+            personal = await Group.find_one(
+                Group.name == user.name, Group.type == 'user',
+            )
+            assert await GroupSiteInfo.find(
+                GroupSiteInfo.group.id == personal.id,
+                GroupSiteInfo.site.id == site.id,
+            ).count() == 1
+
     async def test_nonexistent_site_and_group(self, beanie_client):
         with pytest.raises(ValueError, match='Site .* does not exist'):
             await CreateClassUsers.run(
@@ -1611,6 +1626,14 @@ class TestSiteUserOps:
         assert fetched.status is not None
         assert fetched.status.status_name == 'active'
 
+        # The personal group followed its owner onto the site.
+        personal = await Group.find_one(
+            Group.name == 'siteuser', Group.type == 'user',
+        )
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == personal.id,
+        ).count() == 1
+
         await RemoveSiteUser.run(
             beanie_client, None,
             user_name='siteuser', site_name='susite',
@@ -1619,6 +1642,10 @@ class TestSiteUserOps:
             UserSiteInfo.user.id == user.id,
         )
         assert fetched is None
+        # ...and left with them (no home storage at the site).
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == personal.id,
+        ).count() == 0
 
     async def test_add_site_user_duplicate(self, beanie_client):
         user, _ = await CreateUser.run(
@@ -3633,6 +3660,10 @@ class TestSiteToPuppetLegacy:
         await GroupMembership(
             user=user, group=lab, site=site, roles=['member'],
         ).insert()
+        # Presence is GSI-authoritative (production attach paths ensure
+        # these; direct-seeded tests add them explicitly).
+        await GroupSiteInfo(group=primary, site=site).insert()
+        await GroupSiteInfo(group=lab, site=site).insert()
 
         result = await site_to_puppet_legacy(site)
         assert set(result.user.keys()) == {'puppet_alice'}
@@ -3668,6 +3699,7 @@ class TestSiteToPuppetLegacy:
         await user.insert()
         sticky_g = Group(name='pl_sticky', gid=61001)
         await sticky_g.insert()  # bob is NOT in members
+        await GroupSiteInfo(group=sticky_g, site=site).insert()
 
         await UserSiteInfo(
             user=user, site=site,
@@ -3824,6 +3856,7 @@ class TestSiteToPuppetLegacy:
 
         lab = Group(name='pl_lab', gid=61003)
         await lab.insert()
+        await GroupSiteInfo(group=lab, site=site).insert()
         await GroupMembership(
             user=member, group=lab, site=site, roles=['member'],
         ).insert()
@@ -3906,6 +3939,8 @@ class TestSiteToPuppetLegacyStorage:
         await GroupMembership(
             user=user, group=lab, site=site, roles=['member'],
         ).insert()
+        await GroupSiteInfo(group=primary, site=site).insert()
+        await GroupSiteInfo(group=lab, site=site).insert()
         return site, user, primary, lab
 
     @staticmethod
@@ -4156,6 +4191,7 @@ class TestSyncUserToLDAPMembership:
         ).insert()
         lab = Group(name='labgrp', gid=71000)
         await lab.insert()
+        await GroupSiteInfo(group=lab, site=site).insert()
         await GroupMembership(
             user=user, group=lab, site=site, roles=['member'],
         ).insert()
@@ -4192,6 +4228,27 @@ class TestSyncUserToLDAPMembership:
 
         assert result.extra['removed_groups'] == ['oldgrp']
         assert 'labgrp' not in result.extra['removed_groups']
+
+    async def test_detached_group_membership_removed(self, beanie_client):
+        # The membership edge survives but the group's GroupSiteInfo is
+        # gone: presence is authoritative, so the reconcile strips the
+        # user's memberUid instead of fighting the eventual prune.
+        user, site, lab = await self._seed_user_on_site()
+        gsi = await GroupSiteInfo.find_one(
+            GroupSiteInfo.group.id == lab.id,
+            GroupSiteInfo.site.id == site.id,
+        )
+        await gsi.delete()
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users'},
+        )
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['removed_groups'] == ['labgrp']
 
     async def test_per_site_status_override_projected(self, beanie_client):
         # Global status 'active', per-site override 'disabled' → the user must
@@ -4666,6 +4723,7 @@ class TestSyncGroupToLDAPGate:
         user, site = await _seed_gate_site()
         group = Group(name='gategrp', gid=74100)
         await group.insert()
+        await GroupSiteInfo(group=group, site=site).insert()
         await GroupMembership(
             user=user, group=group, site=site, roles=['member'],
         ).insert()
@@ -4694,23 +4752,55 @@ class TestSyncGroupToLDAPGate:
         await edge.delete()
         assert (await Group.get(group.id)).ldap.needs_sync('gatesite')
 
-    async def test_no_members_writes_watermark(self, beanie_client):
+    async def test_not_on_site_writes_watermark(self, beanie_client):
+        # No GroupSiteInfo at the site → presence-skipped (steady state,
+        # watermark written so the second pass is clean).
         _, site = await _seed_gate_site()
         group = Group(name='gategrp', gid=74100)
         await group.insert()
         ldap = _FakeLDAPManager()
 
         r1 = await self._sync(beanie_client, ldap)
-        assert r1.outcome == 'skipped_no_members_on_site'
+        assert r1.outcome == 'skipped_not_on_site'
+        assert ldap.group_writes == []
+        r2 = await self._sync(beanie_client, ldap)
+        assert r2.outcome == 'skipped_clean'
+
+    async def test_not_on_site_skipped_even_with_force(self, beanie_client):
+        # force/full override dirtiness, never presence.
+        _, site = await _seed_gate_site()
+        await Group(name='gategrp', gid=74100).insert()
+        ldap = _FakeLDAPManager()
+
+        r = await self._sync(beanie_client, ldap, force=True)
+        assert r.outcome == 'skipped_not_on_site'
+        assert ldap.group_writes == []
+
+    async def test_empty_group_written_when_on_site(self, beanie_client):
+        # A present group (GroupSiteInfo) with zero members on the site is
+        # written as an empty entry — the analogue of a user with a USI
+        # and no group memberships.
+        _, site = await _seed_gate_site()
+        group = Group(name='gategrp', gid=74100)
+        await group.insert()
+        await GroupSiteInfo(group=group, site=site).insert()
+        ldap = _FakeLDAPManager()
+
+        r1 = await self._sync(beanie_client, ldap)
+        assert r1.outcome == 'membership_diffed'
+        assert 'gategrp' in ldap.group_writes
+        assert r1.extra['member_count'] == 0
         r2 = await self._sync(beanie_client, ldap)
         assert r2.outcome == 'skipped_clean'
 
     async def test_user_group_synced_without_members(self, beanie_client):
-        # A personal group (type='user', same name+gid as its owner) has no
-        # member edges, but must still be projected because its owner is on
-        # the site.
+        # A personal group (type='user') has no member edges, but is
+        # projected wherever it has a GroupSiteInfo (created by
+        # AddSiteUser/home provisioning for its owner's sites).
         user, site = await _seed_gate_site()
-        await Group(name=user.name, gid=user.uid, type='user').insert()
+        personal = Group(name=user.name, gid=user.uid, type='user')
+        await personal.insert()
+        await GroupSiteInfo(group=personal, site=site).insert()
         ldap = _FakeLDAPManager()
 
         r1 = await self._sync(beanie_client, ldap, groupname=user.name)
@@ -4722,7 +4812,8 @@ class TestSyncGroupToLDAPGate:
         assert r2.outcome == 'skipped_clean'
 
     async def test_user_group_skipped_when_owner_absent(self, beanie_client):
-        # A personal group whose owner is NOT on the site is still skipped.
+        # A personal group with no GroupSiteInfo at the site (owner never
+        # added there) is presence-skipped.
         await _seed_gate_site()
         offsite = User(
             name='offsite_u', email='offsite_u@x.test', uid=74050, gid=74050,
@@ -4734,7 +4825,7 @@ class TestSyncGroupToLDAPGate:
         ldap = _FakeLDAPManager()
 
         r = await self._sync(beanie_client, ldap, groupname='offsite_u')
-        assert r.outcome == 'skipped_no_members_on_site'
+        assert r.outcome == 'skipped_not_on_site'
         assert ldap.group_writes == []
 
     async def test_special_group_no_watermark(self, beanie_client):
@@ -4807,6 +4898,7 @@ class TestSyncSiteLDAPIncremental:
         ).insert()
         group = Group(name='gategrp', gid=74100)
         await group.insert()
+        await GroupSiteInfo(group=group, site=site).insert()
         await GroupMembership(
             user=user, group=group, site=site, roles=['member'],
         ).insert()
@@ -4956,6 +5048,7 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
 
     group = Group(name='sllab', gid=72000)
     await group.insert()
+    await GroupSiteInfo(group=group, site=site).insert()
 
     alice = User(
         name='sl_alice', email='a@sl.test', uid=72001, gid=72001,
@@ -5808,6 +5901,7 @@ class TestDeleteSite:
         assert counts == {
             'user_site_info': 2,
             'group_membership': 2,
+            'group_site_info': 1,
             'slurm_associations': 1,
             'slurm_qos': 1,
             'slurm_partitions': 1,
@@ -8625,6 +8719,11 @@ class TestFindGroups:
         await site_a.insert()
         await site_b.insert()
 
+        # Presence records (production attach paths ensure these).
+        await GroupSiteInfo(group=lab_a, site=site_a).insert()
+        await GroupSiteInfo(group=sticky, site=site_a).insert()
+        await GroupSiteInfo(group=lab_b, site=site_b).insert()
+
         await GroupMembership(
             user=alice, group=lab_a, site=site_a, roles=['member'],
         ).insert()
@@ -8656,6 +8755,26 @@ class TestFindGroups:
         await self._seed(beanie_client)
         names = [g.name for g in await find_groups(site='fga')]
         assert names == ['fg_lab_a', 'fg_sticky']
+
+    async def test_site_filter_is_gsi_authoritative(self, beanie_client):
+        # Presence = GroupSiteInfo, not membership edges: an edge to a
+        # detached group doesn't list it, and a GSI with no edges does.
+        from cheeto.queries import find_groups
+        alice = await self._seed(beanie_client)
+        site_a = await Site.find_one(Site.name == 'fga')
+
+        detached = Group(name='fg_detached', gid=78104)
+        await detached.insert()
+        await GroupMembership(
+            user=alice, group=detached, site=site_a, roles=['member'],
+        ).insert()  # edge but no presence record
+
+        empty = Group(name='fg_empty', gid=78105)
+        await empty.insert()
+        await GroupSiteInfo(group=empty, site=site_a).insert()
+
+        names = [g.name for g in await find_groups(site='fga')]
+        assert names == ['fg_empty', 'fg_lab_a', 'fg_sticky']
 
     async def test_user_filter_and_site_narrowing(self, beanie_client):
         from cheeto.queries import find_groups
@@ -8696,3 +8815,606 @@ class TestFindGroups:
         assert await find_groups(user='nonesuch') == []
         with pytest.raises(ValueError, match='AND or OR'):
             await find_groups(operator='XOR')
+
+
+class TestGroupSiteInfoModel:
+
+    async def _seed(self):
+        site = Site(name='gsisite', fqdn='gsi.test')
+        await site.insert()
+        group = Group(name='gsigrp', gid=79000)
+        await group.insert()
+        return group, site
+
+    async def test_unique_group_site(self, beanie_client):
+        from pymongo.errors import DuplicateKeyError
+        group, site = await self._seed()
+        await GroupSiteInfo(group=group, site=site).insert()
+        with pytest.raises(DuplicateKeyError):
+            await GroupSiteInfo(group=group, site=site).insert()
+
+    async def test_insert_and_delete_touch_group_only(self, beanie_client):
+        group, site = await self._seed()
+        user = User(
+            name='gsiuser', email='gsi@x.test', uid=79001, gid=79001,
+            fullname='GSI User', home_directory='/home/gsiuser',
+        )
+        await user.insert()
+        g_before = (await Group.get(group.id)).ldap.modified_at
+        u_before = (await User.get(user.id)).ldap.modified_at
+
+        gsi = GroupSiteInfo(group=group, site=site)
+        await gsi.insert()
+        g_after = (await Group.get(group.id)).ldap.modified_at
+        assert g_after > g_before
+        assert (await User.get(user.id)).ldap.modified_at == u_before
+
+        await gsi.delete()
+        assert (await Group.get(group.id)).ldap.modified_at > g_after
+
+
+class TestEnsureGroupSite:
+
+    async def test_idempotent(self, beanie_client):
+        from cheeto.operations import ensure_group_site
+        site = Site(name='egs', fqdn='egs.test')
+        await site.insert()
+        group = Group(name='egsgrp', gid=79010)
+        await group.insert()
+
+        first = await ensure_group_site(group, site, None)
+        second = await ensure_group_site(group, site, None)
+        assert first.id == second.id
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+        ).count() == 1
+
+
+class TestAddRemoveSiteGroupOps:
+
+    async def _seed(self):
+        site = Site(name='asg', fqdn='asg.test')
+        await site.insert()
+        group = Group(name='asggrp', gid=79020)
+        await group.insert()
+        return group, site
+
+    async def test_add_creates_presence(self, beanie_client):
+        from cheeto.operations import AddSiteGroup
+        group, site = await self._seed()
+        await AddSiteGroup.run(
+            beanie_client, None, group_name='asggrp', site_name='asg',
+        )
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count() == 1
+        hist = await History.find_one(History.op == 'add_site_group')
+        assert hist.changes == {'group': 'asggrp', 'site': 'asg'}
+
+    async def test_add_refusals(self, beanie_client):
+        from cheeto.operations import AddSiteGroup
+        group, site = await self._seed()
+        await Group(name='asg_personal', gid=79021, type='user').insert()
+
+        with pytest.raises(ValueError, match='access/status group'):
+            await AddSiteGroup.run(
+                beanie_client, None,
+                group_name='active-users', site_name='asg',
+            )
+        with pytest.raises(ValueError, match='personal group'):
+            await AddSiteGroup.run(
+                beanie_client, None,
+                group_name='asg_personal', site_name='asg',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await AddSiteGroup.run(
+                beanie_client, None, group_name='ghost', site_name='asg',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await AddSiteGroup.run(
+                beanie_client, None, group_name='asggrp', site_name='ghost',
+            )
+
+        await AddSiteGroup.run(
+            beanie_client, None, group_name='asggrp', site_name='asg',
+        )
+        with pytest.raises(ValueError, match='already on site'):
+            await AddSiteGroup.run(
+                beanie_client, None, group_name='asggrp', site_name='asg',
+            )
+
+    async def test_remove_clean_and_not_on_site(self, beanie_client):
+        from cheeto.operations import AddSiteGroup, RemoveSiteGroup
+        group, site = await self._seed()
+        with pytest.raises(ValueError, match='not on site'):
+            await RemoveSiteGroup.run(
+                beanie_client, None, group_name='asggrp', site_name='asg',
+            )
+        await AddSiteGroup.run(
+            beanie_client, None, group_name='asggrp', site_name='asg',
+        )
+        await RemoveSiteGroup.run(
+            beanie_client, None, group_name='asggrp', site_name='asg',
+        )
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+        ).count() == 0
+
+    async def test_remove_edges_need_force(self, beanie_client):
+        from cheeto.operations import RemoveSiteGroup
+        group, site = await self._seed()
+        user = User(
+            name='asguser', email='asg@x.test', uid=79022, gid=79022,
+            fullname='ASG User', home_directory='/home/asguser',
+        )
+        await user.insert()
+        # AddGroupMember creates the edge AND the presence record.
+        await AddGroupMember.run(
+            beanie_client, None,
+            group_name='asggrp', user_name='asguser', site_name='asg',
+        )
+
+        with pytest.raises(ValueError, match='membership edge'):
+            await RemoveSiteGroup.run(
+                beanie_client, None, group_name='asggrp', site_name='asg',
+            )
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+        ).count() == 1
+
+        result = await RemoveSiteGroup.run(
+            beanie_client, None,
+            group_name='asggrp', site_name='asg', force=True,
+        )
+        assert result == {'memberships_deleted': 1}
+        assert await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+        ).count() == 0
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+        ).count() == 0
+
+    async def test_remove_blockers_beat_force(self, beanie_client):
+        from cheeto.operations import AddSiteGroup, RemoveSiteGroup
+        group, site = await self._seed()
+        await AddSiteGroup.run(
+            beanie_client, None, group_name='asggrp', site_name='asg',
+        )
+
+        # Slurm account blocks even with force.
+        account = SlurmAccount(group=group, site=site)
+        await account.insert()
+        with pytest.raises(ValueError, match='Slurm account'):
+            await RemoveSiteGroup.run(
+                beanie_client, None,
+                group_name='asggrp', site_name='asg', force=True,
+            )
+        await account.delete()
+
+        # Storage blocks even with force.
+        owner = User(
+            name='asgowner', email='asgo@x.test', uid=79023, gid=79023,
+            fullname='ASG Owner', home_directory='/home/asgowner',
+        )
+        await owner.insert()
+        volume = await _seed_volume(site, name='asgvol')
+        storage = Storage(
+            name='asgstor', site=site, category='group',
+            owner=owner, group=group, volume=volume,
+        )
+        await storage.insert()
+        with pytest.raises(ValueError, match='storage records'):
+            await RemoveSiteGroup.run(
+                beanie_client, None,
+                group_name='asggrp', site_name='asg', force=True,
+            )
+        await storage.delete()
+
+        # Sticky reference blocks even with force.
+        site = await Site.find_one(Site.name == 'asg')
+        site.group.sticky = [group.id]
+        await site.save()
+        with pytest.raises(ValueError, match='sticky-group'):
+            await RemoveSiteGroup.run(
+                beanie_client, None,
+                group_name='asggrp', site_name='asg', force=True,
+            )
+
+        # Blocked removals never dropped the presence record.
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+        ).count() == 1
+
+
+class TestGroupSiteEnsureOnAttach:
+    """Every attach path materializes a GroupSiteInfo via ensure_group_site."""
+
+    async def _presence_count(self, group, site) -> int:
+        return await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count()
+
+    @pytest.mark.parametrize('opcls', [
+        AddGroupMember, AddGroupSponsor, AddGroupSudoer, AddGroupSlurmer,
+    ])
+    async def test_role_add_ensures_presence(self, beanie_client, opcls):
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        group = Group(name='gsatgrp', gid=79100)
+        await group.insert()
+        user = User(
+            name='gsatu', email='gsat@x.test', uid=79101, gid=79101,
+            fullname='GSAT User', home_directory='/home/gsatu',
+        )
+        await user.insert()
+
+        await opcls.run(
+            beanie_client, None,
+            group_name='gsatgrp', user_name='gsatu', site_name='gsat',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_create_group_from_sponsor(self, beanie_client):
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        sponsor = User(
+            name='gsatpi', email='pi@x.test', uid=79102, gid=79102,
+            fullname='GSAT PI', home_directory='/home/gsatpi',
+        )
+        await sponsor.insert()
+
+        group = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='gsatpi', site_name='gsat',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_add_sticky_group_heals(self, beanie_client):
+        from cheeto.operations import AddStickyGroup
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        group = Group(name='gsatgrp', gid=79100)
+        await group.insert()
+
+        await AddStickyGroup.run(
+            beanie_client, None, sitename='gsat', groupname='gsatgrp',
+        )
+        assert await self._presence_count(group, site) == 1
+
+        # Re-running the (idempotent) sticky add heals a lost record.
+        gsi = await GroupSiteInfo.find_one(GroupSiteInfo.group.id == group.id)
+        await gsi.delete()
+        await AddStickyGroup.run(
+            beanie_client, None, sitename='gsat', groupname='gsatgrp',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_create_slurm_account(self, beanie_client):
+        from cheeto.operations import CreateSlurmAccount
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        group = Group(name='gsatgrp', gid=79100)
+        await group.insert()
+
+        await CreateSlurmAccount.run(
+            beanie_client, None, site_name='gsat', group_name='gsatgrp',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_provision_allocation_autocreates(self, beanie_client):
+        site = await _seed_slurm_site()
+        group = Group(name='provgrp', gid=72100)
+        await group.insert()
+
+        await ProvisionSlurmAllocation.run(
+            beanie_client, None,
+            site_name='slsite', account_group_name='provgrp',
+            partition_name='hi',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_group_storage(self, beanie_client):
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        await _seed_volume(site, name='groups', host_path='/nas/groups')
+        await AutomountMap(name='group', site=site, prefix='/group').insert()
+        group = Group(name='gsatgrp', gid=79100)
+        await group.insert()
+        owner = User(
+            name='gsatown', email='own@x.test', uid=79103, gid=79103,
+            fullname='GSAT Owner', home_directory='/home/gsatown',
+        )
+        await owner.insert()
+
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='gsatgrp', site_name='gsat',
+            quota='1T', parent_volume='groups', owner_name='gsatown',
+        )
+        assert await self._presence_count(group, site) == 1
+
+    async def test_home_storage_personal_group(self, beanie_client):
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name='gsat', fqdn='gsat.test')
+        await site.insert()
+        await _seed_volume(site, name='home', host_path='/nas/home')
+        await AutomountMap(name='home', site=site, prefix='/home').insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='gsat',
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        await CreateUser.run(
+            beanie_client, None,
+            name='gsathome', email='home@x.test', uid=79104,
+            fullname='GSAT Home',
+        )
+
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='gsathome', site_name='gsat',
+        )
+        personal = await Group.find_one(
+            Group.name == 'gsathome', Group.type == 'user',
+        )
+        assert await self._presence_count(personal, site) == 1
+
+
+class TestRemoveSiteUserGSI:
+
+    async def test_kept_while_home_storage_remains(self, beanie_client):
+        from cheeto.operations import SetSiteStorageDefaults
+        site = Site(name='rsg', fqdn='rsg.test')
+        await site.insert()
+        await _seed_volume(site, name='home', host_path='/nas/home')
+        await AutomountMap(name='home', site=site, prefix='/home').insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='rsg',
+            home_volume='home', home_quota='20G', home_automount_map='home',
+        )
+        await CreateUser.run(
+            beanie_client, None,
+            name='rsguser', email='rsg@x.test', uid=79110,
+            fullname='RSG User',
+        )
+        await AddSiteUser.run(
+            beanie_client, None, user_name='rsguser', site_name='rsg',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='rsguser', site_name='rsg',
+        )
+        personal = await Group.find_one(
+            Group.name == 'rsguser', Group.type == 'user',
+        )
+
+        await RemoveSiteUser.run(
+            beanie_client, None, user_name='rsguser', site_name='rsg',
+        )
+        # USI gone, but presence kept: the home storage still references
+        # the personal group at the site.
+        assert await UserSiteInfo.find_all().count() == 0
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == personal.id,
+        ).count() == 1
+        hist = await History.find_one(History.op == 'remove_site_user')
+        assert hist.changes['kept_group_site'] is True
+
+
+class TestBackfillGroupSiteInfo:
+
+    async def _seed(self, beanie_client):
+        site_a = Site(name='bf_a', fqdn='bfa.test')
+        site_b = Site(name='bf_b', fqdn='bfb.test')
+        await site_a.insert()
+        await site_b.insert()
+
+        member = User(
+            name='bf_member', email='bfm@x.test', uid=79200, gid=79200,
+            fullname='BF Member', home_directory='/home/bf_member',
+        )
+        await member.insert()
+        await UserSiteInfo(user=member, site=site_a).insert()
+        # ...and their personal group (imputed via USI presence).
+        await Group(name='bf_member', gid=79200, type='user').insert()
+
+        lab = Group(name='bf_lab', gid=79201)
+        await lab.insert()
+        await GroupMembership(
+            user=member, group=lab, site=site_a, roles=['member'],
+        ).insert()
+
+        sticky = Group(name='bf_sticky', gid=79202)
+        await sticky.insert()
+        site_a.group.sticky = [sticky.id]
+        await site_a.save()
+
+        slurm_grp = Group(name='bf_slurm', gid=79203)
+        await slurm_grp.insert()
+        await SlurmAccount(group=slurm_grp, site=site_a).insert()
+
+        stor_grp = Group(name='bf_storgrp', gid=79204)
+        await stor_grp.insert()
+        volume = await _seed_volume(site_a, name='bfvol')
+        await Storage(
+            name='bf_stor', site=site_a, category='group',
+            owner=member, group=stor_grp, volume=volume,
+        ).insert()
+
+        # Explicit-only presence: no imputed source.
+        extra = Group(name='bf_extra', gid=79205)
+        await extra.insert()
+        await GroupSiteInfo(group=extra, site=site_a).insert()
+
+    async def test_dry_run_reports_without_writing(self, beanie_client):
+        from cheeto.operations import BackfillGroupSiteInfo
+        await self._seed(beanie_client)
+
+        report = await BackfillGroupSiteInfo.run(
+            beanie_client, None, dry_run=True,
+        )
+        assert report['bf_a']['created'] == [
+            'bf_lab', 'bf_member', 'bf_slurm', 'bf_sticky', 'bf_storgrp',
+        ]
+        assert report['bf_a']['existing'] == 1
+        assert report['bf_a']['extras'] == ['bf_extra']
+        assert report['bf_b']['created'] == []
+        # Nothing written: only the pre-existing explicit record remains.
+        assert await GroupSiteInfo.find_all().count() == 1
+
+    async def test_apply_then_idempotent_rerun(self, beanie_client):
+        from cheeto.operations import BackfillGroupSiteInfo
+        await self._seed(beanie_client)
+
+        report = await BackfillGroupSiteInfo.run(beanie_client, None)
+        assert len(report['bf_a']['created']) == 5
+        assert await GroupSiteInfo.find_all().count() == 6
+
+        hist = await History.find_one(
+            History.op == 'backfill_group_site_info',
+        )
+        assert hist.changes['sites']['bf_a'] == {
+            'created': 5, 'existing': 1, 'extras': 1,
+        }
+
+        rerun = await BackfillGroupSiteInfo.run(beanie_client, None)
+        assert rerun['bf_a']['created'] == []
+        assert rerun['bf_a']['existing'] == 6
+        assert rerun['bf_a']['extras'] == ['bf_extra']
+        assert await GroupSiteInfo.find_all().count() == 6
+
+    async def test_site_scoping(self, beanie_client):
+        from cheeto.operations import BackfillGroupSiteInfo
+        await self._seed(beanie_client)
+
+        report = await BackfillGroupSiteInfo.run(
+            beanie_client, None, site_name='bf_b',
+        )
+        assert set(report) == {'bf_b'}
+        # bf_a untouched (still just the explicit record).
+        assert await GroupSiteInfo.find_all().count() == 1
+
+        with pytest.raises(ValueError, match='does not exist'):
+            await BackfillGroupSiteInfo.run(
+                beanie_client, None, site_name='ghost',
+            )
+
+
+class _FakePruneLDAP:
+    """Just enough surface for PruneSiteLDAP's groups phase."""
+
+    def __init__(self, groupnames):
+        self._groups = list(groupnames)
+        self.deleted_groups: list[str] = []
+
+    async def list_groups(self):
+        from types import SimpleNamespace
+        return [SimpleNamespace(groupname=g) for g in self._groups]
+
+    async def delete_group(self, groupname: str) -> None:
+        self.deleted_groups.append(groupname)
+
+
+class TestPruneSiteLDAPGroups:
+
+    async def test_detached_pruned_present_and_special_kept(
+        self, beanie_client,
+    ):
+        from cheeto.operations import PruneSiteLDAP
+        site = Site(name='prsite', fqdn='pr.test')
+        await site.insert()
+        keep = Group(name='pr_keep', gid=79300)
+        await keep.insert()
+        await GroupSiteInfo(group=keep, site=site).insert()
+
+        ldap = _FakePruneLDAP(['pr_keep', 'pr_goner', 'active-users'])
+        plan = await PruneSiteLDAP.run(
+            beanie_client, None,
+            sitename='prsite', ldap=ldap, scope=['groups'], dry_run=True,
+        )
+        assert plan['groups'] == ['pr_goner']
+
+    async def test_ignored_group_kept(self, beanie_client):
+        from cheeto.operations import PruneSiteLDAP
+        site = Site(name='prsite', fqdn='pr.test')
+        await site.insert()
+        keep = Group(name='pr_keep', gid=79300)
+        await keep.insert()
+        await GroupSiteInfo(group=keep, site=site).insert()
+        ignored = Group(name='pr_ignored', gid=79301)
+        ignored.ldap.ignore = True
+        await ignored.insert()
+
+        ldap = _FakePruneLDAP(['pr_keep', 'pr_ignored'])
+        plan = await PruneSiteLDAP.run(
+            beanie_client, None,
+            sitename='prsite', ldap=ldap, scope=['groups'], dry_run=True,
+        )
+        assert plan['groups'] == []
+
+    async def test_aborts_when_backfill_missing(self, beanie_client):
+        from cheeto.ldap_async import LDAPPruneAborted
+        from cheeto.operations import PruneSiteLDAP
+        site = Site(name='prsite', fqdn='pr.test')
+        await site.insert()
+        user = User(
+            name='pruser', email='pr@x.test', uid=79302, gid=79302,
+            fullname='PR User', home_directory='/home/pruser',
+        )
+        await user.insert()
+        group = Group(name='pr_lab', gid=79303)
+        await group.insert()
+        # Membership edges but zero presence records: the backfill hasn't
+        # run — pruning would plan a site-wide wipe.
+        await GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        ).insert()
+
+        ldap = _FakePruneLDAP(['pr_lab'])
+        with pytest.raises(LDAPPruneAborted, match='backfill-sites'):
+            await PruneSiteLDAP.run(
+                beanie_client, None,
+                sitename='prsite', ldap=ldap, scope=['groups'],
+                dry_run=True,
+            )
+
+
+class TestGroupSiteCascades:
+
+    async def test_delete_group_removes_presence(self, beanie_client):
+        from cheeto.operations import AddSiteGroup, DeleteGroup
+        await CreateSite.run(beanie_client, None, name='cs_a', fqdn='a.test')
+        await CreateSite.run(beanie_client, None, name='cs_b', fqdn='b.test')
+        group = await CreateGroup.run(
+            beanie_client, None, name='cs_grp', gid=79400,
+        )
+        for sitename in ('cs_a', 'cs_b'):
+            await AddSiteGroup.run(
+                beanie_client, None, group_name='cs_grp', site_name=sitename,
+            )
+        assert await GroupSiteInfo.find_all().count() == 2
+
+        result = await DeleteGroup.run(
+            beanie_client, None, name='cs_grp', reason='testing',
+        )
+        assert result['group_site_infos'] == 2
+        assert await GroupSiteInfo.find_all().count() == 0
+
+    async def test_delete_user_removes_personal_presence(self, beanie_client):
+        from cheeto.operations import DeleteUser
+        await CreateUser.run(
+            beanie_client, None,
+            name='cs_user', email='cs@x.test', uid=79401,
+            fullname='CS User',
+        )
+        await CreateSite.run(beanie_client, None, name='cs_a', fqdn='a.test')
+        await CreateSite.run(beanie_client, None, name='cs_b', fqdn='b.test')
+        for sitename in ('cs_a', 'cs_b'):
+            await AddSiteUser.run(
+                beanie_client, None, user_name='cs_user', site_name=sitename,
+            )
+        assert await GroupSiteInfo.find_all().count() == 2
+
+        result = await DeleteUser.run(
+            beanie_client, None, name='cs_user', reason='testing',
+        )
+        assert result['group_site_infos'] == 2
+        assert await GroupSiteInfo.find_all().count() == 0

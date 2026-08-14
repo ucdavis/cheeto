@@ -43,6 +43,8 @@ from ..ldap_async import (
     LDAPUserRecord,
 )
 from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group_membership import GroupMembership
+from ..models.group_site_info import GroupSiteInfo
 from ..models.site import Site
 from ..models.storage import Storage
 from ..models.user import SshKey, User
@@ -51,7 +53,11 @@ from ..queries.access_status import (
     resolve_access_ldapnames,
     resolve_status_ldapname,
 )
-from ..queries.group import effective_group_members, effective_user_groups
+from ..queries.group import (
+    effective_group_members,
+    effective_user_groups,
+    site_present_group_ids,
+)
 from ..queries.user import (
     effective_access_links,
     effective_status_link,
@@ -283,8 +289,9 @@ class SyncUserToLDAP(Operation):
         # with the special groups above. Include them so the reconcile keeps
         # the user in their lab/sponsor groups instead of stripping them.
         # `effective_user_groups` returns member-role edges plus sticky
-        # groups — the same membership set SyncGroupToLDAP projects from the
-        # group side via `effective_group_members`.
+        # groups, gated by GroupSiteInfo presence — the same membership set
+        # SyncGroupToLDAP projects from the group side (a detached group is
+        # excluded so the reconcile doesn't fight prune).
         posix_groups, _sticky_ids = await effective_user_groups(user, site)
         target_groups.update(g.name for g in posix_groups)
 
@@ -437,23 +444,26 @@ class SyncGroupToLDAP(Operation):
         if site is None:
             raise ValueError(f'Site {self.sitename!r} does not exist')
 
-        member_names = await self._members_at_site(group, site)
+        gsi = await GroupSiteInfo.find_one(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        )
+        if gsi is None:
+            # GroupSiteInfo is the presence authority; force/full override
+            # *dirtiness*, not presence. Steady state — watermark it (a
+            # later attach re-dirties via the GroupSiteInfo hook). Any
+            # stale LDAP entry is removed by the next prune.
+            self._outcome = 'skipped_not_on_site'
+            await self._write_watermark(group, watermark, session)
+            return LDAPSyncResult(
+                name=self.groupname, outcome=self._outcome,
+                extra={'member_count': 0},
+            )
 
-        if not member_names and not self.force:
-            # A user (personal) group must be projected to every site its
-            # owner is on, even with no member edges (the owner's primary
-            # membership is implicit via passwd gidNumber). Other member-less
-            # groups are not projected here.
-            if not (
-                group.type == 'user'
-                and await self._owner_present_at_site(group, site)
-            ):
-                self._outcome = 'skipped_no_members_on_site'
-                await self._write_watermark(group, watermark, session)
-                return LDAPSyncResult(
-                    name=self.groupname, outcome=self._outcome,
-                    extra={'member_count': 0},
-                )
+        # A present group with zero members on the site is written as an
+        # empty entry — the exact analogue of a user with a UserSiteInfo
+        # and no group memberships.
+        member_names = await self._members_at_site(group, site)
 
         if self.force:
             await self.ldap.delete_group(self.groupname)
@@ -507,18 +517,6 @@ class SyncGroupToLDAP(Operation):
             return set()
         users = await User.find(In(User.id, present_ids)).to_list()
         return {u.name for u in users}
-
-    async def _owner_present_at_site(self, group: Group, site: Site) -> bool:
-        """A user (personal) group must exist on every site its owner is on.
-        The personal group shares the owner's name and gid (CreateUser)."""
-        owner = await User.find_one(User.name == group.name)
-        if owner is None or owner.gid != group.gid:
-            return False
-        usi = await UserSiteInfo.find_one(
-            UserSiteInfo.user.id == owner.id,
-            UserSiteInfo.site.id == site.id,
-        )
-        return usi is not None
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -727,8 +725,10 @@ class PruneSiteLDAP(Operation):
 
     Three phases (`scope` controls which run):
       - users: ldap users not in beanie's User collection
-      - groups: ldap groups (under groups_ou) not in beanie's groups
-        collection. AccessGroup/StatusGroup names are NEVER pruned.
+      - groups: ldap groups (under groups_ou) with no GroupSiteInfo at
+        this site — a group detached from the site is pruned here even if
+        the Group document still exists. AccessGroup/StatusGroup names and
+        `ldap.ignore` records are NEVER pruned.
       - automounts: automountKey values in auto.home/auto.group not
         in beanie's Storage rows.
 
@@ -820,21 +820,50 @@ class PruneSiteLDAP(Operation):
 
     async def _plan_groups(self) -> list[str]:
         ldap_groups = await self.ldap.list_groups()
-        beanie_names = {
-            g.name for g in
-            await Group.find_all(with_children=True).to_list()
-        }
+        site = await Site.find_one(Site.name == self.sitename)
+        if site is None:
+            raise ValueError(f'Site {self.sitename!r} does not exist')
+
+        present_ids = await site_present_group_ids(site)
+        if not present_ids and await GroupMembership.at_site(site).count():
+            # Zero presence records while the site plainly has group data
+            # means the backfill hasn't run — refuse to plan a site-wide
+            # wipe (max_deletions is only the second line of defense).
+            raise LDAPPruneAborted(
+                f'No GroupSiteInfo records at {self.sitename!r} but '
+                f'membership edges exist; run `cheeto ng group '
+                f'backfill-sites` before pruning groups.',
+                would_delete={},
+            )
+        present_names = (
+            {
+                g.name for g in await Group.find(
+                    In(Group.id, list(present_ids)), with_children=True,
+                ).to_list()
+            }
+            if present_ids else set()
+        )
+
+        # Exemptions: access/status groups are global infrastructure that
+        # exists in every site's tree and never carries a GroupSiteInfo;
+        # ldap.ignore records are never managed by cheeto (the old global
+        # keep-set honored that contract implicitly).
         access_names = {
             ag.name for ag in await AccessGroup.find_all().to_list()
         }
         status_names = {
             sg.name for sg in await StatusGroup.find_all().to_list()
         }
-        protected = access_names | status_names
+        ignored_names = {
+            g.name for g in await Group.find(
+                Group.ldap.ignore == True,  # noqa: E712 — beanie query syntax
+                with_children=True,
+            ).to_list()
+        }
+        keep = present_names | access_names | status_names | ignored_names
         return [
             g.groupname for g in ldap_groups
-            if g.groupname not in protected
-            and g.groupname not in beanie_names
+            if g.groupname not in keep
         ]
 
     async def _plan_automounts(self) -> list[str]:
@@ -873,7 +902,7 @@ class PruneSiteLDAP(Operation):
 
 _SYNC_TALLY_KEYS = (
     'created', 'updated', 'recreated', 'memberships_only', 'no_op',
-    'membership_diffed', 'skipped_special', 'skipped_no_members_on_site',
+    'membership_diffed', 'skipped_special', 'skipped_not_on_site',
     'skipped_inactive', 'skipped_clean', 'skipped_ignored',
     'transient_error', 'error',
 )
@@ -964,10 +993,16 @@ class SyncSiteLDAP(Operation):
             )
 
         if 'groups' in self.scope:
-            # Group.find_all() against the base class is polymorphic-aware:
-            # subclasses (AccessGroup/StatusGroup) are filtered by _class_id
-            # when with_children is omitted.
-            groups = await Group.find_all().to_list()
+            # Presence-scoped: exactly the groups with a GroupSiteInfo at
+            # this site. The base-class find (no with_children) is
+            # polymorphic-aware — AccessGroup/StatusGroup rows are filtered
+            # by _class_id even if a stray GSI points at one; their entries
+            # are managed by BootstrapLDAPSite + SyncUserToLDAP instead.
+            present_ids = await site_present_group_ids(site)
+            groups = (
+                await Group.find(In(Group.id, list(present_ids))).to_list()
+                if present_ids else []
+            )
             group_names = self._gate_records(groups, self._groups_tally)
             await self._run_per_record(
                 self._groups_tally, 'group', group_names,

@@ -36,6 +36,7 @@ EXCEPTIONS = {
     ('slurm', 'provision'),
     ('storage', 'rehome'),
     ('group', 'seed-access-status'),
+    ('group', 'backfill-sites'),
     ('user', 'clear-offboarding-site-statuses'),
     ('user', 'redundant-site-statuses'),
 }

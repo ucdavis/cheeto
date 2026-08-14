@@ -20,6 +20,7 @@ from ..models.base import link_target_id
 from ..models.user import User
 from ..queries.group import find_group_by_name, gather_group_references
 from .base import Operation
+from .group_site import ensure_group_site
 
 
 # Standard set of access types and their LDAP groupnames. Seeded into
@@ -199,6 +200,7 @@ class CreateGroupFromSponsor(Operation):
         gid = MIN_PIGROUP_GID + sponsor.uid
         group = Group(name=self.group_name, gid=gid, type='group')
         await group.insert(session=session)
+        await ensure_group_site(group, site, session)
 
         # The sponsor is both a member and sponsor of their own group at the
         # creating site.
@@ -400,6 +402,8 @@ class DeleteGroup(Operation):
             await acct.delete(session=session)
         for edge in refs.memberships:
             await edge.delete(session=session)
+        for gsi in refs.site_infos:
+            await gsi.delete(session=session)
         for storage in refs.storages:
             await storage.delete(session=session)
         for volume in refs.storage_volumes:
