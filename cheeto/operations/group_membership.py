@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from pymongo import AsyncMongoClient
@@ -11,6 +12,40 @@ from ..models.site import Site
 from ..models.user import User
 from .base import Operation
 from .group_site import ensure_group_site
+
+
+async def ensure_group_membership(
+    user: User, group: Group, site: Site,
+    roles: Iterable[MembershipRole],
+    session: AsyncClientSession | None,
+) -> GroupMembership:
+    """Idempotently ensure `user` holds every role in `roles` on `group` at `site`.
+
+    Ensures the group's site presence first (any role edge implies presence),
+    then finds-or-inserts the `(user, group, site)` edge and merges in any
+    missing roles. The find_one passes `session` for the same reason as
+    `ensure_group_site`: inside a transaction, sessionless reads cannot see
+    the transaction's own uncommitted inserts. Do NOT catch DuplicateKeyError
+    here -- a write error inside a Mongo transaction is unrecoverable
+    in-transaction; the unique (user, group, site) index backstops races.
+    """
+    await ensure_group_site(group, site, session)
+    wanted = set(roles)
+    edge = await GroupMembership.find_one(
+        GroupMembership.user.id == user.id,
+        GroupMembership.group.id == group.id,
+        GroupMembership.site.id == site.id,
+        session=session,
+    )
+    if edge is None:
+        edge = GroupMembership(
+            user=user, group=group, site=site, roles=sorted(wanted),
+        )
+        await edge.insert(session=session)
+    elif not wanted <= set(edge.roles):
+        edge.roles = sorted(set(edge.roles) | wanted)
+        await edge.save(session=session)
+    return edge
 
 
 class _GroupMembershipOp(Operation):
@@ -72,17 +107,7 @@ class _AddToGroup(_GroupMembershipOp):
 
     async def execute(self, session: AsyncClientSession) -> None:
         group, user, site = await self._resolve()
-        # Any role edge implies the group is present at the site.
-        await ensure_group_site(group, site, session)
-        edge = await self._find_edge(user, group, site)
-        if edge is None:
-            edge = GroupMembership(
-                user=user, group=group, site=site, roles=[self.role],
-            )
-            await edge.insert(session=session)
-        elif self.role not in edge.roles:
-            edge.roles = [*edge.roles, self.role]
-            await edge.save(session=session)
+        await ensure_group_membership(user, group, site, (self.role,), session)
 
 
 class _RemoveFromGroup(_GroupMembershipOp):

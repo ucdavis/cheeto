@@ -1709,6 +1709,147 @@ class TestGroupOps:
         personal = await Group.find_one(Group.name == 'sponsor')
         assert personal.type == 'user'
 
+    # -- exist_ok: attach an existing sponsor group to another site ---------
+
+    async def _sponsor_and_sites(self, beanie_client, *site_names):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='sponsor', email='sp@test.com', uid=43000,
+            fullname='Sponsor User',
+        )
+        sites = []
+        for name in site_names:
+            site = Site(name=name, fqdn=f'{name}.test')
+            await site.insert()
+            sites.append(site)
+        return user, sites
+
+    async def test_create_group_from_sponsor_duplicate_still_raises(
+        self, beanie_client,
+    ):
+        await self._sponsor_and_sites(beanie_client, 'sitea')
+        await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+        )
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateGroupFromSponsor.run(
+                beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+            )
+
+    async def test_create_group_from_sponsor_exist_ok_attaches_second_site(
+        self, beanie_client,
+    ):
+        from cheeto.queries import group_members_at_site
+
+        _, (site_a, site_b) = await self._sponsor_and_sites(
+            beanie_client, 'sitea', 'siteb',
+        )
+        first = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+        )
+        second = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='siteb',
+            exist_ok=True,
+        )
+        assert second.id == first.id
+        assert second.gid == first.gid
+        assert await Group.find(Group.name == 'sponsorgrp').count() == 1
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == first.id,
+        ).count() == 2
+
+        roster_b = await group_members_at_site(second, site_b)
+        assert roster_b['members'] == ['sponsor']
+        assert roster_b['sponsors'] == ['sponsor']
+        # Site A is untouched.
+        roster_a = await group_members_at_site(first, site_a)
+        assert roster_a['members'] == ['sponsor']
+        assert roster_a['sponsors'] == ['sponsor']
+
+        rows = await History.find(
+            History.op == 'create_group_from_sponsor',
+        ).to_list()
+        assert {r.changes['site']: r.changes['created'] for r in rows} == {
+            'sitea': True, 'siteb': False,
+        }
+        assert all(r.changes['gid'] == first.gid for r in rows)
+
+    async def test_create_group_from_sponsor_exist_ok_idempotent(
+        self, beanie_client,
+    ):
+        _, (site,) = await self._sponsor_and_sites(beanie_client, 'sitea')
+        group = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+            exist_ok=True,
+        )
+        again = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+            exist_ok=True,
+        )
+        assert again.id == group.id
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count() == 1
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+        ).to_list()
+        assert len(edges) == 1
+        assert edges[0].roles == ['member', 'sponsor']
+
+    async def test_create_group_from_sponsor_exist_ok_merges_roles(
+        self, beanie_client,
+    ):
+        _, (_, site_b) = await self._sponsor_and_sites(
+            beanie_client, 'sitea', 'siteb',
+        )
+        group = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+        )
+        # Sponsor already a plain member at site B (added by hand).
+        await AddGroupMember.run(
+            beanie_client, None,
+            group_name='sponsorgrp', user_name='sponsor', site_name='siteb',
+        )
+        await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='siteb',
+            exist_ok=True,
+        )
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site_b.id,
+        ).to_list()
+        assert len(edges) == 1
+        assert edges[0].roles == ['member', 'sponsor']
+
+    async def test_create_group_from_sponsor_exist_ok_refuses_non_sponsor_group(
+        self, beanie_client,
+    ):
+        await self._sponsor_and_sites(beanie_client, 'sitea')
+        await Group(name='sponsorgrp', gid=61235, type='system').insert()
+        with pytest.raises(ValueError, match='not a sponsor group'):
+            await CreateGroupFromSponsor.run(
+                beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+                exist_ok=True,
+            )
+
+    async def test_create_group_from_sponsor_exist_ok_keeps_gid(
+        self, beanie_client,
+    ):
+        _, (site,) = await self._sponsor_and_sites(beanie_client, 'sitea')
+        # e.g. a group migrated from v1 whose gid predates the derived scheme.
+        await Group(name='sponsorgrp', gid=61234).insert()
+        group = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='sponsor', site_name='sitea',
+            exist_ok=True,
+        )
+        assert group.gid == 61234
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count() == 1
+
 
 class TestGroupMembershipOps:
 
@@ -8462,6 +8603,160 @@ class TestCreateAccountHomeStorage:
         user = await User.find_one(User.name == 'hippouser')
         keys = await SshKey.find(SshKey.user.id == user.id).to_list()
         assert keys == []
+
+
+class TestCreateGroupHandler:
+    """The HiPPO CreateGroup handler must attach an existing sponsor group
+    (already created for another cluster) to the requested site instead of
+    failing on the global Group name collision."""
+
+    _EVENT = {
+        'groups': [],
+        'accounts': [{'kerberos': 'hippopi', 'name': 'Hippo PI',
+                      'email': 'pi@x.test', 'iam': '1000000002',
+                      'mothra': '09990002', 'key': '',
+                      'accessTypes': ['SshKey']}],
+        'cluster': 'hipposite',
+        'metadata': {},
+    }
+
+    async def _seed(self, beanie_client, *site_names):
+        sponsor, _ = await CreateUser.run(
+            beanie_client, None,
+            name='hippopi', email='pi@x.test', uid=9990002,
+            fullname='Hippo PI',
+        )
+        for name in site_names:
+            await Site(name=name, fqdn=f'{name}.test').insert()
+        return sponsor
+
+    def _upstream(self, cluster='hipposite', event_id=1):
+        from ..hippoapi.models.queued_event_model import QueuedEventModel
+        return QueuedEventModel.from_dict({
+            'id': event_id, 'action': 'CreateGroup', 'status': 'Pending',
+            'data': {**self._EVENT, 'cluster': cluster},
+        })
+
+    async def _run_handler(self, beanie_client, cluster='hipposite'):
+        from ..config import HippoConfig
+        from ..operations.hippo import CreateGroupHandler, HippoContext
+        upstream = self._upstream(cluster)
+        # In-memory record (not inserted) -- the handler only stashes attrs on
+        # it; the processor owns persistence.
+        record = HippoEvent(hippo_id=1, hippo_endpoint='http://hippo.test',
+                            action='CreateGroup', status='Pending',
+                            cluster=cluster)
+        config = HippoConfig(api_key='x', base_url='http://hippo.test',
+                             site_aliases={}, max_tries=3)
+        context = HippoContext(client=beanie_client, hippo_client=None,
+                               config=config, event_record=record, author=None)
+        result = await CreateGroupHandler().handle(
+            upstream.data, context, notify=False,
+        )
+        return result, record
+
+    async def _presence(self, group, site_name) -> int:
+        site = await Site.find_one(Site.name == site_name)
+        return await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == group.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count()
+
+    async def _roster(self, group, site_name):
+        from cheeto.queries import group_members_at_site
+        site = await Site.find_one(Site.name == site_name)
+        return await group_members_at_site(group, site)
+
+    async def test_creates_group_and_sets_record(self, beanie_client):
+        sponsor = await self._seed(beanie_client, 'hipposite')
+        (ret_sponsor, group), record = await self._run_handler(beanie_client)
+        assert group.name == 'hippopigrp'
+        assert ret_sponsor.id == sponsor.id
+        assert await self._presence(group, 'hipposite') == 1
+        roster = await self._roster(group, 'hipposite')
+        assert roster['members'] == ['hippopi']
+        assert roster['sponsors'] == ['hippopi']
+        assert record.target_user.id == sponsor.id
+        assert record.target_groups[0].id == group.id
+        assert record.target_groupnames == ['hippopigrp']
+        assert record.sponsor_username == 'hippopi'
+
+    async def test_existing_group_on_other_site_attaches(self, beanie_client):
+        await self._seed(beanie_client, 'othersite', 'hipposite')
+        existing = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='hippopi', site_name='othersite',
+        )
+        (_, group), record = await self._run_handler(beanie_client)  # no raise
+        assert group.id == existing.id
+        assert await Group.find(Group.name == 'hippopigrp').count() == 1
+        assert await self._presence(group, 'hipposite') == 1
+        assert await self._presence(group, 'othersite') == 1
+        roster = await self._roster(group, 'hipposite')
+        assert roster['members'] == ['hippopi']
+        assert roster['sponsors'] == ['hippopi']
+        assert record.target_groups[0].id == existing.id
+        assert record.target_groupnames == ['hippopigrp']
+        assert record.sponsor_username == 'hippopi'
+
+    async def test_reprocess_is_noop(self, beanie_client):
+        await self._seed(beanie_client, 'hipposite')
+        (_, group), _ = await self._run_handler(beanie_client)
+        await self._run_handler(beanie_client)   # must not raise
+        assert await self._presence(group, 'hipposite') == 1
+        site = await Site.find_one(Site.name == 'hipposite')
+        edges = await GroupMembership.find(
+            GroupMembership.group.id == group.id,
+            GroupMembership.site.id == site.id,
+        ).to_list()
+        assert len(edges) == 1
+        assert edges[0].roles == ['member', 'sponsor']
+
+    async def test_processor_completes_event_for_existing_group(
+        self, beanie_client, monkeypatch,
+    ):
+        """End to end through the processor: the event that used to burn its
+        retries and go Failed now completes (and posts back) on the first try."""
+        from ..config import HippoConfig
+        from ..operations import hippo as hippo_ops
+        from ..operations.hippo import (
+            CreateGroupHandler,
+            HippoEventProcessor,
+            HippoHandlerRegistry,
+        )
+
+        await self._seed(beanie_client, 'othersite', 'hipposite')
+        existing = await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='hippopi', site_name='othersite',
+        )
+
+        sent: list = []
+
+        class _StubSendUserEmail:
+            @staticmethod
+            async def run(client, author, *, mail, hippo_client):
+                sent.append(mail)
+
+        monkeypatch.setattr(hippo_ops, 'SendUserEmail', _StubSendUserEmail)
+        postback = _FakePostbackEndpoint()
+        monkeypatch.setattr(hippo_ops, 'event_queue_update_status', postback)
+
+        registry = HippoHandlerRegistry()
+        registry.register(CreateGroupHandler())
+        config = HippoConfig(api_key='test', base_url='http://hippo.test',
+                             site_aliases={}, max_tries=3)
+        processor = HippoEventProcessor(beanie_client, config, registry=registry)
+
+        await processor._process_events([self._upstream()], object(), True)
+
+        record = await HippoEvent.find_one(HippoEvent.hippo_id == 1)
+        assert record.status == 'Complete'
+        assert record.n_tries == 1
+        assert record.last_error is None
+        assert postback.calls == [(1, 'Complete')]
+        assert len(sent) == 1
+        assert sent[0].template_kwargs['group'] == 'hippopigrp'
+        assert sent[0].template_kwargs['sitename'] == 'hipposite'
+        assert await self._presence(existing, 'hipposite') == 1
 
 
 class TestDeleteUserOp:
