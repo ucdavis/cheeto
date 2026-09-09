@@ -14,13 +14,12 @@ from ..constants import (
     MIN_SYSTEM_UID,
 )
 from ..models.group import AccessGroup, Group, StatusGroup
-from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.base import link_target_id
 from ..models.user import User
 from ..queries.group import find_group_by_name, gather_group_references
 from .base import Operation
-from .group_site import ensure_group_site
+from .group_membership import ensure_group_membership
 
 
 # Standard set of access types and their LDAP groupnames. Seeded into
@@ -169,6 +168,18 @@ class CreateLabGroup(Operation):
 
 
 class CreateGroupFromSponsor(Operation):
+    """Create (or, with `exist_ok`, attach) the sponsor group `<sponsor>grp` at a site.
+
+    The `Group` document is global; site presence is the per-site
+    `GroupSiteInfo`. By default this refuses when the group already exists.
+    With `exist_ok=True` an existing sponsor group is reused and attached to
+    `site_name` instead, and the sponsor is ensured `member` + `sponsor` roles
+    there -- the HiPPO `CreateGroup` handler relies on this, since a PI who is
+    already a sponsor on one cluster has the group before their second cluster
+    sends its event. Re-running against a site the group is already on is a
+    no-op success. The existing group's gid is never rewritten.
+    """
+
     op_name = 'create_group_from_sponsor'
 
     def __init__(
@@ -178,11 +189,15 @@ class CreateGroupFromSponsor(Operation):
         *,
         sponsor_name: str,
         site_name: str,
+        exist_ok: bool = False,
     ) -> None:
         super().__init__(client, author)
         self.sponsor_name = sponsor_name
         self.site_name = site_name
+        self.exist_ok = exist_ok
         self.group_name = f'{sponsor_name}grp'
+        self._created: bool | None = None
+        self._gid: int | None = None
 
     async def execute(self, session: AsyncClientSession) -> Group:
         sponsor = await User.find_one(User.name == self.sponsor_name)
@@ -193,24 +208,40 @@ class CreateGroupFromSponsor(Operation):
         if site is None:
             raise ValueError(f'Site {self.site_name} does not exist')
 
-        existing = await Group.find_one(Group.name == self.group_name)
+        expected_gid = MIN_PIGROUP_GID + sponsor.uid
+        # with_children=True so a colliding AccessGroup/StatusGroup is found
+        # here rather than surfacing as a DuplicateKeyError mid-transaction.
+        existing = await find_group_by_name(self.group_name)
         if existing is not None:
-            raise ValueError(f'Group {self.group_name} already exists')
+            if not self.exist_ok:
+                raise ValueError(f'Group {self.group_name} already exists')
+            if (isinstance(existing, (AccessGroup, StatusGroup))
+                    or existing.type != 'group'):
+                raise ValueError(
+                    f'Group {self.group_name} exists but is not a sponsor '
+                    f'group (type={existing.type})'
+                )
+            if existing.gid != expected_gid:
+                self.logger.info(
+                    'reusing group %s with gid %d (derived gid would be %d)',
+                    self.group_name, existing.gid, expected_gid,
+                )
+            group = existing
+            self._created = False
+        else:
+            group = Group(name=self.group_name, gid=expected_gid, type='group')
+            await group.insert(session=session)
+            self._created = True
 
-        gid = MIN_PIGROUP_GID + sponsor.uid
-        group = Group(name=self.group_name, gid=gid, type='group')
-        await group.insert(session=session)
-        await ensure_group_site(group, site, session)
-
-        # The sponsor is both a member and sponsor of their own group at the
-        # creating site.
-        membership = GroupMembership(
-            user=sponsor, group=group, site=site,
-            roles=['member', 'sponsor'],
+        # The sponsor is both a member and sponsor of their own group at this
+        # site; ensure_group_membership also materializes site presence and is
+        # idempotent for an already-attached site.
+        await ensure_group_membership(
+            sponsor, group, site, ('member', 'sponsor'), session,
         )
-        await membership.insert(session=session)
 
         self._group = group
+        self._gid = group.gid
         return group
 
     def describe(self) -> dict[str, Any]:
@@ -218,6 +249,8 @@ class CreateGroupFromSponsor(Operation):
             'groupname': self.group_name,
             'sponsor': self.sponsor_name,
             'site': self.site_name,
+            'gid': self._gid,
+            'created': self._created,
         }
 
 
