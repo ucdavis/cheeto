@@ -459,16 +459,19 @@ class CreateGroupHandler(BaseHippoHandler):
     async def handle(self, event, context, notify=True):
         parsed = _parse_event(event, context.config)
         logger.info(
-            '[CreateGroup] sponsor=%s site=%s',
+            '[CreateGroup] ensuring sponsor group for sponsor=%s site=%s',
             parsed.username, parsed.sitename,
         )
         sponsor = await User.find_one(User.name == parsed.username)
         if sponsor is None:
             raise ValueError(f'Sponsor {parsed.username} does not exist')
+        # exist_ok: a PI already sponsoring on another cluster has the global
+        # Group already; attach it to this site instead of failing the event.
         group = await CreateGroupFromSponsor.run(
             context.client, context.author,
             sponsor_name=parsed.username,
             site_name=parsed.sitename,
+            exist_ok=True,
         )
         context.event_record.target_user = sponsor
         context.event_record.target_groups = [group]

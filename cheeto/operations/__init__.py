@@ -61,6 +61,7 @@ from .group_membership import (
     RemoveGroupSlurmer,
     RemoveGroupSponsor,
     RemoveGroupSudoer,
+    ensure_group_membership,
 )
 from .slurm import (
     AddQOSAllocation,
