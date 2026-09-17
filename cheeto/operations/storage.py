@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import decimal
+from pathlib import PurePosixPath
 from typing import Any
 
+from beanie import Link
 from beanie.operators import In
 from pydantic import ValidationError
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
+from pymongo.errors import DuplicateKeyError
 
+from ..constants import STORAGE_CATEGORIES
 from ..models.base import link_target_id
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
+from ..models.host import StorageHost
 from ..models.site import Site
 from ..models.storage import (
     AutomountMap,
@@ -24,10 +29,22 @@ from ..models.storage import (
     ZFSConfig,
     _join_host_path,
 )
+from ..models.storage_defaults import (
+    StorageDefaults,
+    render_host_path,
+    validate_zfs_path_templates,
+)
 from ..models.user import User
-from ..queries.storage import get_storage, list_site_volumes
+from ..queries.storage import (
+    effective_nfs_export,
+    effective_zfs_path_template,
+    find_storage_host,
+    get_storage,
+    list_site_volumes,
+    storage_hosts_by_site,
+)
 from ..utils import size_to_megs_exact
-from .base import Operation
+from .base import UNSET, Operation
 from .group_site import ensure_group_site
 
 
@@ -68,10 +85,164 @@ def _make_allocation(quota: str, comment: str = '') -> StorageAllocation:
     return alloc
 
 
+# ---------------------------------------------------------------------------
+# Storage hosts + storage defaults (shared by volume, host, and site ops)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_ranges(ranges) -> list[str]:
+    # Stored sorted + de-duplicated so tier comparisons (backfill dedupe) and
+    # puppet output are order-independent.
+    return sorted(set(ranges or []))
+
+
+def apply_nfs_export(
+    target: Any,
+    *,
+    export_options: Any = UNSET,
+    export_ranges: Any = UNSET,
+    clear: bool = False,
+) -> dict[str, Any]:
+    """Edit `target.nfs_export` in place with UNSET semantics: a kwarg left
+    UNSET is untouched; `clear=True` nulls the whole config (exclusive with
+    the field kwargs). Passing only one field creates the config with the
+    other left empty — the per-field precedence in `effective_nfs_export`
+    fills the gap from the next tier. Returns the describe() fragment."""
+    if clear and (export_options is not UNSET or export_ranges is not UNSET):
+        raise ValueError(
+            'clear_nfs_export is exclusive with export_options / export_ranges'
+        )
+    changes: dict[str, Any] = {}
+    if clear:
+        target.nfs_export = None
+        changes['nfs_export'] = None
+        return changes
+    if export_options is UNSET and export_ranges is UNSET:
+        return changes
+    cfg = target.nfs_export or NFSExportConfig()
+    if export_options is not UNSET:
+        cfg.export_options = export_options or ''
+        changes['export_options'] = cfg.export_options
+    if export_ranges is not UNSET:
+        cfg.export_ranges = _normalize_ranges(export_ranges)
+        changes['export_ranges'] = list(cfg.export_ranges)
+    target.nfs_export = cfg
+    return changes
+
+
+def apply_storage_defaults(
+    target: StorageDefaults,
+    *,
+    export_options: Any = UNSET,
+    export_ranges: Any = UNSET,
+    clear_nfs_export: bool = False,
+    set_templates: dict[str, str] | None = None,
+    unset_templates: list[str] | None = None,
+) -> dict[str, Any]:
+    """Edit a `StorageDefaults` tier (`Site.storage` or a `StorageHost`) in
+    place: the export config via `apply_nfs_export`, then remove and add ZFS
+    path templates by category. Templates are validated here so a bad one is
+    a clean ValueError before any save. Returns the describe() fragment."""
+    changes = apply_nfs_export(
+        target, export_options=export_options, export_ranges=export_ranges,
+        clear=clear_nfs_export,
+    )
+    if unset_templates:
+        for category in unset_templates:
+            if category not in STORAGE_CATEGORIES:
+                raise ValueError(
+                    f'Invalid ZFS path template category {category!r}; '
+                    f'expected one of {", ".join(STORAGE_CATEGORIES)}'
+                )
+        target.zfs_path_templates = {
+            k: v for k, v in target.zfs_path_templates.items()
+            if k not in set(unset_templates)
+        }
+        changes['unset_zfs_path_templates'] = list(unset_templates)
+    if set_templates:
+        validate_zfs_path_templates(set_templates)
+        target.zfs_path_templates = {
+            **target.zfs_path_templates, **set_templates,
+        }
+        changes['zfs_path_templates'] = dict(set_templates)
+    return changes
+
+
+async def _resolve_storage_host(site: Site, hostname: str) -> StorageHost:
+    """Strict: the StorageHost `hostname` names at `site`, or a ValueError
+    pointing at `ng storage new host`. Catches typos in `--host` escape
+    hatches; after `ng storage backfill-hosts` every live host has a record."""
+    host = await find_storage_host(site, hostname)
+    if host is None:
+        raise ValueError(
+            f'StorageHost {hostname!r} does not exist on {site.name}; create '
+            f'it with `ng storage new host {hostname} --site {site.name}`'
+        )
+    return host
+
+
+async def _inherit_storage_host(parent: StorageVolume):
+    """Lenient host link for a child volume: the parent's own link when set,
+    else the StorageHost named by `parent.host` at the parent's site, else
+    None. Never raises — home provisioning under a pre-backfill parent must
+    keep working."""
+    if parent.storage_host is not None:
+        return parent.storage_host
+    site_id = link_target_id(parent.site)
+    if site_id is None:
+        return None
+    return await StorageHost.find_one(
+        StorageHost.hostname == parent.host,
+        StorageHost.site.id == site_id,
+    )
+
+
+def _standalone_host_path(
+    site: Site,
+    host: StorageHost,
+    *,
+    category: str,
+    name: str,
+    explicit: str | None,
+    fallback: str | None,
+) -> str:
+    """Host path for a standalone (parent-less) volume: the explicit path if
+    given, else the host/site ZFS path template for `category` rendered with
+    `{host}`/`{name}`/`{site}`, else `fallback`. Children never come through
+    here — they take `parent.host_path/<name>`."""
+    if explicit:
+        return explicit
+    template, _level = effective_zfs_path_template(
+        category, host=host, site=site,
+    )
+    if template:
+        return render_host_path(
+            template, host=host.hostname, name=name, site=site.name,
+        )
+    if fallback is not None:
+        return fallback
+    raise ValueError(
+        f'No ZFS path template for category {category!r} on {site.name} '
+        f'(host {host.hostname}); pass host_path/--host-path, or set one '
+        f'with `ng site set storage-defaults --zfs-path-template '
+        f'{category}=/{{host}}/{category}/{{name}} --site {site.name}` (or '
+        f'`ng storage edit host {host.hostname}` for a host-specific one)'
+    )
+
+
 class CreateStorageVolume(Operation):
     """Create a StorageVolume record — the provisionable backing entity (a
     ZFS dataset or QuoByte volume). Does not (yet) provision anything on
-    the backend itself."""
+    the backend itself.
+
+    `host` must name an existing StorageHost at the site (strict; see
+    `_resolve_storage_host`). `host_path` may be omitted when `template`
+    names a storage category whose ZFS path template resolves on the host or
+    site; `{name}` renders as the volume name's last path component
+    (`group/foo` -> `foo`). An explicit `host_path` always wins. Export
+    config is stored only when given — otherwise the volume inherits the
+    host/site defaults through `effective_nfs_export`.
+    """
 
     op_name = 'create_storage_volume'
 
@@ -84,22 +255,35 @@ class CreateStorageVolume(Operation):
         name: str,
         backend: str,
         host: str,
-        host_path: str,
+        host_path: str | None = None,
+        template: str | None = None,
         parent_name: str | None = None,
         quota: str | None = None,
         export_options: str | None = None,
         export_ranges: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
+        if host_path is None and template is None:
+            raise ValueError(
+                'CreateStorageVolume requires host_path or a template '
+                'category (pass --host-path or --template)'
+            )
+        if template is not None and template not in STORAGE_CATEGORIES:
+            raise ValueError(
+                f'Invalid template category {template!r}; expected one of '
+                f'{", ".join(STORAGE_CATEGORIES)}'
+            )
         self.site_name = site_name
         self.name = name
         self.backend = backend
         self.host = host
         self.host_path = host_path
+        self.template = template
         self.parent_name = parent_name
         self.quota = quota
         self.export_options = export_options
         self.export_ranges = export_ranges
+        self._resolved_host_path = host_path
 
     async def execute(self, session: AsyncClientSession) -> StorageVolume:
         site = await _find_site(self.site_name)
@@ -119,19 +303,30 @@ class CreateStorageVolume(Operation):
                     f'{self.site_name}'
                 )
 
+        host = await _resolve_storage_host(site, self.host)
+        host_path = _standalone_host_path(
+            site, host,
+            category=self.template or '',
+            name=PurePosixPath(self.name).name,
+            explicit=self.host_path,
+            fallback=None,
+        )
+        self._resolved_host_path = host_path
+
         nfs_export = None
         if self.export_options or self.export_ranges:
             nfs_export = NFSExportConfig(
                 export_options=self.export_options or '',
-                export_ranges=self.export_ranges or [],
+                export_ranges=_normalize_ranges(self.export_ranges),
             )
 
         volume = StorageVolume(
             name=self.name,
             site=site,
             backend=self.backend,
-            host=self.host,
-            host_path=self.host_path,
+            host=host.hostname,
+            host_path=host_path,
+            storage_host=host,
             parent=parent,
             allocations=(
                 [_make_allocation(self.quota, 'initial allocation')]
@@ -150,9 +345,15 @@ class CreateStorageVolume(Operation):
             'name': self.name,
             'backend': self.backend,
             'host': self.host,
-            'host_path': self.host_path,
+            'host_path': self._resolved_host_path,
+            'template': self.template,
             'parent': self.parent_name,
             'quota': self.quota,
+            'export_options': self.export_options,
+            'export_ranges': (
+                _normalize_ranges(self.export_ranges)
+                if self.export_ranges else None
+            ),
         }
 
 
@@ -262,12 +463,17 @@ async def _build_home_volume(
     host: str | None, host_path: str | None,
 ) -> StorageVolume:
     if host is not None:
+        host_doc = await _resolve_storage_host(site, host)
         return StorageVolume(
             name=f'home/{user_name}',
             site=site,
             backend='zfs',
-            host=host,
-            host_path=host_path or f'/home/{user_name}',
+            host=host_doc.hostname,
+            host_path=_standalone_host_path(
+                site, host_doc, category='home', name=user_name,
+                explicit=host_path, fallback=f'/home/{user_name}',
+            ),
+            storage_host=host_doc,
             allocations=(
                 [_make_allocation(quota, 'initial home allocation')]
                 if quota else []
@@ -283,6 +489,7 @@ async def _build_home_volume(
         backend=parent.backend,
         host=parent.host,
         host_path=_join_host_path(parent.host_path, user_name),
+        storage_host=await _inherit_storage_host(parent),
         parent=parent,
         allocations=(
             [_make_allocation(quota, 'initial home allocation')]
@@ -488,22 +695,32 @@ async def _build_group_volume(
     site: Site, group_name: str, *,
     quota: str, parent_volume_name: str | None,
     host: str | None, host_path: str | None,
+    comment: str | None = None,
 ) -> StorageVolume:
     """Build (not insert) the backing StorageVolume for a group's storage.
 
     Standalone on `host` (named 'group/<group>'), else a child carved under an
     explicitly-named parent volume (named '<parent>/<group>', backend/host
     inherited). There is no site group-default, so a parent volume or host is
-    required. The volume carries the group's quota as its sole allocation.
+    required. The volume carries the group's quota as its sole allocation,
+    labelled `comment` (default 'initial group allocation').
     """
-    alloc = _make_allocation(quota, 'initial group allocation')
+    alloc = _make_allocation(
+        quota,
+        comment if comment is not None else 'initial group allocation',
+    )
     if host is not None:
+        host_doc = await _resolve_storage_host(site, host)
         return StorageVolume(
             name=f'group/{group_name}',
             site=site,
             backend='zfs',
-            host=host,
-            host_path=host_path or f'/group/{group_name}',
+            host=host_doc.hostname,
+            host_path=_standalone_host_path(
+                site, host_doc, category='group', name=group_name,
+                explicit=host_path, fallback=f'/group/{group_name}',
+            ),
+            storage_host=host_doc,
             allocations=[alloc],
             **_backend_config_kwargs('zfs'),
         )
@@ -523,6 +740,7 @@ async def _build_group_volume(
         backend=parent.backend,
         host=parent.host,
         host_path=_join_host_path(parent.host_path, group_name),
+        storage_host=await _inherit_storage_host(parent),
         parent=parent,
         allocations=[alloc],
         **_backend_config_kwargs(parent.backend),
@@ -573,13 +791,14 @@ async def _provision_group_storage(
     quota: str, parent_volume: str | None,
     automount_map: str | None, static_mount: str | None,
     no_mount: bool, host: str | None, host_path: str | None,
+    comment: str | None = None,
 ) -> tuple[Storage, str]:
     """Build + insert the group volume and the group-facing Storage record,
     returning (storage, mechanism_label). The volume insert is pre-checked so a
     name clash surfaces as a clean ValueError rather than a DuplicateKeyError."""
     volume = await _build_group_volume(
         site, group.name, quota=quota, parent_volume_name=parent_volume,
-        host=host, host_path=host_path,
+        host=host, host_path=host_path, comment=comment,
     )
     if await _find_volume(site, volume.name) is not None:
         raise ValueError(
@@ -625,7 +844,9 @@ class CreateGroupStorage(Operation):
     more than one, an explicit `owner_name` is required.
 
     Unlike home storage there are no site-level group defaults, so a parent
-    volume (or host) and a quota must be given.
+    volume (or host) and a quota must be given. `comment` labels the initial
+    quota allocation (default 'initial group allocation'), e.g. a ticket or
+    purchase reference.
     """
 
     op_name = 'create_group_storage'
@@ -639,6 +860,7 @@ class CreateGroupStorage(Operation):
         site_name: str,
         owner_name: str | None = None,
         quota: str | None = None,
+        comment: str | None = None,
         parent_volume: str | None = None,
         automount_map: str | None = None,
         static_mount: str | None = None,
@@ -655,6 +877,7 @@ class CreateGroupStorage(Operation):
         self.site_name = site_name
         self.owner_name = owner_name
         self.quota = quota
+        self.comment = comment
         self.parent_volume = parent_volume
         self.automount_map = automount_map
         self.static_mount = static_mount
@@ -725,6 +948,7 @@ class CreateGroupStorage(Operation):
             quota=self.quota, parent_volume=self.parent_volume,
             automount_map=self.automount_map, static_mount=self.static_mount,
             no_mount=self.no_mount, host=self.host, host_path=self.host_path,
+            comment=self.comment,
         )
         self._mechanism = mechanism
         self._storage = storage
@@ -736,6 +960,7 @@ class CreateGroupStorage(Operation):
             'site': self.site_name,
             'owner': self._owner_name or None,
             'quota': self.quota,
+            'comment': self.comment,
             'parent_volume': self.parent_volume,
             'host': self.host,
             'mechanism': self._mechanism,
@@ -1147,6 +1372,12 @@ class ExportPuppetStorage(Operation):
     is an `nfs` entry: an exports line only. QuoByte-backed volumes don't
     participate (no NFS export; quotas live in QuoByte).
 
+    Export options/ranges resolve per field through `effective_nfs_export`
+    (storage -> volume -> StorageHost -> Site.storage), with the host and
+    site tiers taken from the VOLUME's site — a Storage may live on another
+    site than its volume. Hosts are looked up by `(site, hostname)` in one
+    batched query, so no extra link depth is needed.
+
     Read-only; recorded in History.
     """
 
@@ -1178,6 +1409,18 @@ class ExportPuppetStorage(Operation):
             nesting_depth=1,
         ).sort('+name').to_list()
 
+        # Default tiers, keyed by the VOLUME's site (cross-site storages).
+        volume_site_ids = {
+            sid for s in storages
+            if (sid := link_target_id(s.volume.site)) is not None
+        }
+        sites_by_id = {site.id: site}
+        other_ids = list(volume_site_ids - {site.id})
+        if other_ids:
+            for other in await Site.find(In(Site.id, other_ids)).to_list():
+                sites_by_id[other.id] = other
+        hosts = await storage_hosts_by_site(volume_site_ids)
+
         zfs: dict[str, dict] = {key: {} for key, _ in _PUPPET_BUCKETS.values()}
         nfs: dict[str, dict] = {key: {} for key, _ in _PUPPET_BUCKETS.values()}
 
@@ -1187,7 +1430,13 @@ class ExportPuppetStorage(Operation):
             if volume.backend != 'zfs':
                 self._skipped += 1
                 continue
-            export = storage.nfs_export or volume.nfs_export
+            vsite_id = link_target_id(volume.site)
+            export, _levels = effective_nfs_export(
+                volume=volume,
+                host=hosts.get((vsite_id, volume.host)),
+                site=sites_by_id.get(vsite_id),
+                storage=storage,
+            )
             entry = {
                 'name': storage.name,
                 'owner': storage.owner.name,
@@ -1380,4 +1629,163 @@ class EditVolumeAllocation(Operation):
             'old_quota': self._old_quota,
             'new_quota': self.quota,
             'comment': self.comment,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Volume edit
+# ---------------------------------------------------------------------------
+
+
+class EditStorageVolume(Operation):
+    """Edit an existing StorageVolume in place. Every field kwarg defaults to
+    `UNSET` (leave alone); `clear_nfs_export=True` nulls the volume's own
+    export config so it inherits the host/site defaults again.
+
+    Structural fields (`host`, `host_path`, `new_name`) are refused while the
+    volume has children: child volumes denormalize `host`/`host_path` from
+    their parent and are named `<parent.name>/<child>`, so changing the
+    parent would leave them stale. `host` resolves strictly to a StorageHost
+    at the site and sets both `volume.host` and `volume.storage_host`.
+    `volume.save()` fires `mark_storages_ldap_dirty`, so a host/host_path
+    change re-syncs every Storage the volume backs.
+    """
+
+    op_name = 'edit_storage_volume'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        site_name: str,
+        volume_name: str,
+        new_name: Any = UNSET,
+        host: Any = UNSET,
+        host_path: Any = UNSET,
+        export_options: Any = UNSET,
+        export_ranges: Any = UNSET,
+        clear_nfs_export: bool = False,
+        zfs_dataset_name: Any = UNSET,
+    ) -> None:
+        super().__init__(client, author)
+        if clear_nfs_export and (
+            export_options is not UNSET or export_ranges is not UNSET
+        ):
+            raise ValueError(
+                'clear_nfs_export is exclusive with export_options / '
+                'export_ranges'
+            )
+        fields = (new_name, host, host_path, export_options, export_ranges,
+                  zfs_dataset_name)
+        if all(f is UNSET for f in fields) and not clear_nfs_export:
+            raise ValueError('Nothing to edit; pass at least one field')
+        self.site_name = site_name
+        self.volume_name = volume_name
+        self.new_name = new_name
+        self.host = host
+        self.host_path = host_path
+        self.export_options = export_options
+        self.export_ranges = export_ranges
+        self.clear_nfs_export = clear_nfs_export
+        self.zfs_dataset_name = zfs_dataset_name
+        self._changes: dict[str, Any] = {}
+
+    async def execute(self, session: AsyncClientSession) -> StorageVolume:
+        site = await _find_site(self.site_name)
+        volume = await _find_volume_or_raise(site, self.volume_name)
+        changes: dict[str, Any] = {}
+
+        structural = [
+            label for label, value in (
+                ('host', self.host), ('host_path', self.host_path),
+                ('name', self.new_name),
+            ) if value is not UNSET
+        ]
+        if structural:
+            n_children = await StorageVolume.find(
+                StorageVolume.parent.id == volume.id,
+            ).count()
+            if n_children:
+                raise ValueError(
+                    f'Volume {volume.name} has {n_children} child volume(s) '
+                    f'whose host/host_path/name derive from it; refusing to '
+                    f'change {", ".join(structural)}. Edit the children '
+                    f'first or create a new volume.'
+                )
+
+        if self.host is not UNSET:
+            host_doc = await _resolve_storage_host(site, self.host)
+            if host_doc.hostname != volume.host:
+                changes['old_host'] = volume.host
+                changes['host'] = host_doc.hostname
+            volume.host = host_doc.hostname
+            volume.storage_host = host_doc
+
+        if self.host_path is not UNSET:
+            if not self.host_path:
+                raise ValueError('host_path must not be empty')
+            new_path = str(PurePosixPath(self.host_path))
+            if new_path != volume.host_path:
+                changes['old_host_path'] = volume.host_path
+                changes['host_path'] = new_path
+            volume.host_path = new_path
+
+        if self.host is not UNSET or self.host_path is not UNSET:
+            clash = await StorageVolume.find_one(
+                StorageVolume.site.id == site.id,
+                StorageVolume.host == volume.host,
+                StorageVolume.host_path == volume.host_path,
+                StorageVolume.id != volume.id,
+            )
+            if clash is not None:
+                raise ValueError(
+                    f'Volume {clash.name} already occupies '
+                    f'{volume.host}:{volume.host_path} on {site.name}'
+                )
+
+        if self.new_name is not UNSET:
+            if not self.new_name:
+                raise ValueError('new_name must not be empty')
+            if self.new_name != volume.name:
+                if await _find_volume(site, self.new_name) is not None:
+                    raise ValueError(
+                        f'StorageVolume {self.new_name} already exists on '
+                        f'{site.name}'
+                    )
+                changes['old_name'] = volume.name
+                changes['name'] = self.new_name
+                volume.name = self.new_name
+
+        changes.update(apply_nfs_export(
+            volume, export_options=self.export_options,
+            export_ranges=self.export_ranges, clear=self.clear_nfs_export,
+        ))
+
+        if self.zfs_dataset_name is not UNSET:
+            if volume.zfs is None:
+                raise ValueError(
+                    f'Volume {volume.name} is not a managed ZFS dataset '
+                    f'(backend={volume.backend}, zfs config absent); cannot '
+                    f'set a zfs dataset name'
+                )
+            volume.zfs.dataset_name = self.zfs_dataset_name or ''
+            changes['zfs_dataset_name'] = volume.zfs.dataset_name
+
+        try:
+            await volume.save(session=session)
+        except DuplicateKeyError as e:
+            raise ValueError(
+                f'Volume edit collides with an existing volume on '
+                f'{site.name}: {e.details.get("errmsg", e) if e.details else e}'
+            ) from e
+        self._changes = changes
+        self._volume = volume
+        return volume
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'site': self.site_name,
+            'volume': self.volume_name,
+            **self._changes,
         }

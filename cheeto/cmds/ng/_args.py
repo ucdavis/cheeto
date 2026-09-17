@@ -13,6 +13,8 @@ from dateutil.parser import isoparse
 from dateutil.relativedelta import relativedelta
 from ponderosa import ArgParser, arggroup
 
+from ...operations.base import UNSET
+
 
 # Sentinel returned by expirable_value when the user asks to unset the field.
 # Keeping it as a string makes the CLI value reflect-able into describe() logs
@@ -155,6 +157,74 @@ def password_args(parser: ArgParser):
 def yaml_args(parser: ArgParser):
     parser.add_argument('--yaml', action='store_true', default=False,
                         help='Output as YAML to stdout')
+
+
+def template_arg(raw: str) -> tuple[str, str]:
+    """argparse type for `--zfs-path-template CATEGORY=TEMPLATE` tokens."""
+    category, sep, template = raw.partition('=')
+    if not sep or not category.strip() or not template.strip():
+        raise argparse.ArgumentTypeError(
+            f'{raw!r}: expected CATEGORY=TEMPLATE, e.g. '
+            "home=/{host}/home/{name}"
+        )
+    return category.strip(), template.strip()
+
+
+@arggroup('storage_defaults')
+def storage_defaults_args(parser: ArgParser, scope: str = 'site',
+                          clearable: bool = True):
+    """Flags for a storage-defaults tier (site or storage host): NFS export
+    options/ranges and per-category ZFS path templates. `clearable=False`
+    (create commands) omits the --clear-* flags."""
+    parser.add_argument('--export-options', default=None, metavar='OPTIONS',
+                        help=f'Default NFS export options for the {scope} '
+                             '(e.g. rw,no_root_squash,sync,no_subtree_check)')
+    parser.add_argument('--export-ranges', nargs='+', default=None,
+                        metavar='RANGE',
+                        help=f'Default NFS export client ranges for the '
+                             f'{scope} (CIDRs or hosts); replaces the list')
+    parser.add_argument('--zfs-path-template', action='append', default=None,
+                        type=template_arg, metavar='CATEGORY=TEMPLATE',
+                        help="ZFS path template for a storage category, e.g. "
+                             "home='/{host}/home/{name}' (fields: {host}, "
+                             "{name}, {site}); repeatable")
+    if clearable:
+        parser.add_argument('--clear-export', action='store_true',
+                            default=False,
+                            help=f'Remove the {scope}-level export config so '
+                                 'the next tier applies')
+        parser.add_argument('--clear-zfs-path-template', action='append',
+                            default=None, metavar='CATEGORY',
+                            help='Remove the ZFS path template for a category; '
+                                 'repeatable')
+
+
+def has_storage_defaults_args(args) -> bool:
+    return any((
+        args.export_options is not None,
+        args.export_ranges is not None,
+        args.zfs_path_template,
+        getattr(args, 'clear_export', False),
+        getattr(args, 'clear_zfs_path_template', None),
+    ))
+
+
+def storage_defaults_kwargs(args) -> dict:
+    """Operation kwargs from the `storage_defaults_args` flags: argparse None
+    -> UNSET (leave alone); the --clear-* flags map to the clear kwargs."""
+    return {
+        'export_options': (
+            UNSET if args.export_options is None else args.export_options
+        ),
+        'export_ranges': (
+            UNSET if args.export_ranges is None else args.export_ranges
+        ),
+        'clear_nfs_export': getattr(args, 'clear_export', False),
+        'zfs_path_templates': dict(args.zfs_path_template or []) or None,
+        'clear_zfs_path_templates': (
+            list(getattr(args, 'clear_zfs_path_template', None) or []) or None
+        ),
+    }
 
 
 def confirm_typed(console, kind: str, name: str, force: bool = False) -> bool:

@@ -17,12 +17,20 @@ from __future__ import annotations
 
 import asyncio
 
+from beanie import PydanticObjectId
 from beanie.operators import In
 
 from ..models.base import link_target_id
 from ..models.group import Group
+from ..models.host import StorageHost
 from ..models.site import Site, SiteStorageSettings
-from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
+from ..models.storage import (
+    AutomountMap,
+    NFSExportConfig,
+    StaticMount,
+    Storage,
+    StorageVolume,
+)
 from ..models.user import User
 
 
@@ -60,10 +68,124 @@ async def list_automap_storages_grouped(site: Site) -> dict[str, list[Storage]]:
 
 
 async def find_volume(site: Site, name: str) -> StorageVolume | None:
+    """One volume with its direct links (`site`, `parent`, `storage_host`)
+    fetched — the `show volume` read."""
     return await StorageVolume.find_one(
         StorageVolume.name == name,
         StorageVolume.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
     )
+
+
+# ---------------------------------------------------------------------------
+# Storage hosts + default resolution
+# ---------------------------------------------------------------------------
+#
+# Reads resolve a volume's StorageHost BY NAME through the unique
+# `(site, hostname)` key rather than by fetching `StorageVolume.storage_host`:
+# `host` is denormalized on every volume, so no extra link depth is needed
+# and rows the backfill has not linked yet resolve the same way.
+
+
+async def find_storage_host(site: Site, hostname: str) -> StorageHost | None:
+    # StorageHost.find_one auto-filters `_class_id`; never resolve through
+    # the `Host` root (see models/host.py).
+    return await StorageHost.find_one(
+        StorageHost.hostname == hostname,
+        StorageHost.site.id == site.id,
+    )
+
+
+async def list_site_storage_hosts(site: Site) -> list[StorageHost]:
+    return await StorageHost.find(
+        StorageHost.site.id == site.id,
+    ).sort('+hostname').to_list()
+
+
+async def storage_hosts_by_site(
+    site_ids,
+) -> dict[tuple[PydanticObjectId, str], StorageHost]:
+    """Every StorageHost at the given sites keyed `(site_id, hostname)`, in
+    one query — the lookup table bulk readers (puppet export) resolve a
+    volume's host through."""
+    ids = list(site_ids)
+    if not ids:
+        return {}
+    hosts = await StorageHost.find(In(StorageHost.site.id, ids)).to_list()
+    return {(link_target_id(h.site), h.hostname): h for h in hosts}
+
+
+async def volume_counts_by_host(site: Site) -> dict[str, int]:
+    """`{hostname: volume count}` for a site in one `$group` aggregation."""
+    rows = await StorageVolume.find(
+        StorageVolume.site.id == site.id,
+    ).aggregate([
+        {'$group': {'_id': '$host', 'n': {'$sum': 1}}},
+    ]).to_list()
+    return {row['_id']: row['n'] for row in rows}
+
+
+NFS_EXPORT_LEVELS = ('storage', 'volume', 'host', 'site')
+
+
+def effective_nfs_export(
+    *,
+    volume: StorageVolume | None,
+    host: StorageHost | None,
+    site: Site | None,
+    storage: Storage | None = None,
+) -> tuple[NFSExportConfig | None, dict[str, str]]:
+    """Resolve the export config a puppet `/etc/exports` line should carry.
+
+    Per field, first non-empty value wins along
+    `storage` -> `volume` -> `host` -> `site`. Per-field (not whole-config)
+    because a volume created with only `--export-ranges` stores
+    `export_options=''` and must still take options from the site. No range
+    union: a more specific tier can restrict ranges. `host` and `site` are
+    the VOLUME's (a Storage may sit on another site than its volume).
+
+    Returns `(config, levels)` where `levels` maps each field to the tier
+    it came from (`'none'` when nothing set it); `config` is None only when
+    both fields are unset everywhere. `volume=None` resolves the host/site
+    default alone (what a volume with no config of its own would inherit).
+    """
+    tiers = (
+        ('storage', storage.nfs_export if storage is not None else None),
+        ('volume', volume.nfs_export if volume is not None else None),
+        ('host', host.nfs_export if host is not None else None),
+        ('site', site.storage.nfs_export if site is not None else None),
+    )
+    options, options_level = '', 'none'
+    ranges: list[str] = []
+    ranges_level = 'none'
+    for level, cfg in tiers:
+        if cfg is None:
+            continue
+        if options_level == 'none' and cfg.export_options:
+            options, options_level = cfg.export_options, level
+        if ranges_level == 'none' and cfg.export_ranges:
+            ranges, ranges_level = list(cfg.export_ranges), level
+    levels = {'export_options': options_level, 'export_ranges': ranges_level}
+    if options_level == 'none' and ranges_level == 'none':
+        return None, levels
+    return NFSExportConfig(export_options=options, export_ranges=ranges), levels
+
+
+def effective_zfs_path_template(
+    category: str, *, host: StorageHost | None, site: Site | None,
+) -> tuple[str | None, str]:
+    """The ZFS path template for `category`: host tier first, then site.
+    Returns `(template, level)` with level `host` / `site` / `none`."""
+    if host is not None:
+        template = host.zfs_path_templates.get(category)
+        if template:
+            return template, 'host'
+    if site is not None:
+        template = site.storage.zfs_path_templates.get(category)
+        if template:
+            return template, 'site'
+    return None, 'none'
 
 
 async def list_site_volumes(site: Site) -> list[StorageVolume]:
@@ -145,9 +267,10 @@ async def _resolve_storage_name(ref, model) -> str | None:
 
 
 async def resolve_site_storage_settings(settings: SiteStorageSettings) -> dict:
-    """Resolve a site's home-storage provisioning defaults to display labels:
-    the default home volume / automount map / static mount names, plus the
-    plain default home quota string. One lightweight fetch per set ref."""
+    """Resolve a site's storage defaults to display values: the default home
+    volume / automount map / static mount names, the plain default home
+    quota string, and the site-tier export config and ZFS path templates.
+    One lightweight fetch per set ref."""
     volume, automount, static = await asyncio.gather(
         _resolve_storage_name(settings.default_home_volume, StorageVolume),
         _resolve_storage_name(settings.home_automount_map, AutomountMap),
@@ -158,6 +281,11 @@ async def resolve_site_storage_settings(settings: SiteStorageSettings) -> dict:
         'default_home_quota': settings.default_home_quota,
         'home_automount_map': automount,
         'home_static_mount': static,
+        'nfs_export': (
+            settings.nfs_export.model_dump()
+            if settings.nfs_export is not None else None
+        ),
+        'zfs_path_templates': dict(settings.zfs_path_templates),
     }
 
 

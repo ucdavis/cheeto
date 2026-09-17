@@ -44,6 +44,7 @@ from ..models.storage import (
     ZFSConfig,
 )
 from ..models.hippo import HippoEvent
+from ..models.host import Host, StorageHost
 from ..models.user_site_info import UserSiteInfo
 from ..operations import (
     AddGroupMember,
@@ -457,6 +458,14 @@ async def _seed_volume(site, name='nas01vol', host='nas01',
     )
     await volume.insert()
     return volume
+
+
+async def _seed_storage_host(site, hostname='nas01', **kwargs):
+    """A StorageHost record; the Create* storage ops resolve `host=` strictly
+    against these."""
+    host = StorageHost(hostname=hostname, site=site, **kwargs)
+    await host.insert()
+    return host
 
 
 class TestStorageModel:
@@ -6007,6 +6016,7 @@ class TestDeleteSite:
         alice = await User.find_one(User.name == 'sl_alice')
         group = await Group.find_one(Group.name == 'sllab')
         st_volume = await _seed_volume(site)
+        await _seed_storage_host(site, 'nas01')
         await Storage(
             name='st1', site=site, category='home',
             owner=alice, group=group, volume=st_volume,
@@ -6050,6 +6060,7 @@ class TestDeleteSite:
             'storage': 1,
             'static_mounts': 1,
             'storage_volumes': 1,
+            'hosts': 1,
             'automount_maps': 1,
             'hippo_events': 1,
             'slurm_allocations': 1,
@@ -6068,7 +6079,12 @@ class TestDeleteSite:
         # everything for slsite is gone
         assert await Site.find_one(Site.name == 'slsite') is None
         for _label, model in SITE_LINKED_MODELS:
-            assert await model.find(model.site.id == site.id).count() == 0
+            # with_children: `hosts` is polymorphic — without it the count
+            # would exclude StorageHost rows and pass vacuously.
+            assert await model.find(
+                model.site.id == site.id, with_children=True,
+            ).count() == 0
+        assert await StorageHost.find_all().count() == 0
         # the site's allocation is gone; only the other site's remains
         assert await SlurmAllocation.find_all().count() == 1
 
@@ -6151,6 +6167,8 @@ class TestSiteStorageSettings:
             'default_home_quota': '20G',
             'home_automount_map': 'home',
             'home_static_mount': None,
+            'nfs_export': None,
+            'zfs_path_templates': {},
         }
 
     async def test_resolve_settings_static_mount(self, beanie_client):
@@ -6184,6 +6202,8 @@ class TestSiteStorageSettings:
             'default_home_quota': None,
             'home_automount_map': None,
             'home_static_mount': None,
+            'nfs_export': None,
+            'zfs_path_templates': {},
         }
 
 
@@ -6276,6 +6296,7 @@ class TestCreateHomeStorageOp:
             name='hsuser', email='hs@test.com', uid=74001,
             fullname='HS User',
         )
+        await _seed_storage_host(site, 'nas99')
         await CreateHomeStorage.run(
             beanie_client, None,
             user_name='hsuser', site_name='hs_site',
@@ -6439,8 +6460,39 @@ class TestCreateGroupStorageOp:
                 quota='10T', parent_volume='groups',
             )
 
+    async def test_allocation_comment(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='10T', parent_volume='groups',
+            comment='HPC-1234 purchase',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'groups/glab',
+        )
+        assert [(a.quota, a.comment) for a in volume.allocations] == [
+            ('10T', 'HPC-1234 purchase'),
+        ]
+        hist = await History.find_one(History.op == 'create_group_storage')
+        assert hist.changes['comment'] == 'HPC-1234 purchase'
+
+    async def test_allocation_comment_default(self, beanie_client):
+        await self._seed_group_site(beanie_client, sponsors=('pi',))
+        await CreateGroupStorage.run(
+            beanie_client, None,
+            group_name='glab', site_name='gs_site',
+            quota='10T', parent_volume='groups',
+        )
+        volume = await StorageVolume.find_one(
+            StorageVolume.name == 'groups/glab',
+        )
+        assert volume.allocations[0].comment == 'initial group allocation'
+
     async def test_host_escape_hatch(self, beanie_client):
         await self._seed_group_site(beanie_client, sponsors=('pi',))
+        site = await Site.find_one(Site.name == 'gs_site')
+        await _seed_storage_host(site, 'nas99')
         await CreateGroupStorage.run(
             beanie_client, None,
             group_name='glab', site_name='gs_site',
@@ -6552,6 +6604,7 @@ class TestRehomeUser:
         await site.insert()
         await CreateUser.run(beanie_client, None, name='rh4u',
                              email='r@t.com', uid=74130, fullname='x')
+        await _seed_storage_host(site, 'nas9')
         # standalone home via the escape hatch; site has no home defaults
         await CreateHomeStorage.run(beanie_client, None,
                                     user_name='rh4u', site_name='rh4',
@@ -9713,3 +9766,1032 @@ class TestGroupSiteCascades:
         )
         assert result['group_site_infos'] == 2
         assert await GroupSiteInfo.find_all().count() == 0
+
+
+# ---------------------------------------------------------------------------
+# Storage hosts, storage defaults, and export precedence
+# ---------------------------------------------------------------------------
+
+
+def _bare_volume(site, name='v', host='h', host_path='/h/v', **kwargs):
+    """Unsaved StorageVolume for pure-function tests."""
+    return StorageVolume(
+        name=name, site=site, backend='zfs', zfs=ZFSConfig(),
+        host=host, host_path=host_path, **kwargs,
+    )
+
+
+class TestStorageDefaultsModel:
+    """`StorageDefaults` (shared by SiteStorageSettings and StorageHost):
+    template validation/rendering, hostname rules, StorageHost identity and
+    the beanie polymorphism traps."""
+
+    def test_template_validation(self):
+        from cheeto.models.storage_defaults import validate_zfs_path_template
+        assert validate_zfs_path_template('/{host}/home/{name}') == '/{host}/home/{name}'
+        assert validate_zfs_path_template('/export/{site}/{name}')
+        for bad, match in (
+            ('relative/{name}', 'absolute'),
+            ('/{host}/{}', 'positional'),
+            ('/{host}/{0}', 'positional'),
+            ('/{host}/{name:>10}', 'format spec'),
+            ('/{host}/{name!r}', 'format spec'),
+            ('/{host}/{category}/{name}', 'unknown field'),
+            ('/{host.fqdn}/{name}', 'unknown field'),
+            ('/{host', 'ZFS path template'),
+        ):
+            with pytest.raises(ValueError, match=match):
+                validate_zfs_path_template(bad)
+
+    def test_render_host_path(self):
+        from cheeto.models.storage_defaults import render_host_path
+        assert render_host_path(
+            '/{host}/share/{name}/', host='nas-4-1', name='lab', site='farm',
+        ) == '/nas-4-1/share/lab'
+        assert render_host_path(
+            '/export/{site}/{name}', host='x', name='u', site='farm',
+        ) == '/export/farm/u'
+
+    def test_storage_defaults_category_keys(self):
+        from cheeto.models.storage_defaults import StorageDefaults
+        ok = StorageDefaults(zfs_path_templates={'home': '/{host}/home/{name}'})
+        assert ok.zfs_path_templates == {'home': '/{host}/home/{name}'}
+        with pytest.raises(ValueError, match='category'):
+            StorageDefaults(zfs_path_templates={'scratch': '/x/{name}'})
+        with pytest.raises(ValueError, match='unknown field'):
+            StorageDefaults(zfs_path_templates={'home': '/x/{user}'})
+
+    async def test_site_storage_settings_round_trip_and_hook(self, beanie_client):
+        site = Site(name='sd_site', fqdn='sd.test')
+        await site.insert()
+        site.storage.nfs_export = NFSExportConfig(
+            export_options='rw', export_ranges=['10.0.0.0/8'],
+        )
+        site.storage.zfs_path_templates = {'group': '/{host}/{name}'}
+        await site.save()
+        fetched = await Site.find_one(Site.name == 'sd_site')
+        assert fetched.storage.nfs_export.export_ranges == ['10.0.0.0/8']
+        assert fetched.storage.zfs_path_templates == {'group': '/{host}/{name}'}
+        # in-place mutation hole is closed by Site.normalize_settings
+        fetched.storage.zfs_path_templates['home'] = 'relative/{name}'
+        with pytest.raises(ValueError, match='absolute'):
+            await fetched.save()
+
+    def test_hostname_validation(self):
+        from cheeto.models.host import validate_hostname
+        assert validate_hostname(' nas-4-1 ') == 'nas-4-1'
+        assert validate_hostname('192.168.1.10') == '192.168.1.10'
+        for bad in ('', '  ', 'nas 1', 'nas/1', 'nas:1'):
+            with pytest.raises(ValueError):
+                validate_hostname(bad)
+        with pytest.raises(ValueError):
+            StorageHost(hostname='nas:1', site=Site(name='x', fqdn='x'))
+
+    async def test_storage_host_identity_per_site(self, beanie_client):
+        from pymongo.errors import DuplicateKeyError
+        a = Site(name='sh_a', fqdn='a.test')
+        b = Site(name='sh_b', fqdn='b.test')
+        await a.insert()
+        await b.insert()
+        # the same NAS serves two sites (live: nas-8-0 on farm + franklin)
+        await _seed_storage_host(a, 'nas-8-0')
+        await _seed_storage_host(b, 'nas-8-0')
+        with pytest.raises(DuplicateKeyError):
+            await StorageHost(hostname='nas-8-0', site=a).insert()
+
+    async def test_host_root_hides_children_without_with_children(self, beanie_client):
+        site = Site(name='sh_root', fqdn='r.test')
+        await site.insert()
+        await _seed_storage_host(site, 'flash')
+        assert await Host.find(Host.site.id == site.id).count() == 0
+        rows = await Host.find(Host.site.id == site.id, with_children=True).to_list()
+        assert len(rows) == 1 and isinstance(rows[0], StorageHost)
+        assert await StorageHost.find(StorageHost.site.id == site.id).count() == 1
+
+    async def test_storage_host_template_hook(self, beanie_client):
+        site = Site(name='sh_hook', fqdn='h.test')
+        await site.insert()
+        host = await _seed_storage_host(site, 'flash')
+        host.zfs_path_templates['home'] = '/{bogus}/{name}'
+        with pytest.raises(ValueError, match='unknown field'):
+            await host.save()
+
+    async def test_volume_host_link_checked_on_save_not_parse(self, beanie_client):
+        from beanie.operators import Set
+        site = Site(name='sh_link', fqdn='l.test')
+        await site.insert()
+        host = await _seed_storage_host(site, 'nas01')
+        volume = await _seed_volume(site, host='nas01', storage_host=host)
+        raw = await StorageVolume.get_pymongo_collection().find_one(
+            {'_id': volume.id},
+        )
+        assert raw['storage_host'].collection == 'hosts'
+        assert raw['storage_host'].id == host.id
+
+        volume.host = 'nas02'
+        with pytest.raises(ValueError, match='does not match'):
+            await volume.save()
+
+        # A drifted row (written around the hooks) must still parse, so the
+        # drift can be seen and fixed.
+        await StorageVolume.find(StorageVolume.id == volume.id).update_many(
+            Set({StorageVolume.host: 'nas02'}),
+        )
+        fetched = await StorageVolume.find_one(
+            StorageVolume.id == volume.id, fetch_links=True, nesting_depth=1,
+        )
+        assert fetched.host == 'nas02'
+        assert fetched.storage_host.hostname == 'nas01'
+
+
+class TestEffectiveNFSExport:
+    """Per-field, most-specific-wins resolution with no range union."""
+
+    def _tiers(self):
+        site = Site(name='eff', fqdn='e.test')
+        site.storage.nfs_export = NFSExportConfig(
+            export_options='rw,sync', export_ranges=['10.0.0.0/8'],
+        )
+        host = StorageHost(
+            hostname='h', site=site,
+            nfs_export=NFSExportConfig(
+                export_options='', export_ranges=['10.1.0.0/16'],
+            ),
+        )
+        return site, host
+
+    def test_per_field_precedence(self):
+        from cheeto.queries import effective_nfs_export
+        site, host = self._tiers()
+
+        # host sets only ranges -> options fall through to the site
+        cfg, levels = effective_nfs_export(
+            volume=_bare_volume(site), host=host, site=site,
+        )
+        assert cfg.export_options == 'rw,sync'
+        assert cfg.export_ranges == ['10.1.0.0/16']
+        assert levels == {'export_options': 'site', 'export_ranges': 'host'}
+
+        # a volume created with only --export-ranges keeps site options
+        vol = _bare_volume(
+            site, nfs_export=NFSExportConfig(export_ranges=['172.16.0.0/12']),
+        )
+        cfg, levels = effective_nfs_export(volume=vol, host=host, site=site)
+        assert cfg.export_options == 'rw,sync'
+        assert cfg.export_ranges == ['172.16.0.0/12']
+        assert levels == {'export_options': 'site', 'export_ranges': 'volume'}
+
+        # the storage tier (subdirectory export) wins over everything
+        storage = Storage.model_construct(
+            nfs_export=NFSExportConfig(export_options='ro', export_ranges=['1.1.1.1']),
+        )
+        cfg, levels = effective_nfs_export(
+            volume=vol, host=host, site=site, storage=storage,
+        )
+        assert (cfg.export_options, cfg.export_ranges) == ('ro', ['1.1.1.1'])
+        assert set(levels.values()) == {'storage'}
+
+        # host/site default alone (what an unconfigured volume inherits)
+        cfg, levels = effective_nfs_export(volume=None, host=host, site=site)
+        assert levels == {'export_options': 'site', 'export_ranges': 'host'}
+
+        # nothing anywhere
+        bare = Site(name='bare', fqdn='b.test')
+        cfg, levels = effective_nfs_export(
+            volume=_bare_volume(bare), host=None, site=bare,
+        )
+        assert cfg is None
+        assert levels == {'export_options': 'none', 'export_ranges': 'none'}
+
+    def test_template_precedence(self):
+        from cheeto.queries import effective_zfs_path_template
+        site = Site(name='tp', fqdn='t.test')
+        site.storage.zfs_path_templates = {
+            'home': '/{host}/home/{name}', 'group': '/{host}/{name}',
+        }
+        host = StorageHost(
+            hostname='h', site=site,
+            zfs_path_templates={'home': '/flash/export/home/{name}'},
+        )
+        assert effective_zfs_path_template('home', host=host, site=site) == (
+            '/flash/export/home/{name}', 'host',
+        )
+        assert effective_zfs_path_template('group', host=host, site=site) == (
+            '/{host}/{name}', 'site',
+        )
+        assert effective_zfs_path_template('share', host=host, site=site) == (
+            None, 'none',
+        )
+        assert effective_zfs_path_template('home', host=None, site=None) == (
+            None, 'none',
+        )
+
+
+class TestStorageHostOps:
+
+    async def _site(self, name):
+        site = Site(name=name, fqdn=f'{name}.test')
+        await site.insert()
+        return site
+
+    async def test_create_and_duplicate(self, beanie_client):
+        from cheeto.operations import CreateStorageHost
+        from cheeto.queries import find_storage_host
+        site = await self._site('sho1')
+        host = await CreateStorageHost.run(
+            beanie_client, None, site_name='sho1', hostname='nas-1',
+            export_options='rw,sync',
+            export_ranges=['10.2.0.0/16', '10.1.0.0/16', '10.1.0.0/16'],
+            zfs_path_templates={'home': '/{host}/home/{name}'},
+        )
+        assert host.nfs_export.export_options == 'rw,sync'
+        # sorted + de-duplicated
+        assert host.nfs_export.export_ranges == ['10.1.0.0/16', '10.2.0.0/16']
+        assert host.zfs_path_templates == {'home': '/{host}/home/{name}'}
+        assert (await find_storage_host(site, 'nas-1')).id == host.id
+
+        with pytest.raises(ValueError, match='already exists'):
+            await CreateStorageHost.run(
+                beanie_client, None, site_name='sho1', hostname='nas-1',
+            )
+        with pytest.raises(ValueError, match='hostname'):
+            await CreateStorageHost.run(
+                beanie_client, None, site_name='sho1', hostname='bad host',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await CreateStorageHost.run(
+                beanie_client, None, site_name='nope', hostname='x',
+            )
+        with pytest.raises(ValueError, match='unknown field'):
+            await CreateStorageHost.run(
+                beanie_client, None, site_name='sho1', hostname='nas-2',
+                zfs_path_templates={'home': '/{user}'},
+            )
+        hist = await History.find_one(History.op == 'create_storage_host')
+        assert hist.changes['hostname'] == 'nas-1'
+        assert hist.changes['export_ranges'] == ['10.1.0.0/16', '10.2.0.0/16']
+
+    async def test_edit_unset_semantics(self, beanie_client):
+        from cheeto.operations import CreateStorageHost, EditStorageHost
+        from cheeto.queries import find_storage_host
+        site = await self._site('sho2')
+        await CreateStorageHost.run(
+            beanie_client, None, site_name='sho2', hostname='nas-1',
+            export_options='rw,sync', export_ranges=['10.0.0.0/8'],
+            zfs_path_templates={'home': '/{host}/home/{name}'},
+        )
+
+        # only ranges passed: options + templates untouched
+        await EditStorageHost.run(
+            beanie_client, None, site_name='sho2', hostname='nas-1',
+            export_ranges=['192.168.0.0/16'],
+        )
+        h = await find_storage_host(site, 'nas-1')
+        assert h.nfs_export.export_options == 'rw,sync'
+        assert h.nfs_export.export_ranges == ['192.168.0.0/16']
+        assert h.zfs_path_templates == {'home': '/{host}/home/{name}'}
+
+        await EditStorageHost.run(
+            beanie_client, None, site_name='sho2', hostname='nas-1',
+            zfs_path_templates={'group': '/{host}/{name}'},
+            clear_zfs_path_templates=['home'],
+        )
+        h = await find_storage_host(site, 'nas-1')
+        assert h.zfs_path_templates == {'group': '/{host}/{name}'}
+        assert h.nfs_export.export_ranges == ['192.168.0.0/16']
+
+        await EditStorageHost.run(
+            beanie_client, None, site_name='sho2', hostname='nas-1',
+            clear_nfs_export=True,
+        )
+        h = await find_storage_host(site, 'nas-1')
+        assert h.nfs_export is None
+
+        # options alone re-creates the config with empty ranges
+        await EditStorageHost.run(
+            beanie_client, None, site_name='sho2', hostname='nas-1',
+            export_options='ro',
+        )
+        h = await find_storage_host(site, 'nas-1')
+        assert (h.nfs_export.export_options, h.nfs_export.export_ranges) == ('ro', [])
+
+        with pytest.raises(ValueError, match='exclusive'):
+            await EditStorageHost.run(
+                beanie_client, None, site_name='sho2', hostname='nas-1',
+                clear_nfs_export=True, export_options='rw',
+            )
+        with pytest.raises(ValueError, match='Nothing to edit'):
+            await EditStorageHost.run(
+                beanie_client, None, site_name='sho2', hostname='nas-1',
+            )
+        with pytest.raises(ValueError, match='unknown field'):
+            await EditStorageHost.run(
+                beanie_client, None, site_name='sho2', hostname='nas-1',
+                zfs_path_templates={'home': '/{x}'},
+            )
+        with pytest.raises(ValueError, match='category'):
+            await EditStorageHost.run(
+                beanie_client, None, site_name='sho2', hostname='nas-1',
+                clear_zfs_path_templates=['scratch'],
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await EditStorageHost.run(
+                beanie_client, None, site_name='sho2', hostname='nas-9',
+                export_options='rw',
+            )
+
+        # describe() lists only what was passed
+        first = await History.find(
+            History.op == 'edit_storage_host',
+        ).sort('+timestamp').first_or_none()
+        assert set(first.changes) == {'site', 'hostname', 'export_ranges'}
+
+    async def test_delete_refused_while_referenced(self, beanie_client):
+        from cheeto.operations import DeleteStorageHost
+        from cheeto.queries import find_storage_host
+        site = await self._site('sho3')
+        await _seed_storage_host(site, 'nas-1')
+        # an UNLINKED volume still counts: the refusal keys on the host string
+        await _seed_volume(site, host='nas-1', host_path='/nas-1/v')
+        with pytest.raises(ValueError, match='referenced by 1 volume'):
+            await DeleteStorageHost.run(
+                beanie_client, None, site_name='sho3', hostname='nas-1',
+            )
+        await StorageVolume.find_all().delete()
+        await DeleteStorageHost.run(
+            beanie_client, None, site_name='sho3', hostname='nas-1',
+        )
+        assert await find_storage_host(site, 'nas-1') is None
+        with pytest.raises(ValueError, match='does not exist'):
+            await DeleteStorageHost.run(
+                beanie_client, None, site_name='sho3', hostname='nas-1',
+            )
+
+
+class TestSiteStorageDefaultsOp:
+    """`SetSiteStorageDefaults` gained the site-tier export config and ZFS
+    path templates, with UNSET semantics."""
+
+    async def test_set_clear_and_resolve(self, beanie_client):
+        from cheeto.operations import SetSiteStorageDefaults
+        from cheeto.queries import resolve_site_storage_settings
+        site = Site(name='ssd', fqdn='ssd.test')
+        await site.insert()
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='ssd',
+            export_options='rw,sync', export_ranges=['127.0.1.1', '10.0.0.0/8'],
+            zfs_path_templates={'home': '/{host}/home/{name}'},
+        )
+        site = await Site.find_one(Site.name == 'ssd')
+        resolved = await resolve_site_storage_settings(site.storage)
+        assert resolved['nfs_export'] == {
+            'export_options': 'rw,sync',
+            'export_ranges': ['10.0.0.0/8', '127.0.1.1'],
+        }
+        assert resolved['zfs_path_templates'] == {'home': '/{host}/home/{name}'}
+
+        # UNSET: options + home template survive
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='ssd',
+            export_ranges=['192.168.0.0/16'],
+            zfs_path_templates={'group': '/{host}/{name}'},
+        )
+        site = await Site.find_one(Site.name == 'ssd')
+        assert site.storage.nfs_export.export_options == 'rw,sync'
+        assert site.storage.nfs_export.export_ranges == ['192.168.0.0/16']
+        assert set(site.storage.zfs_path_templates) == {'home', 'group'}
+
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='ssd',
+            clear_nfs_export=True, clear_zfs_path_templates=['home'],
+        )
+        site = await Site.find_one(Site.name == 'ssd')
+        assert site.storage.nfs_export is None
+        assert site.storage.zfs_path_templates == {'group': '/{host}/{name}'}
+
+        with pytest.raises(ValueError, match='exclusive'):
+            await SetSiteStorageDefaults.run(
+                beanie_client, None, sitename='ssd',
+                clear_nfs_export=True, export_ranges=['1.1.1.1'],
+            )
+        with pytest.raises(ValueError, match='absolute'):
+            await SetSiteStorageDefaults.run(
+                beanie_client, None, sitename='ssd',
+                zfs_path_templates={'share': 'share/{name}'},
+            )
+        hist = await History.find(
+            History.op == 'set_site_storage_defaults',
+        ).sort('+timestamp').to_list()
+        assert hist[0].changes['export_ranges'] == ['10.0.0.0/8', '127.0.1.1']
+        assert hist[2].changes['nfs_export'] is None
+        assert hist[2].changes['unset_zfs_path_templates'] == ['home']
+
+
+class TestCreateOpsHostResolution:
+    """The Create* storage ops resolve `host=` strictly to a StorageHost,
+    link it, and derive standalone paths from templates; children keep the
+    parent-derived path and inherit the parent's link leniently."""
+
+    async def test_new_volume_requires_host_record(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        from cheeto.operations import CreateStorageVolume
+        site = Site(name='cr1', fqdn='cr1.test')
+        await site.insert()
+        with pytest.raises(ValueError, match='ng storage new host'):
+            await CreateStorageVolume.run(
+                beanie_client, None, site_name='cr1', name='v',
+                backend='zfs', host='nas-1', host_path='/nas-1/v',
+            )
+        host = await _seed_storage_host(site, 'nas-1')
+        vol = await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr1', name='v',
+            backend='zfs', host='nas-1', host_path='/nas-1/v',
+            export_ranges=['10.9.0.0/16', '10.8.0.0/16'],
+        )
+        assert link_target_id(vol.storage_host) == host.id
+        assert vol.host == 'nas-1'
+        # only ranges given: options stay empty and fall through at read time
+        assert vol.nfs_export.export_options == ''
+        assert vol.nfs_export.export_ranges == ['10.8.0.0/16', '10.9.0.0/16']
+        plain = await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr1', name='plain',
+            backend='zfs', host='nas-1', host_path='/nas-1/plain',
+        )
+        assert plain.nfs_export is None
+
+    async def test_new_volume_template_resolution(self, beanie_client):
+        from cheeto.operations import CreateStorageVolume
+        site = Site(name='cr2', fqdn='cr2.test')
+        site.storage.zfs_path_templates = {
+            'group': '/{host}/{name}', 'share': '/{host}/share/{name}',
+        }
+        await site.insert()
+        await _seed_storage_host(
+            site, 'nas-2', zfs_path_templates={'group': '/export/{site}/{name}'},
+        )
+        # host template beats site template; {name} is the leaf component
+        vol = await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr2', name='group/lab',
+            backend='zfs', host='nas-2', template='group',
+        )
+        assert vol.host_path == '/export/cr2/lab'
+        vol2 = await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr2', name='pub',
+            backend='zfs', host='nas-2', template='share',
+        )
+        assert vol2.host_path == '/nas-2/share/pub'
+        # explicit path wins over a template
+        vol3 = await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr2', name='y',
+            backend='zfs', host='nas-2', host_path='/explicit/y',
+            template='group',
+        )
+        assert vol3.host_path == '/explicit/y'
+        with pytest.raises(ValueError, match='No ZFS path template'):
+            await CreateStorageVolume.run(
+                beanie_client, None, site_name='cr2', name='h',
+                backend='zfs', host='nas-2', template='home',
+            )
+        with pytest.raises(ValueError, match='host_path or a template'):
+            await CreateStorageVolume.run(
+                beanie_client, None, site_name='cr2', name='x',
+                backend='zfs', host='nas-2',
+            )
+        with pytest.raises(ValueError, match='Invalid template category'):
+            await CreateStorageVolume.run(
+                beanie_client, None, site_name='cr2', name='x',
+                backend='zfs', host='nas-2', template='scratch',
+            )
+        hist = await History.find(
+            History.op == 'create_storage_volume',
+        ).sort('+timestamp').first_or_none()
+        assert hist.changes['host_path'] == '/export/cr2/lab'
+        assert hist.changes['template'] == 'group'
+
+    async def test_home_and_group_escape_hatches_use_templates(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        site = Site(name='cr3', fqdn='cr3.test')
+        site.storage.zfs_path_templates = {
+            'home': '/{host}/home/{name}', 'group': '/{host}/grp/{name}',
+        }
+        await site.insert()
+        host = await _seed_storage_host(site, 'nas-3')
+        await CreateUser.run(
+            beanie_client, None, name='cru', email='cru@t.com', uid=78001,
+            fullname='C',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='cru', site_name='cr3',
+            host='nas-3', quota='5G',
+        )
+        home = await StorageVolume.find_one(StorageVolume.name == 'home/cru')
+        assert home.host_path == '/nas-3/home/cru'
+        assert link_target_id(home.storage_host) == host.id
+
+        await Group(name='crlab', gid=78050).insert()
+        await CreateGroupStorage.run(
+            beanie_client, None, group_name='crlab', site_name='cr3',
+            owner_name='cru', quota='1T', host='nas-3',
+        )
+        grp = await StorageVolume.find_one(StorageVolume.name == 'group/crlab')
+        assert grp.host_path == '/nas-3/grp/crlab'
+        assert link_target_id(grp.storage_host) == host.id
+
+        await CreateUser.run(
+            beanie_client, None, name='cru_b', email='crb@t.com', uid=78005,
+            fullname='C',
+        )
+        with pytest.raises(ValueError, match='ng storage new host'):
+            await CreateHomeStorage.run(
+                beanie_client, None, user_name='cru_b', site_name='cr3',
+                host='nas-typo', quota='5G',
+            )
+        assert await StorageVolume.find_one(
+            StorageVolume.name == 'home/cru_b',
+        ) is None
+
+    async def test_children_ignore_templates_and_inherit_link(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        from cheeto.operations import CreateStorageVolume, SetSiteStorageDefaults
+        site = Site(name='cr4', fqdn='cr4.test')
+        site.storage.zfs_path_templates = {'home': '/{host}/home/{name}'}
+        await site.insert()
+        host = await _seed_storage_host(site, 'nas-4')
+        await CreateStorageVolume.run(
+            beanie_client, None, site_name='cr4', name='home',
+            backend='zfs', host='nas-4', host_path='/nas-4/export/home',
+        )
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='cr4', home_volume='home',
+            home_quota='1G',
+        )
+        await CreateUser.run(
+            beanie_client, None, name='cru2', email='c2@t.com', uid=78002,
+            fullname='C',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='cru2', site_name='cr4',
+        )
+        child = await StorageVolume.find_one(StorageVolume.name == 'home/cru2')
+        # parent-derived path, NOT the template
+        assert child.host_path == '/nas-4/export/home/cru2'
+        assert link_target_id(child.storage_host) == host.id
+
+        # an UNLINKED parent (pre-backfill) still provisions; the link is
+        # resolved by name when the host record exists, else left None
+        unlinked = await _seed_volume(
+            site, name='home2', host='nas-5', host_path='/nas-5/home',
+        )
+        await SetSiteStorageDefaults.run(
+            beanie_client, None, sitename='cr4', home_volume='home2',
+        )
+        await CreateUser.run(
+            beanie_client, None, name='cru3', email='c3@t.com', uid=78003,
+            fullname='C',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='cru3', site_name='cr4',
+        )
+        c3 = await StorageVolume.find_one(StorageVolume.name == 'home2/cru3')
+        assert c3.storage_host is None
+        assert link_target_id(c3.parent) == unlinked.id
+
+        host5 = await _seed_storage_host(site, 'nas-5')
+        await CreateUser.run(
+            beanie_client, None, name='cru4', email='c4@t.com', uid=78004,
+            fullname='C',
+        )
+        await CreateHomeStorage.run(
+            beanie_client, None, user_name='cru4', site_name='cr4',
+        )
+        c4 = await StorageVolume.find_one(StorageVolume.name == 'home2/cru4')
+        assert link_target_id(c4.storage_host) == host5.id
+
+
+class TestEditStorageVolume:
+
+    async def _seed(self):
+        user, group, site = await _seed_storage_actors('ev', 75000)
+        host_a = await _seed_storage_host(site, 'nas-a')
+        host_b = await _seed_storage_host(site, 'nas-b')
+        volume = await _seed_volume(
+            site, name='vol', host='nas-a', host_path='/nas-a/vol',
+            storage_host=host_a,
+            nfs_export=NFSExportConfig(
+                export_options='rw', export_ranges=['10.0.0.0/8'],
+            ),
+        )
+        storage = Storage(
+            name='ev', site=site, category='group',
+            owner=user, group=group, volume=volume,
+        )
+        await storage.insert()
+        return site, host_a, host_b, volume, storage
+
+    async def test_edit_export_and_clear(self, beanie_client):
+        from cheeto.operations import EditStorageVolume
+        site, *_ = await self._seed()
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            export_ranges=['192.168.0.0/16'],
+        )
+        v = await StorageVolume.find_one(StorageVolume.name == 'vol')
+        assert v.nfs_export.export_options == 'rw'
+        assert v.nfs_export.export_ranges == ['192.168.0.0/16']
+
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            clear_nfs_export=True,
+        )
+        v = await StorageVolume.find_one(StorageVolume.name == 'vol')
+        assert v.nfs_export is None
+
+        with pytest.raises(ValueError, match='exclusive'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='vol',
+                clear_nfs_export=True, export_options='rw',
+            )
+        with pytest.raises(ValueError, match='Nothing to edit'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='vol',
+            )
+        with pytest.raises(ValueError, match='does not exist'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='nope',
+                export_options='rw',
+            )
+
+    async def test_move_host_relinks_and_dirties_storages(self, beanie_client):
+        from cheeto.operations import EditStorageVolume
+        site, host_a, host_b, volume, storage = await self._seed()
+        before = (await Storage.find_one(Storage.name == 'ev')).ldap.modified_at
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            host='nas-b', host_path='/nas-b/vol/',
+        )
+        v = await StorageVolume.find_one(
+            StorageVolume.name == 'vol', fetch_links=True, nesting_depth=1,
+        )
+        assert v.host == 'nas-b'
+        assert v.storage_host.hostname == 'nas-b'
+        assert v.host_path == '/nas-b/vol'
+        after = (await Storage.find_one(Storage.name == 'ev')).ldap.modified_at
+        assert after is not None and (before is None or after > before)
+
+        with pytest.raises(ValueError, match='ng storage new host'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='vol',
+                host='nas-typo',
+            )
+        hist = await History.find(
+            History.op == 'edit_storage_volume',
+        ).sort('+timestamp').first_or_none()
+        assert hist.changes['old_host'] == 'nas-a'
+        assert hist.changes['host'] == 'nas-b'
+        assert hist.changes['old_host_path'] == '/nas-a/vol'
+
+    async def test_structural_edits_refused_with_children(self, beanie_client):
+        from cheeto.operations import EditStorageVolume
+        site, host_a, *_ , volume, _storage = await self._seed()
+        await _seed_volume(
+            site, name='vol/child', host='nas-a', host_path='/nas-a/vol/child',
+            parent=volume, storage_host=host_a,
+        )
+        for kwargs in ({'host': 'nas-b'}, {'host_path': '/x'}, {'new_name': 'renamed'}):
+            with pytest.raises(ValueError, match='1 child volume'):
+                await EditStorageVolume.run(
+                    beanie_client, None, site_name='evsite', volume_name='vol',
+                    **kwargs,
+                )
+        # non-structural edits still work on a parent
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            export_options='ro',
+        )
+        v = await StorageVolume.find_one(StorageVolume.name == 'vol')
+        assert v.nfs_export.export_options == 'ro'
+
+    async def test_rename_and_collisions(self, beanie_client):
+        from cheeto.operations import EditStorageVolume
+        site, host_a, *_ = await self._seed()
+        await _seed_volume(
+            site, name='other', host='nas-a', host_path='/nas-a/other',
+            storage_host=host_a,
+        )
+        with pytest.raises(ValueError, match='already exists'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='vol',
+                new_name='other',
+            )
+        with pytest.raises(ValueError, match='already occupies'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='vol',
+                host_path='/nas-a/other',
+            )
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            new_name='renamed',
+        )
+        assert await StorageVolume.find_one(StorageVolume.name == 'vol') is None
+        assert await StorageVolume.find_one(StorageVolume.name == 'renamed') is not None
+        hist = await History.find_one(History.op == 'edit_storage_volume')
+        assert set(hist.changes) == {'site', 'volume', 'old_name', 'name'}
+
+    async def test_zfs_dataset_requires_managed_zfs(self, beanie_client):
+        from cheeto.operations import EditStorageVolume
+        site, *_ = await self._seed()
+        await _seed_volume(
+            site, name='qb', host='nas-a', host_path='/qb/x', backend='quobyte',
+        )
+        with pytest.raises(ValueError, match='not a managed ZFS'):
+            await EditStorageVolume.run(
+                beanie_client, None, site_name='evsite', volume_name='qb',
+                zfs_dataset_name='tank/x',
+            )
+        await EditStorageVolume.run(
+            beanie_client, None, site_name='evsite', volume_name='vol',
+            zfs_dataset_name='tank/vol',
+        )
+        v = await StorageVolume.find_one(StorageVolume.name == 'vol')
+        assert v.zfs.dataset_name == 'tank/vol'
+
+
+class TestBackfillStorageHosts:
+
+    EXPORT = NFSExportConfig(
+        export_options='rw,sync', export_ranges=['10.0.0.0/8', '127.0.1.1'],
+    )
+
+    async def _seed(self):
+        user, group, site = await _seed_storage_actors('bf', 76000)
+        root = await _seed_volume(
+            site, name='home', host='nas-1', host_path='/nas-1/home',
+            nfs_export=self.EXPORT,
+            allocations=[StorageAllocation(quota='20T')],
+        )
+        # same config, different range order (v1 union artefact)
+        await _seed_volume(
+            site, name='home/u', host='nas-1', host_path='/nas-1/home/u',
+            parent=root,
+            nfs_export=NFSExportConfig(
+                export_options='rw,sync',
+                export_ranges=['127.0.1.1', '10.0.0.0/8'],
+            ),
+            allocations=[StorageAllocation(quota='20G')],
+        )
+        # v2-created style: no export config at all
+        await _seed_volume(
+            site, name='grp', host='nas-2', host_path='/nas-2/grp',
+            allocations=[StorageAllocation(quota='1T')],
+        )
+        storage = Storage(
+            name='bf', site=site, category='group',
+            owner=user, group=group, volume=root,
+        )
+        await storage.insert()
+        return site
+
+    async def test_creates_links_idempotent_and_ldap_clean(self, beanie_client):
+        from cheeto.models.base import link_target_id
+        from cheeto.operations import BackfillStorageHosts
+        from cheeto.queries import list_site_storage_hosts
+        site = await self._seed()
+        ldap_before = (await Storage.find_one(Storage.name == 'bf')).ldap.modified_at
+
+        result = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite',
+        )
+        assert result['hosts_created'] == 2
+        assert result['volumes_linked'] == 3
+        assert result['sites_seeded'] == 0
+        assert result['exports_deduped'] == 0
+
+        hosts = {h.hostname: h for h in await list_site_storage_hosts(site)}
+        assert set(hosts) == {'nas-1', 'nas-2'}
+        for v in await StorageVolume.find(StorageVolume.site.id == site.id).to_list():
+            assert link_target_id(v.storage_host) == hosts[v.host].id
+        raw = await StorageVolume.get_pymongo_collection().find_one({'name': 'grp'})
+        assert raw['storage_host'].collection == 'hosts'
+        assert raw['storage_host'].id == hosts['nas-2'].id
+        # exports untouched without --dedupe-exports
+        home = await StorageVolume.find_one(StorageVolume.name == 'home')
+        assert home.nfs_export is not None
+
+        # query-level linking must not mark the backed Storage LDAP-dirty
+        ldap_after = (await Storage.find_one(Storage.name == 'bf')).ldap.modified_at
+        assert ldap_after == ldap_before
+
+        again = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite',
+        )
+        assert again['hosts_created'] == 0
+        assert again['volumes_linked'] == 0
+        assert await History.find(
+            History.op == 'backfill_storage_hosts',
+        ).count() == 2
+
+    async def test_dry_run_writes_nothing(self, beanie_client):
+        from cheeto.operations import BackfillStorageHosts
+        site = await self._seed()
+        result = await BackfillStorageHosts.run(
+            beanie_client, None, skip_history=True,
+            seed_site_defaults=True, dedupe_exports=True, dry_run=True,
+        )
+        assert result['dry_run'] is True
+        assert result['hosts_created'] == 2
+        assert result['volumes_linked'] == 3
+        assert result['sites_seeded'] == 1
+        assert result['exports_deduped'] == 2
+        assert await StorageHost.find_all().count() == 0
+        assert await StorageVolume.find(
+            StorageVolume.storage_host != None,  # noqa: E711
+        ).count() == 0
+        site = await Site.find_one(Site.name == 'bfsite')
+        assert site.storage.nfs_export is None
+        assert await History.find(
+            History.op == 'backfill_storage_hosts',
+        ).count() == 0
+
+    async def test_seed_and_dedupe_keep_puppet_output(self, beanie_client):
+        from cheeto.operations import BackfillStorageHosts, ExportPuppetStorage
+        await self._seed()
+        before = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='bfsite',
+        )
+        result = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite',
+            seed_site_defaults=True, dedupe_exports=True,
+        )
+        assert result['sites_seeded'] == 1
+        assert result['exports_deduped'] == 2
+        site = await Site.find_one(Site.name == 'bfsite')
+        assert site.storage.nfs_export.export_options == 'rw,sync'
+        assert site.storage.nfs_export.export_ranges == ['10.0.0.0/8', '127.0.1.1']
+        for name in ('home', 'home/u', 'grp'):
+            v = await StorageVolume.find_one(StorageVolume.name == name)
+            assert v.nfs_export is None, name
+        after = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='bfsite',
+        )
+        assert after == before
+
+        # a second pass has nothing left to seed or dedupe
+        again = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite',
+            seed_site_defaults=True, dedupe_exports=True,
+        )
+        assert again['sites_seeded'] == 0
+        assert again['exports_deduped'] == 0
+
+    async def test_dedupe_respects_host_tier_and_differences(self, beanie_client):
+        from cheeto.operations import BackfillStorageHosts
+        site = await self._seed()
+        # nas-2 gets a host-tier default that differs from the site default
+        await _seed_storage_host(
+            site, 'nas-2',
+            nfs_export=NFSExportConfig(export_options='ro', export_ranges=['1.1.1.1']),
+        )
+        await _seed_volume(
+            site, name='grp2', host='nas-2', host_path='/nas-2/grp2',
+            nfs_export=NFSExportConfig(export_options='ro', export_ranges=['1.1.1.1']),
+        )
+        # a volume whose config differs from every tier keeps it
+        await _seed_volume(
+            site, name='odd', host='nas-1', host_path='/nas-1/odd',
+            nfs_export=NFSExportConfig(export_options='rw,sync', export_ranges=['9.9.9.9']),
+        )
+        # site defaults set by hand (the seed would refuse: mixed configs)
+        site.storage.nfs_export = self.EXPORT
+        await site.save()
+        result = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite',
+            seed_site_defaults=True, dedupe_exports=True,
+        )
+        assert result['hosts_created'] == 1          # nas-1 only
+        assert result['sites_seeded'] == 0           # already set
+        assert result['exports_deduped'] == 3        # home, home/u, grp2
+        for name, expect_none in (
+            ('home', True), ('home/u', True), ('grp2', True), ('odd', False),
+        ):
+            v = await StorageVolume.find_one(StorageVolume.name == name)
+            assert (v.nfs_export is None) is expect_none, name
+
+    async def test_seed_skips_mixed_and_dedupe_needs_default(self, beanie_client):
+        from cheeto.operations import BackfillStorageHosts
+        site = await self._seed()
+        with pytest.raises(ValueError, match='no site- or host-level export default'):
+            await BackfillStorageHosts.run(
+                beanie_client, None, site_name='bfsite', dedupe_exports=True,
+            )
+        await _seed_volume(
+            site, name='odd', host='nas-1', host_path='/nas-1/odd',
+            nfs_export=NFSExportConfig(export_options='ro', export_ranges=[]),
+        )
+        result = await BackfillStorageHosts.run(
+            beanie_client, None, site_name='bfsite', seed_site_defaults=True,
+        )
+        assert result['sites_seeded'] == 0
+        assert result['sites_skipped_mixed'] == 1
+        site = await Site.find_one(Site.name == 'bfsite')
+        assert site.storage.nfs_export is None
+        with pytest.raises(ValueError, match='does not exist'):
+            await BackfillStorageHosts.run(
+                beanie_client, None, site_name='nope',
+            )
+
+
+class TestExportPuppetStorageDefaults:
+    """`ExportPuppetStorage` resolves export config through the host and site
+    tiers, keyed by the VOLUME's site."""
+
+    async def test_inherits_host_then_site(self, beanie_client):
+        from cheeto.operations import ExportPuppetStorage
+        user, group, site = await _seed_storage_actors('pd', 77000)
+        site.storage.nfs_export = NFSExportConfig(
+            export_options='rw,site', export_ranges=['10.0.0.0/8'],
+        )
+        await site.save()
+        await _seed_storage_host(
+            site, 'nas-h',
+            nfs_export=NFSExportConfig(export_options='rw,host', export_ranges=[]),
+        )
+        quota = [StorageAllocation(quota='1T')]
+        onhost = await _seed_volume(
+            site, name='onhost', host='nas-h', host_path='/nas-h/onhost',
+            allocations=quota,
+        )
+        onsite = await _seed_volume(
+            site, name='onsite', host='nas-s', host_path='/nas-s/onsite',
+            allocations=quota,
+        )
+        own = await _seed_volume(
+            site, name='own', host='nas-s', host_path='/nas-s/own',
+            allocations=quota,
+            nfs_export=NFSExportConfig(export_options='ro', export_ranges=['1.1.1.1']),
+        )
+
+        def _storage(name, volume, **kw):
+            return Storage(
+                name=name, site=site, category='group',
+                owner=user, group=group, volume=volume, **kw,
+            )
+
+        await _storage('onhost', onhost).insert()
+        await _storage('onsite', onsite).insert()
+        await _storage('own', own).insert()
+        await _storage(
+            'sub', onsite, subpath='sub',
+            nfs_export=NFSExportConfig(export_options='rw,sub', export_ranges=[]),
+        ).insert()
+
+        data = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='pdsite',
+        )
+        zfs = {
+            e['name']: e for entries in data['zfs']['group'].values()
+            for e in entries
+        }
+        assert (zfs['onhost']['export_options'], zfs['onhost']['export_ranges']) == (
+            'rw,host', ['10.0.0.0/8'],
+        )
+        assert (zfs['onsite']['export_options'], zfs['onsite']['export_ranges']) == (
+            'rw,site', ['10.0.0.0/8'],
+        )
+        assert (zfs['own']['export_options'], zfs['own']['export_ranges']) == (
+            'ro', ['1.1.1.1'],
+        )
+        sub, = data['nfs']['group']['nas-s']
+        assert (sub['name'], sub['export_options'], sub['export_ranges']) == (
+            'sub', 'rw,sub', ['10.0.0.0/8'],
+        )
+
+    async def test_cross_site_volume_uses_volume_site(self, beanie_client):
+        from cheeto.operations import ExportPuppetStorage
+        user, group, site_a = await _seed_storage_actors('xa', 77100)
+        site_a.storage.nfs_export = NFSExportConfig(
+            export_options='rw,a', export_ranges=['10.1.0.0/16'],
+        )
+        await site_a.save()
+        site_b = Site(name='xb', fqdn='xb.test')
+        site_b.storage.nfs_export = NFSExportConfig(
+            export_options='rw,b', export_ranges=['10.2.0.0/16'],
+        )
+        await site_b.insert()
+        await _seed_storage_host(
+            site_b, 'nas-b',
+            nfs_export=NFSExportConfig(export_options='', export_ranges=['10.3.0.0/16']),
+        )
+        remote = await _seed_volume(
+            site_b, name='remote', host='nas-b', host_path='/nas-b/remote',
+            allocations=[StorageAllocation(quota='1T')],
+        )
+        await Storage(
+            name='remote', site=site_a, category='group',
+            owner=user, group=group, volume=remote,
+        ).insert()
+        data = await ExportPuppetStorage.run(
+            beanie_client, None, sitename='xasite',
+        )
+        entry, = data['zfs']['group']['nas-b']
+        assert entry['export_options'] == 'rw,b'          # volume's site
+        assert entry['export_ranges'] == ['10.3.0.0/16']   # volume's host

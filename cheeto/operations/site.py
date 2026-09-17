@@ -12,7 +12,7 @@ from ..models.site import Site
 from ..models.slurm import SlurmAccount, SlurmAllocation
 from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
-from .base import Operation
+from .base import UNSET, Operation
 from .group_site import ensure_group_site
 
 
@@ -380,10 +380,12 @@ class ClearSiteDefaultSlurmAccount(Operation):
 
 class SetSiteStorageDefaults(Operation):
     """Set the site's storage defaults (`SiteStorageSettings`): the parent
-    volume new homes are provisioned under, the default home quota, and the
-    home mount mechanism. Only the kwargs passed are changed; the embedded
-    validator enforces automount/static exclusivity (clear one by setting
-    the other)."""
+    volume new homes are provisioned under, the default home quota, the
+    home mount mechanism, and the site-tier storage defaults (NFS export
+    config, ZFS path templates). Only the kwargs passed are changed; the
+    embedded validator enforces automount/static exclusivity (clear one by
+    setting the other). Export/template kwargs use `UNSET` semantics (see
+    `operations/storage.py::apply_storage_defaults`)."""
 
     op_name = 'set_site_storage_defaults'
 
@@ -397,6 +399,11 @@ class SetSiteStorageDefaults(Operation):
         home_quota: str | None = None,
         home_automount_map: str | None = None,
         home_static_mount: str | None = None,
+        export_options: Any = UNSET,
+        export_ranges: Any = UNSET,
+        clear_nfs_export: bool = False,
+        zfs_path_templates: dict[str, str] | None = None,
+        clear_zfs_path_templates: list[str] | None = None,
     ) -> None:
         super().__init__(client, author)
         self.sitename = sitename
@@ -404,9 +411,16 @@ class SetSiteStorageDefaults(Operation):
         self.home_quota = home_quota
         self.home_automount_map = home_automount_map
         self.home_static_mount = home_static_mount
+        self.export_options = export_options
+        self.export_ranges = export_ranges
+        self.clear_nfs_export = clear_nfs_export
+        self.zfs_path_templates = dict(zfs_path_templates or {})
+        self.clear_zfs_path_templates = list(clear_zfs_path_templates or [])
+        self._defaults_changes: dict[str, Any] = {}
 
     async def execute(self, session: AsyncClientSession) -> None:
         from ..models.storage import AutomountMap, StaticMount, StorageVolume
+        from .storage import apply_storage_defaults
 
         site = await Site.find_one(Site.name == self.sitename)
         if site is None:
@@ -453,6 +467,15 @@ class SetSiteStorageDefaults(Operation):
             site.storage.home_static_mount = smount.id
             site.storage.home_automount_map = None
 
+        self._defaults_changes = apply_storage_defaults(
+            site.storage,
+            export_options=self.export_options,
+            export_ranges=self.export_ranges,
+            clear_nfs_export=self.clear_nfs_export,
+            set_templates=self.zfs_path_templates or None,
+            unset_templates=self.clear_zfs_path_templates or None,
+        )
+
         await site.save(session=session)
 
     def describe(self) -> dict[str, Any]:
@@ -462,6 +485,7 @@ class SetSiteStorageDefaults(Operation):
             'home_quota': self.home_quota,
             'home_automount_map': self.home_automount_map,
             'home_static_mount': self.home_static_mount,
+            **self._defaults_changes,
         }
 
 
@@ -659,8 +683,10 @@ class DeleteSite(Operation):
             deleted['slurm_allocations'] = getattr(res, 'deleted_count', 0)
 
         for label, model in SITE_LINKED_MODELS:
+            # with_children: `hosts` is a polymorphic root; without it the
+            # StorageHost rows would survive the cascade.
             res = await model.find(
-                model.site.id == site.id,
+                model.site.id == site.id, with_children=True,
             ).delete(session=session)
             deleted[label] = getattr(res, 'deleted_count', 0)
 

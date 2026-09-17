@@ -1,11 +1,18 @@
 from .base import BaseDocument, Expirable
 from .ldap_sync import LDAPInfo, LDAPSyncable
+from .storage_defaults import (
+    NFSExportConfig,
+    StorageDefaults,
+    render_host_path,
+    validate_zfs_path_template,
+)
 from .site import (
     Site,
     SiteGroupSettings,
     SiteSlurmSettings,
     SiteStorageSettings,
 )
+from .host import Host, StorageHost
 from .user import SshKey, UCDIAMInfo, User
 from .group import AccessGroup, Group, StatusGroup
 from .slurm import (
@@ -20,7 +27,6 @@ from .slurm import (
 from .storage import (
     AutomountMap,
     MountOverrides,
-    NFSExportConfig,
     QuobyteConfig,
     StaticMount,
     Storage,
@@ -48,6 +54,8 @@ UserSiteInfo.model_rebuild()
 GroupMembership.model_rebuild()
 GroupSiteInfo.model_rebuild()
 SlurmAccount.model_rebuild()
+Host.model_rebuild()
+StorageHost.model_rebuild()
 StorageVolume.model_rebuild()   # self-ref Link['StorageVolume']
 Storage.model_rebuild()
 # NOTE: the Site*Settings embedded models hold DocRef (bare ObjectId)
@@ -59,6 +67,8 @@ Storage.model_rebuild()
 # ALL_MODELS.
 ALL_MODELS = [
     Site,
+    Host,
+    StorageHost,
     User,
     SshKey,
     Group,
