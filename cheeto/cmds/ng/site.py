@@ -42,7 +42,15 @@ from ...queries import (
     site_to_puppet_legacy,
 )
 from ...yaml import dumps as dumps_yaml, highlight_yaml, print_yaml
-from ._args import confirm_typed, group_args, run_per_target, site_args
+from ._args import (
+    confirm_typed,
+    group_args,
+    has_storage_defaults_args,
+    run_per_target,
+    site_args,
+    storage_defaults_args,
+    storage_defaults_kwargs,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +239,21 @@ def _render_site_panel(data: dict) -> Panel:
     else:
         mount = '[dim](none)[/]'
     table.add_row('home mount', mount)
+
+    export = storage.get('nfs_export') or {}
+    table.add_row(
+        'export options', export.get('export_options') or '[dim](none)[/]',
+    )
+    ranges = export.get('export_ranges') or []
+    table.add_row(
+        'export ranges', ', '.join(ranges) if ranges else '[dim](none)[/]',
+    )
+    templates = storage.get('zfs_path_templates') or {}
+    table.add_row(
+        'zfs templates',
+        '\n'.join(f'{k}: {v}' for k, v in sorted(templates.items()))
+        or '[dim](none)[/]',
+    )
 
     return Panel(
         table, title=f'[bold]Site:[/] [green]{data["name"]}[/]',
@@ -461,13 +484,16 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
+@storage_defaults_args.apply(scope='site')
 @commands.register('ng', 'site', 'set', 'storage-defaults',
-                   help="Set the site's home-provisioning defaults "
-                        "(parent volume, quota, mount mechanism)")
+                   help="Set the site's storage defaults: home provisioning "
+                        '(parent volume, quota, mount mechanism), NFS export '
+                        'config, and ZFS path templates')
 async def site_set_storage_defaults(args: Namespace):
     console = Console()
     if not any((args.home_volume, args.home_quota,
-                args.home_automount_map, args.home_static_mount)):
+                args.home_automount_map, args.home_static_mount,
+                has_storage_defaults_args(args))):
         console.print('[red]Nothing to set; pass at least one option[/]')
         return 1
     if args.home_automount_map and args.home_static_mount:
@@ -484,6 +510,7 @@ async def site_set_storage_defaults(args: Namespace):
             home_quota=args.home_quota,
             home_automount_map=args.home_automount_map,
             home_static_mount=args.home_static_mount,
+            **storage_defaults_kwargs(args),
         )
     except ValueError as e:
         console.print(f'[red]{e}[/]')

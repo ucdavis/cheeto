@@ -36,9 +36,11 @@ def _build_site_linked_models() -> list[tuple[str, type]]:
     cascade, so removing a site must delete each of these explicitly.
 
     Order is delete-safe: referencing collections come before the ones they
-    reference (storage → static_mounts → storage_volumes). StorageVolume's
-    `parent` self-link is fine — parents and children die in the same bulk
-    delete."""
+    reference (storage → static_mounts → storage_volumes → hosts).
+    StorageVolume's `parent` self-link is fine — parents and children die in
+    the same bulk delete. `hosts` is a polymorphic root: callers must query
+    it `with_children=True` or every StorageHost row is silently skipped."""
+    from ..models.host import Host
     from ..models.storage import AutomountMap, StaticMount, Storage, StorageVolume
     from ..models.user_site_info import UserSiteInfo
     from ..models.group_membership import GroupMembership
@@ -55,6 +57,7 @@ def _build_site_linked_models() -> list[tuple[str, type]]:
         ('storage', Storage),
         ('static_mounts', StaticMount),
         ('storage_volumes', StorageVolume),
+        ('hosts', Host),
         ('automount_maps', AutomountMap),
         ('hippo_events', HippoEvent),
     ]
@@ -83,6 +86,9 @@ async def count_site_dependents(site: Site) -> dict[str, int]:
     `site` (plus owned slurm allocations). The Site itself is not counted."""
     counts: dict[str, int] = {}
     for label, model in SITE_LINKED_MODELS:
-        counts[label] = await model.find(model.site.id == site.id).count()
+        # with_children: `hosts` is a polymorphic root (see the list's doc).
+        counts[label] = await model.find(
+            model.site.id == site.id, with_children=True,
+        ).count()
     counts['slurm_allocations'] = len(set(await site_alloc_ids(site)))
     return counts

@@ -9,6 +9,7 @@ from pymongo import IndexModel
 
 from ..constants import DATA_QUOTA_REGEX
 from .base import BaseDocument, DocRef
+from .storage_defaults import StorageDefaults
 
 
 class SiteSlurmSettings(BaseModel):
@@ -50,15 +51,21 @@ class SiteGroupSettings(BaseModel):
     sticky: list[DocRef] = Field(default_factory=list)   # -> Group
 
 
-class SiteStorageSettings(BaseModel):
-    """Per-site storage defaults used by CreateHomeStorage.
+class SiteStorageSettings(StorageDefaults):
+    """Per-site storage defaults.
 
-    `default_home_volume` is the PARENT volume new per-user home datasets
-    are provisioned under; `default_home_quota` is the quota applied to
-    each. Exactly one (or neither) of `home_automount_map` /
-    `home_static_mount` selects the mount mechanism for new homes (Farm:
-    automount; Hive: static). Stored as `DocRef`s — see
-    `SiteSlurmSettings`."""
+    Home provisioning (CreateHomeStorage): `default_home_volume` is the
+    PARENT volume new per-user home datasets are provisioned under;
+    `default_home_quota` is the quota applied to each. Exactly one (or
+    neither) of `home_automount_map` / `home_static_mount` selects the mount
+    mechanism for new homes (Farm: automount; Hive: static). Stored as
+    `DocRef`s — see `SiteSlurmSettings`.
+
+    Site-tier storage defaults (from `StorageDefaults`): `nfs_export` is the
+    export config volumes at the site inherit when neither they nor their
+    `StorageHost` set one; `zfs_path_templates` derive `host_path` for
+    standalone volumes per category (`/{host}/share/{name}`). v1 kept these
+    on the per-site `NFSSourceCollection` rows."""
 
     default_home_volume: DocRef | None = None            # -> StorageVolume
     default_home_quota: Annotated[

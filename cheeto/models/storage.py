@@ -17,7 +17,13 @@ The architecture separates three concerns:
 
 Invariant that keeps consumers at `nesting_depth=1`: `StorageVolume.host`
 and `host_path` are always concrete — denormalized from the parent at
-creation time, never resolved through the `parent` link.
+creation time, never resolved through the `parent` link. `storage_host` is
+the optional `Link[StorageHost]` that `host` names; it carries the
+host-level defaults (NFS export config, ZFS path templates) and is never
+needed to *read* a volume's host. Defaults resolve per field, most specific
+wins: `Storage.nfs_export` -> `StorageVolume.nfs_export` ->
+`StorageHost.nfs_export` -> `Site.storage.nfs_export`
+(`queries/storage.py::effective_nfs_export`).
 """
 
 from __future__ import annotations
@@ -44,6 +50,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from ..constants import DATA_QUOTA_REGEX, MOUNT_FSTYPES, STORAGE_CATEGORIES
 from ..utils import megs_to_size, size_to_megs_exact
 from .base import BaseDocument, Expirable, link_target_id
+from .host import StorageHost
 from .ldap_sync import (
     LDAPSyncable,
     ldap_touch,
@@ -51,6 +58,7 @@ from .ldap_sync import (
     stable_fingerprint,
 )
 from .site import Site
+from .storage_defaults import NFSExportConfig  # noqa: F401 — re-export
 from .user import User
 
 if TYPE_CHECKING:
@@ -91,11 +99,6 @@ def _format_quota(allocations: list['StorageAllocation']) -> str | None:
 class StorageAllocation(BaseModel):
     quota: Annotated[str, Field(pattern=DATA_QUOTA_REGEX)]
     comment: str = ''
-
-
-class NFSExportConfig(BaseModel):
-    export_options: str = ''
-    export_ranges: list[str] = Field(default_factory=list)
 
 
 class MountOverrides(BaseModel):
@@ -157,8 +160,12 @@ class StorageVolume(BaseDocument, Expirable):
 
     `host`/`host_path` are always concrete (denormalized from `parent` at
     creation time) so consumers never need to traverse `parent`; the link
-    is hierarchy/provisioning metadata only. `provisioned_at` (Expirable)
-    tracks when the volume actually exists on the backend.
+    is hierarchy/provisioning metadata only. `storage_host` links the
+    `StorageHost` record that `host` names (None on rows the
+    `ng storage backfill-hosts` pass has not linked yet); it supplies
+    host-level defaults and is never required to read `host`.
+    `provisioned_at` (Expirable) tracks when the volume actually exists on
+    the backend.
     """
 
     name: Annotated[str, Field(min_length=1)]
@@ -169,6 +176,7 @@ class StorageVolume(BaseDocument, Expirable):
 
     host: Annotated[str, Field(min_length=1)]
     host_path: Annotated[str, Field(min_length=1)]
+    storage_host: Link[StorageHost] | None = None
 
     parent: Link['StorageVolume'] | None = None
 
@@ -193,6 +201,19 @@ class StorageVolume(BaseDocument, Expirable):
                 'quobyte-backed volume must not carry a ZFSConfig'
             )
 
+    def _check_host_link(self) -> None:
+        # Save-time only (not in the parse validator): `$lookup`-fetched rows
+        # run the model validator too, and a drifted row must stay readable
+        # by `show volume` so the drift can be diagnosed and fixed.
+        sh = self.storage_host
+        if sh is None or isinstance(sh, Link):
+            return
+        if sh.hostname != self.host:
+            raise ValueError(
+                f'StorageVolume {self.name!r}: host {self.host!r} does not '
+                f'match linked StorageHost {sh.hostname!r}'
+            )
+
     @model_validator(mode='after')
     def _validate(self) -> 'StorageVolume':
         self._check_backend_config()
@@ -205,6 +226,7 @@ class StorageVolume(BaseDocument, Expirable):
     def revalidate(self) -> None:
         # Close the in-place-mutation hole (the Site settings pattern).
         self._check_backend_config()
+        self._check_host_link()
 
     @after_event(Insert, Replace, Update, Delete)
     async def mark_storages_ldap_dirty(self) -> None:
@@ -239,6 +261,7 @@ class StorageVolume(BaseDocument, Expirable):
                 unique=True,
             ),
             [('parent', pymongo.ASCENDING)],
+            [('storage_host', pymongo.ASCENDING)],
             [('site', pymongo.ASCENDING), ('backend', pymongo.ASCENDING)],
         ]
 

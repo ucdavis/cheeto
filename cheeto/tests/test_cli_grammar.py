@@ -35,6 +35,7 @@ EXCEPTIONS = {
     ('hippo', 'process'),
     ('slurm', 'provision'),
     ('storage', 'rehome'),
+    ('storage', 'backfill-hosts'),
     ('group', 'seed-access-status'),
     ('group', 'backfill-sites'),
     ('user', 'clear-offboarding-site-statuses'),

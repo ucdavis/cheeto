@@ -8,41 +8,61 @@ from .. import commands
 from ...constants import MOUNT_FSTYPES, STORAGE_BACKENDS, STORAGE_CATEGORIES
 from ...log import Console
 from ...models.base import link_target_id
+from ...models.host import StorageHost
+from ...models.site import Site
 from ...models.storage import StaticMount, Storage, StorageVolume
 from ...operations import (
     AddVolumeAllocation,
+    BackfillStorageHosts,
     CreateAutomountMap,
     CreateGroupStorage,
     CreateHomeStorage,
     CreateStaticMount,
+    CreateStorageHost,
     CreateStorageVolume,
+    DeleteStorageHost,
+    EditStorageHost,
+    EditStorageVolume,
     EditVolumeAllocation,
     RehomeUser,
     RemoveVolumeAllocation,
     SetStorageMount,
     SetVolumeStorageMounts,
 )
+from ...operations.base import UNSET
 from ...queries import find_group_by_name, find_site_by_name, find_user_by_name
 from ...yaml import print_yaml
 from ...queries.storage import (
+    effective_nfs_export,
     find_automount_map,
+    find_storage_host,
     find_volume,
     get_storage,
     list_map_storages,
     list_site_automount_maps,
     list_site_static_mounts,
+    list_site_storage_hosts,
     list_site_storages,
     list_site_volumes,
     mount_mechanism_label,
+    volume_counts_by_host,
 )
 from . import parent
-from ._args import group_args, site_args, user_args, yaml_args
+from ._args import (
+    group_args,
+    has_storage_defaults_args,
+    site_args,
+    storage_defaults_args,
+    storage_defaults_kwargs,
+    user_args,
+    yaml_args,
+)
 
 
 parent('ng', 'storage', help='Storage operations')
 parent('ng', 'storage', 'new',
-       help='Create storage records, volumes, static mounts, and automount '
-            'maps')
+       help='Create storage records, volumes, hosts, static mounts, and '
+            'automount maps')
 parent('ng', 'storage', 'list',
        help='List storage-related records at a site')
 parent('ng', 'storage', 'show',
@@ -54,7 +74,9 @@ parent('ng', 'storage', 'add',
 parent('ng', 'storage', 'remove',
        help='Remove sub-records (volume quota allocations)')
 parent('ng', 'storage', 'edit',
-       help='Edit sub-records (volume quota allocations)')
+       help='Edit volumes, storage hosts, and volume quota allocations')
+parent('ng', 'storage', 'delete',
+       help='Delete storage hosts')
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +149,7 @@ async def storage_new_group(args: Namespace):
             args.db, args.author,
             group_name=args.group, site_name=args.site,
             owner_name=args.owner,
-            quota=args.quota,
+            quota=args.quota, comment=args.comment,
             parent_volume=args.parent_volume,
             automount_map=args.automount_map,
             static_mount=args.static_mount,
@@ -149,6 +171,10 @@ def _(parser: ArgParser):
                              'site; required if there is no single sponsor)')
     parser.add_argument('--quota', required=True,
                         help='Quota for the group volume (e.g. 10T)')
+    parser.add_argument('--comment', default=None,
+                        help='Label for the initial quota allocation, e.g. a '
+                             "ticket or purchase reference (default: "
+                             "'initial group allocation')")
     parser.add_argument('--parent-volume', default=None,
                         help='Parent volume to provision under (required '
                              'unless --host is given)')
@@ -303,11 +329,68 @@ def _alloc_lines(volume: StorageVolume) -> str:
     )
 
 
-def _render_volume_subtable(volume: StorageVolume) -> Table:
+def _host_link_label(volume: StorageVolume) -> str:
+    """The StorageHost a volume links to: hostname when fetched, 'linked'
+    when only the Link is known, or a hint when the backfill has not run."""
+    sh = volume.storage_host
+    if sh is None:
+        return '[dim]— (unlinked; run `storage backfill-hosts`)[/]'
+    return getattr(sh, 'hostname', None) or 'linked'
+
+
+def _effective_export_lines(effective) -> str:
+    cfg, levels = effective
+    if cfg is None:
+        return '[dim](none at any tier)[/]'
+    opts = cfg.export_options or '[dim](none)[/]'
+    ranges = ', '.join(cfg.export_ranges) or '[dim](none)[/]'
+    return (
+        f'{opts}  [dim](options: {levels["export_options"]})[/]\n'
+        f'{ranges}  [dim](ranges: {levels["export_ranges"]})[/]'
+    )
+
+
+def _effective_to_dict(effective) -> dict | None:
+    cfg, levels = effective
+    if cfg is None:
+        return None
+    return {
+        'export_options': cfg.export_options,
+        'export_ranges': list(cfg.export_ranges),
+        'source': dict(levels),
+    }
+
+
+async def _volume_tiers(volume: StorageVolume):
+    """(site, storage_host) default tiers for a volume, using the fetched
+    links when present and falling back to lookups (the host by name, so
+    unlinked pre-backfill volumes still resolve)."""
+    site = volume.site
+    if not isinstance(site, Site):
+        site_id = link_target_id(site)
+        site = await Site.get(site_id) if site_id is not None else None
+    host = volume.storage_host
+    if not isinstance(host, StorageHost):
+        host = (
+            await find_storage_host(site, volume.host)
+            if site is not None else None
+        )
+    return site, host
+
+
+async def _effective_export(volume: StorageVolume, storage: Storage | None = None):
+    site, host = await _volume_tiers(volume)
+    return effective_nfs_export(
+        volume=volume, host=host, site=site, storage=storage,
+    )
+
+
+def _render_volume_subtable(volume: StorageVolume, *, effective=None) -> Table:
     vt = _kv_table()
     vt.add_row('name', volume.name)
     vt.add_row('backend', volume.backend)
     vt.add_row('host', volume.host)
+    vt.add_row('storage_host', _host_link_label(volume))
     vt.add_row('host_path', volume.host_path)
     vt.add_row('quota', volume.quota or '[dim](none)[/]')
     if volume.parent is not None:
@@ -324,6 +407,8 @@ def _render_volume_subtable(volume: StorageVolume) -> Table:
                    volume.nfs_export.export_options or '[dim](none)[/]')
         vt.add_row('export_ranges',
                    ', '.join(volume.nfs_export.export_ranges) or '[dim](none)[/]')
+    if effective is not None:
+        vt.add_row('effective export', _effective_export_lines(effective))
     if volume.provisioned_at:
         vt.add_row('provisioned_at', str(volume.provisioned_at))
     return vt
@@ -365,14 +450,18 @@ def _render_static_subtable(sm: StaticMount) -> Table:
     return st
 
 
-def _volume_to_dict(volume: StorageVolume, *, n_children: int | None = None) -> dict:
+def _volume_to_dict(
+    volume: StorageVolume, *, n_children: int | None = None, effective=None,
+) -> dict:
     """Plain dict of a StorageVolume for --yaml output (mirrors the show panel).
     `parent` resolves to a name only when the link was fetched (list volumes);
-    `show volume` reports the child count via `n_children`."""
+    `show volume` reports the child count via `n_children` and the resolved
+    export config via `effective`."""
     d = {
         'name': volume.name,
         'backend': volume.backend,
         'host': volume.host,
+        'storage_host_linked': link_target_id(volume.storage_host) is not None,
         'host_path': volume.host_path,
         'quota': volume.quota,
         'parent': getattr(volume.parent, 'name', None)
@@ -395,6 +484,8 @@ def _volume_to_dict(volume: StorageVolume, *, n_children: int | None = None) -> 
     }
     if n_children is not None:
         d['children'] = n_children
+    if effective is not None:
+        d['effective_nfs_export'] = _effective_to_dict(effective)
     return d
 
 
@@ -428,7 +519,7 @@ def _automount_map_to_dict(amap, *, entries: list | None = None) -> dict:
     return d
 
 
-def _render_storage_panel(storage: Storage) -> Panel:
+def _render_storage_panel(storage: Storage, *, effective=None) -> Panel:
     t = _kv_table()
     t.add_row('name', storage.name)
     t.add_row('category', storage.category)
@@ -457,7 +548,7 @@ def _render_storage_panel(storage: Storage) -> Panel:
                   f'{storage.nfs_export.export_options or "[dim](no opts)[/]"} '
                   f'ranges={", ".join(storage.nfs_export.export_ranges) or "—"}')
 
-    t.add_row('volume', _render_volume_subtable(storage.volume))
+    t.add_row('volume', _render_volume_subtable(storage.volume, effective=effective))
     if storage.automount_map is not None:
         t.add_row('automount map', _render_automount_subtable(storage))
     elif storage.static_mount is not None:
@@ -489,10 +580,13 @@ async def storage_show_storage(args: Namespace):
             f'[red]Storage {args.name} not found on {args.site}{suffix}[/]'
         )
         return 1
+    effective = await _effective_export(storage.volume, storage)
     if args.yaml:
-        print_yaml(_storage_to_dict(storage))
+        data = _storage_to_dict(storage)
+        data['effective_nfs_export'] = _effective_to_dict(effective)
+        print_yaml(data)
         return 0
-    console.print(_render_storage_panel(storage))
+    console.print(_render_storage_panel(storage, effective=effective))
 
 
 @storage_show_storage.args()
@@ -587,7 +681,9 @@ async def storage_rehome(args: Namespace):
         return 0
 
     default_volume = await StorageVolume.get(default_id)
-    console.print(_render_storage_panel(storage))
+    console.print(_render_storage_panel(
+        storage, effective=await _effective_export(storage.volume, storage),
+    ))
     new_name = (f'{default_volume.name}/{args.user}'
                 if default_volume is not None else '[red](default dangling)[/]')
     console.print(
@@ -641,7 +737,7 @@ def _(parser: ArgParser):
 @site_args.apply(required=True)
 @commands.register('ng', 'storage', 'new', 'volume',
                    help='Create a storage volume (ZFS dataset / QuoByte '
-                        'volume record)')
+                        'volume record) on an existing storage host')
 async def storage_new_volume(args: Namespace):
     console = Console()
     try:
@@ -649,7 +745,7 @@ async def storage_new_volume(args: Namespace):
             args.db, args.author,
             site_name=args.site, name=args.name,
             backend=args.backend, host=args.host,
-            host_path=args.host_path,
+            host_path=args.host_path, template=args.template,
             parent_name=args.parent, quota=args.quota,
             export_options=args.export_options,
             export_ranges=args.export_ranges,
@@ -668,13 +764,26 @@ def _(parser: ArgParser):
     parser.add_argument('name')
     parser.add_argument('--backend', required=True,
                         choices=list(STORAGE_BACKENDS))
-    parser.add_argument('--host', required=True)
-    parser.add_argument('--host-path', required=True)
+    parser.add_argument('--host', required=True,
+                        help='Storage host (must exist: `storage new host`)')
+    parser.add_argument('--host-path', default=None,
+                        help='Path on the host; omit to derive it from the '
+                             "host/site ZFS path template selected by "
+                             '--template')
+    parser.add_argument('--template', default=None,
+                        choices=list(STORAGE_CATEGORIES),
+                        help='Storage category whose ZFS path template '
+                             'derives --host-path ({name} = last component '
+                             'of the volume name)')
     parser.add_argument('--parent', default=None,
                         help='Parent volume name (nested datasets)')
     parser.add_argument('--quota', default=None)
-    parser.add_argument('--export-options', default=None)
-    parser.add_argument('--export-ranges', nargs='+', default=None)
+    parser.add_argument('--export-options', default=None,
+                        help='Volume-level export options (omit to inherit '
+                             'the host/site default)')
+    parser.add_argument('--export-ranges', nargs='+', default=None,
+                        help='Volume-level export ranges (omit to inherit '
+                             'the host/site default)')
 
 
 # ---------------------------------------------------------------------------
@@ -700,13 +809,16 @@ async def storage_list_volumes(args: Namespace):
     table.add_column('name', style='green', no_wrap=True)
     table.add_column('backend', style='cyan')
     table.add_column('host')
+    table.add_column('host rec', style='dim')
     table.add_column('host_path', style='dim')
     table.add_column('quota', justify='right')
     table.add_column('parent', style='magenta')
     for v in volumes:
         parent = getattr(v.parent, 'name', '—')
+        linked = 'linked' if link_target_id(v.storage_host) is not None else '—'
         table.add_row(
-            v.name, v.backend, v.host, v.host_path, v.quota or '—', parent,
+            v.name, v.backend, v.host, linked, v.host_path, v.quota or '—',
+            parent,
         )
     console.print(table)
 
@@ -728,29 +840,17 @@ async def storage_show_volume(args: Namespace):
     n_children = await StorageVolume.find(
         StorageVolume.parent.id == volume.id,
     ).count()
+    effective = await _effective_export(volume)
     if args.yaml:
-        print_yaml(_volume_to_dict(volume, n_children=n_children))
+        print_yaml(_volume_to_dict(
+            volume, n_children=n_children, effective=effective,
+        ))
         return 0
 
-    table = Table(show_header=False, box=None, pad_edge=False, padding=(0, 1))
-    table.add_column(style='bold cyan', no_wrap=True)
-    table.add_column()
-    table.add_row('name', volume.name)
-    table.add_row('backend', volume.backend)
-    table.add_row('host', volume.host)
-    table.add_row('host_path', volume.host_path)
-    table.add_row('quota', volume.quota or '[dim](none)[/]')
-    if volume.allocations:
-        table.add_row('allocations', _alloc_lines(volume))
-    if volume.nfs_export is not None:
-        table.add_row('export_options',
-                      volume.nfs_export.export_options or '[dim](none)[/]')
-        table.add_row('export_ranges',
-                      ', '.join(volume.nfs_export.export_ranges) or '[dim](none)[/]')
+    table = _render_volume_subtable(volume, effective=effective)
     table.add_row('children', str(n_children))
-    table.add_row('provisioned_at',
-                  str(volume.provisioned_at) if volume.provisioned_at
-                  else '[dim](unset)[/]')
+    if not volume.provisioned_at:
+        table.add_row('provisioned_at', '[dim](unset)[/]')
     console.print(Panel(
         table, title=f'[bold]Volume:[/] [green]{volume.name}[/]',
         border_style='cyan', expand=False,
@@ -1101,3 +1201,335 @@ async def storage_show_automount_map(args: Namespace):
 @storage_show_automount_map.args()
 def _(parser: ArgParser):
     parser.add_argument('name')
+
+
+# ---------------------------------------------------------------------------
+# `ng storage edit volume`
+# ---------------------------------------------------------------------------
+
+
+def _unset_if_none(value):
+    return UNSET if value is None else value
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'storage', 'edit', 'volume',
+                   help='Edit a storage volume: rename, move host/path, or '
+                        'change its own export config')
+async def storage_edit_volume(args: Namespace):
+    console = Console()
+    try:
+        volume = await EditStorageVolume.run(
+            args.db, args.author,
+            site_name=args.site, volume_name=args.name,
+            new_name=_unset_if_none(args.rename),
+            host=_unset_if_none(args.host),
+            host_path=_unset_if_none(args.host_path),
+            export_options=_unset_if_none(args.export_options),
+            export_ranges=_unset_if_none(args.export_ranges),
+            clear_nfs_export=args.clear_export,
+            zfs_dataset_name=_unset_if_none(args.zfs_dataset),
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Edited volume [green]{volume.name}[/] on {args.site} '
+        f'({volume.host}:{volume.host_path})'
+    )
+    effective = await _effective_export(volume)
+    console.print(_effective_export_lines(effective))
+
+
+@storage_edit_volume.args()
+def _(parser: ArgParser):
+    parser.add_argument('name', help='Volume name')
+    parser.add_argument('--rename', default=None, metavar='NEW_NAME',
+                        help='New volume name (refused while the volume has '
+                             'children)')
+    parser.add_argument('--host', default=None,
+                        help='Move to this storage host (must exist; refused '
+                             'while the volume has children)')
+    parser.add_argument('--host-path', default=None,
+                        help='New path on the host (refused while the volume '
+                             'has children)')
+    parser.add_argument('--export-options', default=None,
+                        help="Set the volume's own export options")
+    parser.add_argument('--export-ranges', nargs='+', default=None,
+                        metavar='RANGE',
+                        help="Replace the volume's own export ranges")
+    parser.add_argument('--clear-export', action='store_true', default=False,
+                        help="Remove the volume's own export config so it "
+                             'inherits the host/site default')
+    parser.add_argument('--zfs-dataset', default=None,
+                        help='ZFS dataset name (managed zfs volumes only)')
+
+
+# ---------------------------------------------------------------------------
+# `ng storage new/list/show/edit/delete host`
+# ---------------------------------------------------------------------------
+
+
+def _templates_lines(templates: dict[str, str]) -> str:
+    return '\n'.join(f'{k}: {v}' for k, v in sorted(templates.items()))
+
+
+def _host_to_dict(host: StorageHost, *, n_volumes: int | None = None,
+                  effective=None) -> dict:
+    d = {
+        'hostname': host.hostname,
+        'nfs_export': (
+            host.nfs_export.model_dump() if host.nfs_export is not None
+            else None
+        ),
+        'zfs_path_templates': dict(host.zfs_path_templates),
+        'created_at': host.created_at,
+        'updated_at': host.updated_at,
+    }
+    if n_volumes is not None:
+        d['volumes'] = n_volumes
+    if effective is not None:
+        d['effective_nfs_export'] = _effective_to_dict(effective)
+    return d
+
+
+@site_args.apply(required=True)
+@storage_defaults_args.apply(scope='host', clearable=False)
+@commands.register('ng', 'storage', 'new', 'host',
+                   help='Create a storage host record (a NAS / file server '
+                        'at the site) with optional host-level defaults')
+async def storage_new_host(args: Namespace):
+    console = Console()
+    try:
+        host = await CreateStorageHost.run(
+            args.db, args.author,
+            site_name=args.site, hostname=args.hostname,
+            export_options=args.export_options,
+            export_ranges=args.export_ranges,
+            zfs_path_templates=dict(args.zfs_path_template or []) or None,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Created storage host [green]{host.hostname}[/] on {args.site}'
+    )
+
+
+@storage_new_host.args()
+def _(parser: ArgParser):
+    parser.add_argument('hostname')
+
+
+@site_args.apply(required=True)
+@yaml_args.apply()
+@commands.register('ng', 'storage', 'list', 'hosts',
+                   help='List storage hosts at a site with their defaults '
+                        'and volume counts')
+async def storage_list_hosts(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+    hosts = await list_site_storage_hosts(site)
+    counts = await volume_counts_by_host(site)
+    if args.yaml:
+        print_yaml([
+            _host_to_dict(h, n_volumes=counts.get(h.hostname, 0))
+            for h in hosts
+        ])
+        return 0
+    unlinked = sorted(set(counts) - {h.hostname for h in hosts})
+    table = Table(title=f'Storage hosts on {args.site} (count={len(hosts)})')
+    table.add_column('hostname', style='green', no_wrap=True)
+    table.add_column('export_options')
+    table.add_column('export_ranges', style='dim')
+    table.add_column('zfs templates', style='cyan')
+    table.add_column('volumes', justify='right')
+    for h in hosts:
+        export = h.nfs_export
+        table.add_row(
+            h.hostname,
+            (export.export_options if export else None) or '—',
+            ', '.join(export.export_ranges) if export and export.export_ranges
+            else '—',
+            _templates_lines(h.zfs_path_templates) or '—',
+            str(counts.get(h.hostname, 0)),
+        )
+    console.print(table)
+    if unlinked:
+        console.print(
+            f'[yellow]{len(unlinked)} host string(s) on volumes have no host '
+            f'record:[/] {", ".join(unlinked)} — run '
+            f'`storage backfill-hosts --site {args.site}`'
+        )
+
+
+@site_args.apply(required=True)
+@yaml_args.apply()
+@commands.register('ng', 'storage', 'show', 'host',
+                   help='Show a storage host, its defaults, and the export '
+                        'config volumes on it inherit')
+async def storage_show_host(args: Namespace):
+    console = Console()
+    site = await find_site_by_name(args.site)
+    if site is None:
+        console.print(f'[red]Site {args.site} not found[/]')
+        return 1
+    host = await find_storage_host(site, args.hostname)
+    if host is None:
+        console.print(
+            f'[red]Storage host {args.hostname} not found on {args.site}[/]'
+        )
+        return 1
+    n_volumes = await StorageVolume.find(
+        StorageVolume.site.id == site.id,
+        StorageVolume.host == host.hostname,
+    ).count()
+    # What a volume on this host with no config of its own inherits.
+    effective = effective_nfs_export(volume=None, host=host, site=site)
+    if args.yaml:
+        print_yaml(_host_to_dict(host, n_volumes=n_volumes, effective=effective))
+        return 0
+    t = _kv_table()
+    t.add_row('hostname', host.hostname)
+    t.add_row('site', site.name)
+    export = host.nfs_export
+    t.add_row('export_options',
+              (export.export_options if export else None) or '[dim](none)[/]')
+    t.add_row('export_ranges',
+              ', '.join(export.export_ranges) if export and export.export_ranges
+              else '[dim](none)[/]')
+    t.add_row('zfs templates',
+              _templates_lines(host.zfs_path_templates) or '[dim](none)[/]')
+    t.add_row('effective export', _effective_export_lines(effective))
+    t.add_row('volumes', str(n_volumes))
+    t.add_row('created_at', str(host.created_at))
+    t.add_row('updated_at', str(host.updated_at))
+    console.print(Panel(
+        t, title=f'[bold]Storage host:[/] [green]{host.hostname}[/]',
+        border_style='cyan', expand=False,
+    ))
+
+
+@storage_show_host.args()
+def _(parser: ArgParser):
+    parser.add_argument('hostname')
+
+
+@site_args.apply(required=True)
+@storage_defaults_args.apply(scope='host')
+@commands.register('ng', 'storage', 'edit', 'host',
+                   help="Edit a storage host's defaults (export config, ZFS "
+                        'path templates)')
+async def storage_edit_host(args: Namespace):
+    console = Console()
+    if not has_storage_defaults_args(args):
+        console.print('[red]Nothing to edit; pass at least one option[/]')
+        return 1
+    try:
+        host = await EditStorageHost.run(
+            args.db, args.author,
+            site_name=args.site, hostname=args.hostname,
+            **storage_defaults_kwargs(args),
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Edited storage host [green]{host.hostname}[/] on {args.site}'
+    )
+
+
+@storage_edit_host.args()
+def _(parser: ArgParser):
+    parser.add_argument('hostname')
+
+
+@site_args.apply(required=True)
+@commands.register('ng', 'storage', 'delete', 'host',
+                   help='Delete a storage host record (refused while volumes '
+                        'still reference it)')
+async def storage_delete_host(args: Namespace):
+    console = Console()
+    if not args.force:
+        try:
+            answer = input(
+                f'Delete storage host {args.hostname} on {args.site}? [y/N]: '
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print('\n[red]Aborted.[/]')
+            return 1
+        if answer != 'y':
+            console.print('[red]Aborted.[/]')
+            return 1
+    try:
+        await DeleteStorageHost.run(
+            args.db, args.author,
+            site_name=args.site, hostname=args.hostname,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    console.print(
+        f'Deleted storage host [green]{args.hostname}[/] on {args.site}'
+    )
+
+
+@storage_delete_host.args()
+def _(parser: ArgParser):
+    parser.add_argument('hostname')
+    parser.add_argument('--force', '-f', action='store_true', default=False,
+                        help='Skip the confirmation prompt')
+
+
+# ---------------------------------------------------------------------------
+# `ng storage backfill-hosts`
+# ---------------------------------------------------------------------------
+
+
+@site_args.apply()
+@commands.register('ng', 'storage', 'backfill-hosts',
+                   help='One-time backfill: create a storage host per '
+                        '(site, host) on existing volumes, link the volumes, '
+                        'and optionally seed site export defaults and clear '
+                        'redundant per-volume copies')
+async def storage_backfill_hosts(args: Namespace):
+    console = Console()
+    try:
+        result = await BackfillStorageHosts.run(
+            args.db, args.author,
+            skip_history=args.dry_run,
+            site_name=args.site,
+            seed_site_defaults=args.seed_site_defaults,
+            dedupe_exports=args.dedupe_exports,
+            dry_run=args.dry_run,
+        )
+    except ValueError as e:
+        console.print(f'[red]{e}[/]')
+        return 1
+    prefix = '[yellow]DRY RUN[/] ' if args.dry_run else ''
+    console.print(
+        f'{prefix}Backfilled storage hosts'
+        f'{f" on {args.site}" if args.site else ""}: '
+        f'sites={result["sites_processed"]} '
+        f'hosts_created={result["hosts_created"]} '
+        f'volumes_linked={result["volumes_linked"]} '
+        f'sites_seeded={result["sites_seeded"]} '
+        f'sites_skipped_mixed={result["sites_skipped_mixed"]} '
+        f'exports_deduped={result["exports_deduped"]}'
+    )
+
+
+@storage_backfill_hosts.args()
+def _(parser: ArgParser):
+    parser.add_argument('--seed-site-defaults', action='store_true',
+                        default=False,
+                        help="Set each site's export default from its "
+                             'volumes when they all share one config')
+    parser.add_argument('--dedupe-exports', action='store_true', default=False,
+                        help='Clear per-volume export configs that equal the '
+                             'host/site default (run after seeding)')
+    parser.add_argument('--dry-run', action='store_true', default=False,
+                        help='Report what would change without writing')

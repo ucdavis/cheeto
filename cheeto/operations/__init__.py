@@ -104,12 +104,19 @@ from .storage import (
     CreateHomeStorage,
     CreateStaticMount,
     CreateStorageVolume,
+    EditStorageVolume,
     EditVolumeAllocation,
     ExportPuppetStorage,
     RehomeUser,
     RemoveVolumeAllocation,
     SetStorageMount,
     SetVolumeStorageMounts,
+)
+from .storage_host import (
+    BackfillStorageHosts,
+    CreateStorageHost,
+    DeleteStorageHost,
+    EditStorageHost,
 )
 
 # The v1 -> v2 migration ops live in cheeto/legacy/migrate.py, behind the
