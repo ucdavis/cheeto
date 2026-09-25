@@ -45,7 +45,7 @@ gssapi = "^1.9.0"
 pymongo = "^4.10.1"
 # v1 (mongoengine) support is optional — installed via the `legacy` extra,
 # needed only for the v1 -> v2 migration (cheeto/legacy/, `cheeto ng migrate`).
-mongoengine = "^0.29.3"
+mongoengine = {version = "^0.29.3", optional = true}
 blinker = {version = "^1.8.2", optional = true}   # mongoengine signals
 attrs = "^24.2.0"
 httpx = "^0.27.0"

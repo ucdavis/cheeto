@@ -1024,7 +1024,7 @@ files = [
 name = "mongoengine"
 version = "0.29.3"
 description = "MongoEngine is a Python Object-Document Mapper for working with MongoDB."
-optional = false
+optional = true
 python-versions = ">=3.7"
 groups = ["main"]
 markers = "extra == \"legacy\""
@@ -2045,4 +2045,4 @@ legacy = ["blinker", "mongoengine"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<3.14"
-content-hash = "3671ebec632f6795fee69eb28b53e2acfb183d87652edead29772f882fca974b"
+content-hash = "da6bb316287264ca4eda1156aecff4e119ab1a643c3f2e8d87230d3f68165995"
