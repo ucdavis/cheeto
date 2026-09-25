@@ -36,7 +36,12 @@ from .user import (
     SetUserType,
     clear_user_site_statuses,
 )
-from .user_site import AddSiteUser, RemoveSiteUser
+from .user_site import (
+    AddSiteUser,
+    BackfillUserSiteInfo,
+    RemoveSiteUser,
+    ensure_user_site,
+)
 from .group import (
     CreateClassGroup,
     CreateGroup,

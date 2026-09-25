@@ -7,29 +7,39 @@ from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.group import Group
-from ..models.group_membership import GroupMembership, MembershipRole
+from ..models.group_membership import (
+    SITE_USER_ROLES, GroupMembership, MembershipRole,
+)
 from ..models.site import Site
 from ..models.user import User
 from .base import Operation
 from .group_site import ensure_group_site
+from .user_site import ensure_user_site
 
 
 async def ensure_group_membership(
     user: User, group: Group, site: Site,
     roles: Iterable[MembershipRole],
     session: AsyncClientSession | None,
-) -> GroupMembership:
+) -> tuple[GroupMembership, bool]:
     """Idempotently ensure `user` holds every role in `roles` on `group` at `site`.
 
     Ensures the group's site presence first (any role edge implies presence),
-    then finds-or-inserts the `(user, group, site)` edge and merges in any
-    missing roles. The find_one passes `session` for the same reason as
+    and the user's site presence when any role is in `SITE_USER_ROLES` --
+    without a `UserSiteInfo` the LDAP/puppet/Slurm readers silently drop the
+    member. Then finds-or-inserts the `(user, group, site)` edge and merges
+    in any missing roles. Returns `(edge, added_to_site)`.
+
+    The find_one passes `session` for the same reason as
     `ensure_group_site`: inside a transaction, sessionless reads cannot see
     the transaction's own uncommitted inserts. Do NOT catch DuplicateKeyError
     here -- a write error inside a Mongo transaction is unrecoverable
     in-transaction; the unique (user, group, site) index backstops races.
     """
     await ensure_group_site(group, site, session)
+    added_to_site = False
+    if SITE_USER_ROLES & set(roles):
+        _, added_to_site = await ensure_user_site(user, site, session)
     wanted = set(roles)
     edge = await GroupMembership.find_one(
         GroupMembership.user.id == user.id,
@@ -45,7 +55,7 @@ async def ensure_group_membership(
     elif not wanted <= set(edge.roles):
         edge.roles = sorted(set(edge.roles) | wanted)
         await edge.save(session=session)
-    return edge
+    return edge, added_to_site
 
 
 class _GroupMembershipOp(Operation):
@@ -104,10 +114,22 @@ class _GroupMembershipOp(Operation):
 
 
 class _AddToGroup(_GroupMembershipOp):
+    """Returns True when the add also put the user on the site (see
+    `ensure_group_membership`)."""
 
-    async def execute(self, session: AsyncClientSession) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._added_to_site = False
+
+    async def execute(self, session: AsyncClientSession) -> bool:
         group, user, site = await self._resolve()
-        await ensure_group_membership(user, group, site, (self.role,), session)
+        _, self._added_to_site = await ensure_group_membership(
+            user, group, site, (self.role,), session,
+        )
+        return self._added_to_site
+
+    def describe(self) -> dict[str, Any]:
+        return {**super().describe(), 'added_to_site': self._added_to_site}
 
 
 class _RemoveFromGroup(_GroupMembershipOp):

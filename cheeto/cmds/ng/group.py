@@ -323,10 +323,13 @@ async def _run_membership(args: Namespace, op, verbed: str) -> int:
     console = Console()
 
     async def _one(name: str) -> None:
-        await op.run(
+        added_to_site = await op.run(
             args.db, args.author,
             group_name=args.group, user_name=name, site_name=args.site,
         )
+        # Add ops return True when the role also put the user on the site.
+        if added_to_site:
+            console.print(f'  [dim]{name}: also added to site {args.site}[/]')
 
     return await run_per_target(
         console, args.user, _one,

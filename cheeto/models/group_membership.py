@@ -16,6 +16,13 @@ from .user import User
 
 MembershipRole = Literal['member', 'sponsor', 'sudoer', 'slurmer']
 
+# Roles that imply the user is present at the edge's site: granting one
+# ensures a UserSiteInfo there. `sponsor` alone does not — a sponsoring PI
+# frequently has no account on the cluster.
+SITE_USER_ROLES: frozenset[MembershipRole] = frozenset(
+    {'member', 'sudoer', 'slurmer'}
+)
+
 
 class GroupMembership(SiteAssociation):
     """A user's membership in a group *at a site*, with one or more roles.

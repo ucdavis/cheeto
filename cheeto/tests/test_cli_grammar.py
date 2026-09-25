@@ -38,6 +38,7 @@ EXCEPTIONS = {
     ('storage', 'backfill-hosts'),
     ('group', 'seed-access-status'),
     ('group', 'backfill-sites'),
+    ('user', 'backfill-sites'),
     ('user', 'clear-offboarding-site-statuses'),
     ('user', 'redundant-site-statuses'),
 }

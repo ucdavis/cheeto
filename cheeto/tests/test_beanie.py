@@ -58,6 +58,7 @@ from ..operations import (
     RemoveSlurmPartition,
     RemoveSlurmQOS,
     AddSiteUser,
+    BackfillUserSiteInfo,
     EditSlurmAllocation,
     AddUserAccess,
     AddUserComment,
@@ -1676,6 +1677,199 @@ class TestSiteUserOps:
             )
 
 
+    async def _remove_setup(self, beanie_client):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='rmsite', email='rm@test.com', uid=42010,
+            fullname='Rm Site',
+        )
+        await Site(name='rmsite-a', fqdn='a.test').insert()
+        await Site(name='rmsite-b', fqdn='b.test').insert()
+        for site_name in ('rmsite-a', 'rmsite-b'):
+            await AddSiteUser.run(
+                beanie_client, None, user_name='rmsite', site_name=site_name,
+            )
+        await CreateGroup.run(beanie_client, None, name='rmgrp1', gid=62010)
+        await CreateGroup.run(beanie_client, None, name='rmgrp2', gid=62011)
+        for site_name in ('rmsite-a', 'rmsite-b'):
+            await AddGroupMember.run(
+                beanie_client, None, group_name='rmgrp1',
+                user_name='rmsite', site_name=site_name,
+            )
+        await AddGroupSponsor.run(
+            beanie_client, None, group_name='rmgrp2',
+            user_name='rmsite', site_name='rmsite-a',
+        )
+        await AddGroupSudoer.run(
+            beanie_client, None, group_name='rmgrp2',
+            user_name='rmsite', site_name='rmsite-a',
+        )
+        for site_name in ('rmsite-a', 'rmsite-b'):
+            await CreateSlurmAccount.run(
+                beanie_client, None, site_name=site_name,
+                group_name='rmgrp1', coordinators=['rmsite'],
+            )
+        return user
+
+    @staticmethod
+    async def _edges(user, site_name):
+        site = await Site.find_one(Site.name == site_name)
+        return await GroupMembership.find(
+            GroupMembership.user.id == user.id,
+            GroupMembership.site.id == site.id,
+        ).to_list()
+
+    @staticmethod
+    async def _coordinator_ids(site_name):
+        from ..models.base import link_target_id
+        site = await Site.find_one(Site.name == site_name)
+        acct = await SlurmAccount.find_one(SlurmAccount.site.id == site.id)
+        return {link_target_id(c) for c in acct.coordinators}
+
+    async def test_remove_site_user_cascades_site_references(
+        self, beanie_client,
+    ):
+        from cheeto.queries import group_members_at_site
+        user = await self._remove_setup(beanie_client)
+        grp2 = await Group.find_one(Group.name == 'rmgrp2')
+        dirty_before = (await Group.get(grp2.id)).ldap.modified_at
+
+        result = await RemoveSiteUser.run(
+            beanie_client, None, user_name='rmsite', site_name='rmsite-a',
+        )
+        assert result == {
+            'memberships_deleted': 2,
+            'coordinator_accounts': ['rmgrp1'],
+        }
+        # Every role at the site is gone, sponsor included...
+        assert await self._edges(user, 'rmsite-a') == []
+        site_a = await Site.find_one(Site.name == 'rmsite-a')
+        roster = await group_members_at_site(grp2, site_a)
+        assert 'rmsite' not in roster['sponsors']
+        assert 'rmsite' not in roster['sudoers']
+        assert user.id not in await self._coordinator_ids('rmsite-a')
+        # ...and the other site is untouched.
+        assert len(await self._edges(user, 'rmsite-b')) == 1
+        assert user.id in await self._coordinator_ids('rmsite-b')
+        # Per-document deletes fire the edge hook, re-dirtying the group.
+        assert (await Group.get(grp2.id)).ldap.modified_at > dirty_before
+
+        hist = await History.find_one(History.op == 'remove_site_user')
+        assert hist.changes['memberships_deleted'] == 2
+        assert hist.changes['coordinator_accounts'] == ['rmgrp1']
+
+    async def test_remove_site_user_cleans_orphan_edges(self, beanie_client):
+        user, _ = await CreateUser.run(
+            beanie_client, None,
+            name='orphan', email='or@test.com', uid=42011,
+            fullname='Orphan',
+        )
+        site = Site(name='orsite', fqdn='or.test')
+        await site.insert()
+        group = await CreateGroup.run(
+            beanie_client, None, name='orgrp', gid=62012,
+        )
+        # Pre-fix data: an edge with no UserSiteInfo.
+        await GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        ).insert()
+
+        result = await RemoveSiteUser.run(
+            beanie_client, None, user_name='orphan', site_name='orsite',
+        )
+        assert result['memberships_deleted'] == 1
+        assert await self._edges(user, 'orsite') == []
+
+    async def test_remove_site_user_not_on_site(self, beanie_client):
+        await CreateUser.run(
+            beanie_client, None,
+            name='nosite', email='ns@test.com', uid=42012,
+            fullname='No Site',
+        )
+        await Site(name='nssite', fqdn='ns.test').insert()
+        with pytest.raises(ValueError, match='not on site'):
+            await RemoveSiteUser.run(
+                beanie_client, None, user_name='nosite', site_name='nssite',
+            )
+
+
+class TestBackfillUserSiteInfo:
+
+    async def _seed(self, beanie_client):
+        site_a = Site(name='bfa', fqdn='bfa.test')
+        site_b = Site(name='bfb', fqdn='bfb.test')
+        await site_a.insert()
+        await site_b.insert()
+        group = await CreateGroup.run(
+            beanie_client, None, name='bfgrp', gid=62020,
+        )
+        users = {}
+        for i, name in enumerate(('bfmember', 'bfsponsor', 'bfpresent',
+                                  'bfother')):
+            users[name], _ = await CreateUser.run(
+                beanie_client, None,
+                name=name, email=f'{name}@test.com', uid=42020 + i,
+                fullname=name,
+            )
+        await AddSiteUser.run(
+            beanie_client, None, user_name='bfpresent', site_name='bfa',
+        )
+        # Raw inserts: the pre-fix state the membership ops used to leave.
+        for name, roles, site in (
+            ('bfmember', ['member'], site_a),
+            ('bfsponsor', ['sponsor'], site_a),
+            ('bfpresent', ['member'], site_a),
+            ('bfother', ['slurmer'], site_b),
+        ):
+            await GroupMembership(
+                user=users[name], group=group, site=site, roles=roles,
+            ).insert()
+        return users, site_a, site_b
+
+    @staticmethod
+    async def _usi_names(site):
+        usis = await UserSiteInfo.find(
+            UserSiteInfo.site.id == site.id, fetch_links=True,
+        ).to_list()
+        return sorted(u.user.name for u in usis)
+
+    async def test_dry_run_writes_nothing(self, beanie_client):
+        _, site_a, site_b = await self._seed(beanie_client)
+        report = await BackfillUserSiteInfo.run(
+            beanie_client, None, dry_run=True,
+        )
+        assert report['bfa'] == {'created': ['bfmember'], 'existing': 1}
+        assert report['bfb'] == {'created': ['bfother'], 'existing': 0}
+        assert await self._usi_names(site_a) == ['bfpresent']
+        assert await self._usi_names(site_b) == []
+
+    async def test_backfill_creates_missing_and_is_idempotent(
+        self, beanie_client,
+    ):
+        _, site_a, site_b = await self._seed(beanie_client)
+        await BackfillUserSiteInfo.run(beanie_client, None)
+        # Sponsor-only edge is left alone.
+        assert await self._usi_names(site_a) == ['bfmember', 'bfpresent']
+        assert await self._usi_names(site_b) == ['bfother']
+        created = await UserSiteInfo.find_one(
+            UserSiteInfo.site.id == site_b.id,
+        )
+        assert created.status is None
+
+        again = await BackfillUserSiteInfo.run(beanie_client, None)
+        assert again['bfa']['created'] == []
+        assert again['bfb']['created'] == []
+
+    async def test_site_filter(self, beanie_client):
+        _, site_a, site_b = await self._seed(beanie_client)
+        report = await BackfillUserSiteInfo.run(
+            beanie_client, None, site_name='bfb',
+        )
+        assert list(report) == ['bfb']
+        assert await self._usi_names(site_a) == ['bfpresent']
+        assert await self._usi_names(site_b) == ['bfother']
+
+
 class TestGroupOps:
 
     async def test_create_group(self, beanie_client):
@@ -1958,6 +2152,134 @@ class TestGroupMembershipOps:
             group_name='memgroup', user_name='memuser', site_name='memsite',
         )
         assert 'memuser' in (await self._roster(group, site))['slurmers']
+
+    @staticmethod
+    async def _usi(user, site):
+        return await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site.id,
+        )
+
+    @pytest.mark.parametrize('opcls', [
+        AddGroupMember, AddGroupSudoer, AddGroupSlurmer,
+    ])
+    async def test_site_role_adds_user_to_site(self, beanie_client, setup,
+                                               opcls):
+        user, group, site = setup
+        assert await self._usi(user, site) is None
+
+        added = await opcls.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        assert added is True
+        usi = await self._usi(user, site)
+        assert usi is not None
+        # Implicit add inherits the global status rather than forcing active.
+        assert usi.status is None
+        # The personal group followed its owner onto the site.
+        personal = await Group.find_one(
+            Group.name == 'memuser', Group.type == 'user',
+        )
+        assert await GroupSiteInfo.find(
+            GroupSiteInfo.group.id == personal.id,
+            GroupSiteInfo.site.id == site.id,
+        ).count() == 1
+        hist = await History.find_one(History.op == opcls.op_name)
+        assert hist.changes['added_to_site'] is True
+
+    async def test_sponsor_does_not_add_user_to_site(self, beanie_client,
+                                                     setup):
+        user, group, site = setup
+        added = await AddGroupSponsor.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        assert added is False
+        assert await self._usi(user, site) is None
+
+    async def test_existing_site_user_untouched(self, beanie_client, setup):
+        user, group, site = setup
+        before = await AddSiteUser.run(
+            beanie_client, None, user_name='memuser', site_name='memsite',
+        )
+        added = await AddGroupMember.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        assert added is False
+        after = await UserSiteInfo.find_one(
+            UserSiteInfo.user.id == user.id,
+            UserSiteInfo.site.id == site.id,
+            fetch_links=True, nesting_depth=1,
+        )
+        assert after.id == before.id
+        assert after.status.status_name == 'active'
+        assert await UserSiteInfo.find(
+            UserSiteInfo.user.id == user.id,
+        ).count() == 1
+        hist = await History.find_one(History.op == 'add_group_member')
+        assert hist.changes['added_to_site'] is False
+
+    async def test_member_add_reaches_ldap_group_members(self, beanie_client,
+                                                         setup):
+        # Regression: the member used to show in `group show` but was
+        # dropped from the LDAP group for lack of a UserSiteInfo.
+        user, group, site = setup
+        await AddGroupMember.run(
+            beanie_client, None,
+            group_name='memgroup', user_name='memuser', site_name='memsite',
+        )
+        op = SyncGroupToLDAP(
+            beanie_client, None,
+            groupname='memgroup', sitename='memsite', ldap=None,
+        )
+        assert await op._members_at_site(group, site) == {'memuser'}
+
+    async def test_create_group_from_sponsor_adds_sponsor_to_site(
+        self, beanie_client, setup,
+    ):
+        user, _, site = setup
+        await CreateGroupFromSponsor.run(
+            beanie_client, None, sponsor_name='memuser', site_name='memsite',
+        )
+        assert await self._usi(user, site) is not None
+        hist = await History.find_one(
+            History.op == 'create_group_from_sponsor',
+        )
+        assert hist.changes['sponsor_added_to_site'] is True
+
+    async def test_hippo_add_account_to_group_adds_user_to_site(
+        self, beanie_client, setup,
+    ):
+        from ..config import HippoConfig
+        from ..hippoapi.models.queued_event_model import QueuedEventModel
+        from ..operations.hippo import AddAccountToGroupHandler, HippoContext
+        user, group, site = setup
+        upstream = QueuedEventModel.from_dict({
+            'id': 1, 'action': 'AddAccountToGroup', 'status': 'Pending',
+            'data': {
+                'groups': [{'name': 'memgroup'}],
+                'accounts': [{'kerberos': 'memuser', 'name': 'Mem User',
+                              'email': 'mem@test.com', 'iam': '1000000003',
+                              'mothra': '00044000', 'key': '',
+                              'accessTypes': ['SshKey']}],
+                'cluster': 'memsite',
+                'metadata': {},
+            },
+        })
+        record = HippoEvent(hippo_id=1, hippo_endpoint='http://hippo.test',
+                            action='AddAccountToGroup', status='Pending',
+                            cluster='memsite')
+        config = HippoConfig(api_key='x', base_url='http://hippo.test',
+                             site_aliases={}, max_tries=3)
+        context = HippoContext(client=beanie_client, hippo_client=None,
+                               config=config, event_record=record, author=None)
+        await AddAccountToGroupHandler().handle(
+            upstream.data, context, notify=False,
+        )
+        assert 'memuser' in (await self._roster(group, site))['members']
+        assert await self._usi(user, site) is not None
 
 
 class TestSlurmOps:
