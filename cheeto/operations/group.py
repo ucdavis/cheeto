@@ -198,6 +198,7 @@ class CreateGroupFromSponsor(Operation):
         self.group_name = f'{sponsor_name}grp'
         self._created: bool | None = None
         self._gid: int | None = None
+        self._sponsor_added_to_site = False
 
     async def execute(self, session: AsyncClientSession) -> Group:
         sponsor = await User.find_one(User.name == self.sponsor_name)
@@ -234,9 +235,10 @@ class CreateGroupFromSponsor(Operation):
             self._created = True
 
         # The sponsor is both a member and sponsor of their own group at this
-        # site; ensure_group_membership also materializes site presence and is
+        # site; ensure_group_membership also materializes the group's and
+        # (via the member role) the sponsor's site presence, and is
         # idempotent for an already-attached site.
-        await ensure_group_membership(
+        _, self._sponsor_added_to_site = await ensure_group_membership(
             sponsor, group, site, ('member', 'sponsor'), session,
         )
 
@@ -251,6 +253,7 @@ class CreateGroupFromSponsor(Operation):
             'site': self.site_name,
             'gid': self._gid,
             'created': self._created,
+            'sponsor_added_to_site': self._sponsor_added_to_site,
         }
 
 
