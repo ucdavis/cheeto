@@ -4071,10 +4071,11 @@ async def access_links_to_names(links) -> list[str]:
 
 
 async def _special_group_names() -> set[str]:
-    from cheeto.models.group import AccessGroup, StatusGroup
+    from cheeto.models.group import AccessGroup, StatusGroup, TypeGroup
     return (
         {g.name for g in await AccessGroup.find_all().to_list()}
         | {g.name for g in await StatusGroup.find_all().to_list()}
+        | {g.name for g in await TypeGroup.find_all().to_list()}
     )
 
 
@@ -4584,10 +4585,17 @@ class _FakeLDAPManager:
     """Minimal stand-in for AsyncLDAPManager covering what the per-record
     sync ops touch. Records every write call and serves a seeded
     current-membership set so we can assert reconcile and gate decisions
-    without a live directory."""
+    without a live directory. Groups in `missing_groups` have no entry:
+    membership writes to them raise LDAPNotFound until add_group creates
+    them."""
 
-    def __init__(self, current_memberships: set[str] = frozenset()):
+    def __init__(
+        self,
+        current_memberships: set[str] = frozenset(),
+        missing_groups: set[str] = frozenset(),
+    ):
         self._current = set(current_memberships)
+        self._missing = set(missing_groups)
         self.added: list[str] = []
         self.removed: list[str] = []
         self.user_writes: list[str] = []
@@ -4613,6 +4621,9 @@ class _FakeLDAPManager:
         return set(self._current)
 
     async def add_users_to_group(self, group, usernames, verify_users=True):
+        from cheeto.ldap_async import LDAPNotFound
+        if group in self._missing:
+            raise LDAPNotFound(group)
         self.added.append(group)
 
     async def remove_users_from_group(self, group, usernames):
@@ -4623,9 +4634,13 @@ class _FakeLDAPManager:
 
     async def set_group_members(self, groupname, members) -> None:
         # Pretend the group already exists → 'membership_diffed' path.
+        from cheeto.ldap_async import LDAPNotFound
+        if groupname in self._missing:
+            raise LDAPNotFound(groupname)
         self.group_writes.append(groupname)
 
     async def add_group(self, record) -> None:
+        self._missing.discard(record.groupname)
         self.group_writes.append(record.groupname)
 
     async def upsert_automount(self, *, mountname, mapname, host, path,
@@ -4685,6 +4700,94 @@ class TestSyncUserToLDAPMembership:
         assert 'labgrp' not in result.extra['removed_groups']
         assert ldap.removed == []
         assert 'active-users' in result.extra['added_groups']
+
+    async def test_type_group_projected(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        user.type = 'class'
+        await user.save()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users', 'active-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['added_groups'] == ['class-users']
+        assert result.extra['removed_groups'] == []
+
+    async def test_type_change_moves_type_group(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users', 'normal-users'},
+        )
+        await SetUserType.run(beanie_client, None, name='ldapu', type='admin')
+
+        # No force/full: the type change alone must re-dirty the user.
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.outcome != 'skipped_clean'
+        assert result.extra['added_groups'] == ['admin-users']
+        assert result.extra['removed_groups'] == ['normal-users']
+
+    async def test_missing_posix_group_marked_dirty(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        from beanie.operators import Set
+        # The group is clean at both sites, but its ldapsite entry is gone.
+        lab = await Group.get(lab.id)
+        stamp = lab.ldap.modified_at
+        await Group.find_one(Group.id == lab.id).update(Set({
+            'ldap.synced.ldapsite': stamp, 'ldap.synced.othersite': stamp,
+        }))
+        ldap = _FakeLDAPManager(
+            {'login-ssh-users', 'active-users', 'normal-users'},
+            missing_groups={'labgrp'},
+        )
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['missing_groups'] == ['labgrp']
+        assert result.extra['added_groups'] == []
+        lab = await Group.get(lab.id)
+        assert lab.ldap.needs_sync('ldapsite')
+        # Only this site's watermark is cleared.
+        assert not lab.ldap.needs_sync('othersite')
+
+    async def test_missing_special_group_warns(self, beanie_client, caplog):
+        user, site, lab = await self._seed_user_on_site()
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users'},
+            missing_groups={'normal-users'},
+        )
+
+        with caplog.at_level('WARNING'):
+            result = await SyncUserToLDAP.run(
+                beanie_client, None,
+                username='ldapu', sitename='ldapsite', ldap=ldap,
+            )
+
+        assert result.extra['missing_groups'] == ['normal-users']
+        assert 'ng ldap bootstrap' in caplog.text
+        assert 'labgrp' not in caplog.text
+
+    async def test_missing_type_group_skipped(self, beanie_client):
+        from cheeto.models.group import TypeGroup
+        user, site, lab = await self._seed_user_on_site()
+        await TypeGroup.find_all().delete()
+        ldap = _FakeLDAPManager({'labgrp', 'login-ssh-users', 'active-users'})
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['added_groups'] == []
+        assert result.extra['removed_groups'] == []
 
     async def test_stale_group_still_removed(self, beanie_client):
         user, site, lab = await self._seed_user_on_site()
@@ -4924,6 +5027,13 @@ class TestLDAPSyncableFingerprint:
         u = await self._user()
         before = await self._modified_at(User, u.id)
         u.access = await access_links(['login-ssh', 'sudo'])
+        await u.save()
+        assert await self._modified_at(User, u.id) > before
+
+    async def test_type_change_redirties(self, beanie_client):
+        u = await self._user()
+        before = await self._modified_at(User, u.id)
+        u.type = 'class'
         await u.save()
         assert await self._modified_at(User, u.id) > before
 
@@ -5312,6 +5422,13 @@ class TestSyncGroupToLDAPGate:
         )
         assert special.ldap.synced == {}
 
+    async def test_type_group_skipped_special(self, beanie_client):
+        await _seed_gate_site()
+        ldap = _FakeLDAPManager()
+        r = await self._sync(beanie_client, ldap, groupname='normal-users')
+        assert r.outcome == 'skipped_special'
+        assert ldap.group_writes == []
+
 
 class TestSyncSiteAutomountsGate:
 
@@ -5400,6 +5517,24 @@ class TestSyncSiteLDAPIncremental:
         assert r2['groups']['skipped_clean'] == 1
         # No per-record ops generated at all → no LDAP writes.
         assert ldap.write_count == writes_after_first
+
+    async def test_missing_group_recreated_in_same_run(self, beanie_client):
+        user, other, group, site = await self._seed()
+        ldap = _FakeLDAPManager()
+        await self._run(beanie_client, ldap)
+
+        # Out-of-band: the group entry vanishes while beanie says it is
+        # clean, and the user is dirtied by an unrelated change.
+        ldap._missing.add('gategrp')
+        user = await User.get(user.id)
+        user.shell = '/usr/bin/zsh'
+        await user.save()
+
+        r = await self._run(beanie_client, ldap)
+        assert r['groups']['created'] == 1
+        assert 'gategrp' not in ldap._missing
+        group = await Group.get(group.id)
+        assert not group.ldap.needs_sync('gatesite')
 
     async def test_full_resyncs_clean_records(self, beanie_client):
         await self._seed()
@@ -9302,6 +9437,10 @@ class TestDeleteGroupOp:
             await DeleteGroup.run(
                 beanie_client, None, name='active-users', reason='r',
             )
+        with pytest.raises(ValueError, match='access/status/type'):
+            await DeleteGroup.run(
+                beanie_client, None, name='normal-users', reason='r',
+            )
         with pytest.raises(ValueError, match='does not exist'):
             await DeleteGroup.run(
                 beanie_client, None, name='nonesuch', reason='r',
@@ -9411,6 +9550,7 @@ class TestFindGroups:
         all_names = {g.name for g in await find_groups(include_hidden=True)}
         assert 'fg_alice' in all_names            # personal group
         assert 'active-users' in all_names        # seeded status group
+        assert 'normal-users' in all_names        # seeded type group
 
     async def test_type_filter_reveals_hidden_types(self, beanie_client):
         from cheeto.queries import find_groups
@@ -9419,6 +9559,11 @@ class TestFindGroups:
         access = await find_groups(type='access')
         assert {g.name for g in access} >= {'login-ssh-users'}
         assert [g.name for g in await find_groups(type='system')] == ['fg_sys']
+        usertype = await find_groups(type='usertype')
+        assert {g.name for g in usertype} == {
+            'normal-users', 'admin-users', 'system-users', 'class-users',
+            'shared-users',
+        }
 
     async def test_site_filter_includes_sticky(self, beanie_client):
         from cheeto.queries import find_groups
@@ -9567,7 +9712,7 @@ class TestAddRemoveSiteGroupOps:
         group, site = await self._seed()
         await Group(name='asg_personal', gid=79021, type='user').insert()
 
-        with pytest.raises(ValueError, match='access/status group'):
+        with pytest.raises(ValueError, match='access/status/type group'):
             await AddSiteGroup.run(
                 beanie_client, None,
                 group_name='active-users', site_name='asg',
@@ -9995,7 +10140,9 @@ class TestPruneSiteLDAPGroups:
         await keep.insert()
         await GroupSiteInfo(group=keep, site=site).insert()
 
-        ldap = _FakePruneLDAP(['pr_keep', 'pr_goner', 'active-users'])
+        ldap = _FakePruneLDAP(
+            ['pr_keep', 'pr_goner', 'active-users', 'normal-users'],
+        )
         plan = await PruneSiteLDAP.run(
             beanie_client, None,
             sitename='prsite', ldap=ldap, scope=['groups'], dry_run=True,
@@ -10045,6 +10192,84 @@ class TestPruneSiteLDAPGroups:
                 sitename='prsite', ldap=ldap, scope=['groups'],
                 dry_run=True,
             )
+
+
+class TestSeedTypeGroups:
+    """SeedTypeGroups seeds one TypeGroup per user type. The fixtures already
+    seed them, so each test starts by removing the seeded TypeGroups."""
+
+    async def test_seeds_after_access_status_without_gid_collision(
+        self, beanie_client,
+    ):
+        from cheeto.models.group import TypeGroup
+        from cheeto.operations import SeedTypeGroups
+        await TypeGroup.find_all().delete()
+
+        # Access/status groups hold 6000-6009; the seed must skip them
+        # (regression: a non-polymorphic gid scan missed subclass gids).
+        result = await SeedTypeGroups.run(beanie_client, None, gid_start=6000)
+
+        assert result == {
+            'normal-users': 'created',
+            'admin-users': 'created',
+            'system-users': 'created',
+            'class-users': 'created',
+            'shared-users': 'created',
+        }
+        records = await TypeGroup.find_all().sort('+gid').to_list()
+        assert [(g.user_type, g.name, g.gid, g.type) for g in records] == [
+            ('user', 'normal-users', 6010, 'usertype'),
+            ('admin', 'admin-users', 6011, 'usertype'),
+            ('system', 'system-users', 6012, 'usertype'),
+            ('class', 'class-users', 6013, 'usertype'),
+            ('shared', 'shared-users', 6014, 'usertype'),
+        ]
+
+    async def test_idempotent(self, beanie_client):
+        from cheeto.models.group import TypeGroup
+        from cheeto.operations import SeedTypeGroups
+        result = await SeedTypeGroups.run(beanie_client, None, gid_start=6000)
+        assert set(result.values()) == {'already_exists'}
+        assert await TypeGroup.find_all().count() == 5
+
+    async def test_type_is_enforced_and_user_type_validated(
+        self, beanie_client,
+    ):
+        from pydantic import ValidationError
+        from cheeto.models.group import TypeGroup
+        g = TypeGroup(name='x-users', gid=1, user_type='user')
+        assert g.type == 'usertype'
+        with pytest.raises(ValidationError, match='Invalid user type'):
+            TypeGroup(name='y-users', gid=2, user_type='nonesuch')
+
+
+class _FakeBootstrapLDAP:
+
+    def __init__(self):
+        self.special: list[tuple[str, int]] = []
+
+    async def ensure_site_tree(self) -> dict[str, str]:
+        return {'site_ou': 'created'}
+
+    async def ensure_special_groups(self, records) -> dict[str, str]:
+        self.special = [(r.groupname, r.gid) for r in records]
+        return {r.groupname: 'created' for r in records}
+
+
+class TestBootstrapLDAPSite:
+
+    async def test_creates_access_status_and_type_groups(
+        self, beanie_client,
+    ):
+        from cheeto.operations import BootstrapLDAPSite
+        ldap = _FakeBootstrapLDAP()
+        await BootstrapLDAPSite.run(
+            beanie_client, None, sitename='bsite', ldap=ldap,
+        )
+        names = {name for name, _ in ldap.special}
+        assert names == await _special_group_names()
+        assert {'normal-users', 'class-users', 'active-users',
+                'sudo-users'} <= names
 
 
 class TestGroupSiteCascades:

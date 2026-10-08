@@ -23,8 +23,9 @@
 
 cd
 
-# v2 prerequisite: seed the standard access/status groups (idempotent).
+# v2 prerequisite: seed the standard access/status/type groups (idempotent).
 cheeto ng group seed-access-status
+cheeto ng group seed-type
 
 cheeto ng site new --site test-cluster --fqdn test-cluster.hpc.ucdavis.edu
 

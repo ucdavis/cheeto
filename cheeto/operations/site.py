@@ -6,7 +6,7 @@ from beanie.operators import In
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import SPECIAL_GROUP_CLASSES, Group, StatusGroup
 from ..models.base import link_target_id
 from ..models.site import Site
 from ..models.slurm import SlurmAccount, SlurmAllocation
@@ -90,10 +90,10 @@ class AddStickyGroup(Operation):
 
     async def execute(self, session: AsyncClientSession) -> None:
         site, group = await _load_site_and_group(self.sitename, self.groupname)
-        if isinstance(group, (AccessGroup, StatusGroup)):
+        if isinstance(group, SPECIAL_GROUP_CLASSES):
             raise ValueError(
-                f'Group {self.groupname!r} is an access/status group; not '
-                f'eligible for site.group.sticky'
+                f'Group {self.groupname!r} is an access/status/type group; '
+                f'not eligible for site.group.sticky'
             )
         # Before the idempotency early-return so a re-run heals a missing
         # presence record.

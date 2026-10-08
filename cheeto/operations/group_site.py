@@ -17,7 +17,7 @@ from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
 from ..models.base import link_target_id
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import SPECIAL_GROUP_CLASSES, Group
 from ..models.group_membership import GroupMembership
 from ..models.group_site_info import GroupSiteInfo
 from ..models.site import Site
@@ -76,11 +76,11 @@ class _SiteGroupOp(Operation):
         group = await find_group_by_name(self.group_name)
         if group is None:
             raise ValueError(f'Group {self.group_name} does not exist')
-        if isinstance(group, (AccessGroup, StatusGroup)):
+        if isinstance(group, SPECIAL_GROUP_CLASSES):
             raise ValueError(
-                f'Group {self.group_name} is a seeded access/status group; '
-                f'those exist at every site and have no per-site presence '
-                f'record'
+                f'Group {self.group_name} is a seeded access/status/type '
+                f'group; those exist at every site and have no per-site '
+                f'presence record'
             )
         if group.type == 'user':
             raise ValueError(

@@ -37,6 +37,7 @@ EXCEPTIONS = {
     ('storage', 'rehome'),
     ('storage', 'backfill-hosts'),
     ('group', 'seed-access-status'),
+    ('group', 'seed-type'),
     ('group', 'backfill-sites'),
     ('user', 'backfill-sites'),
     ('user', 'clear-offboarding-site-statuses'),

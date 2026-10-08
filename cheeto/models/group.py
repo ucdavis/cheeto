@@ -6,7 +6,7 @@ import pymongo
 from pymongo import IndexModel
 from pydantic import Field, field_validator, model_validator
 
-from ..constants import GROUP_TYPES, UINT_MAX
+from ..constants import GROUP_TYPES, UINT_MAX, USER_TYPES
 from .base import BaseDocument
 from .ldap_sync import LDAPSyncable, stable_fingerprint
 
@@ -14,10 +14,10 @@ from .ldap_sync import LDAPSyncable, stable_fingerprint
 class Group(LDAPSyncable, BaseDocument):
     """The base group document.
 
-    Polymorphic root via `is_root=True` — `AccessGroup` and `StatusGroup`
-    subclasses share this collection and are distinguished by beanie's
-    `_class_id` discriminator. Plain `Group` instances are for posix-style
-    groups (lab groups, system groups, sponsor-led groups).
+    Polymorphic root via `is_root=True` — the `AccessGroup`, `StatusGroup`
+    and `TypeGroup` subclasses share this collection and are distinguished
+    by beanie's `_class_id` discriminator. Plain `Group` instances are for
+    posix-style groups (lab groups, system groups, sponsor-led groups).
     """
 
     name: Annotated[str, Field(min_length=1, max_length=32)]
@@ -82,3 +82,35 @@ class StatusGroup(Group):
     def _enforce_type(self) -> 'StatusGroup':
         self.type = 'status'
         return self
+
+
+class TypeGroup(Group):
+    """A user-type bucket (normal/admin/system/class/shared).
+
+    The inherited `name` is the LDAP groupname (e.g. `'normal-users'`).
+    `user_type` is the `User.type` value it collects (e.g. `'user'`).
+    `User.type` is a plain global string rather than a Link, so members are
+    computed by matching `TypeGroup.user_type == User.type` at sync time.
+    """
+
+    user_type: Annotated[str, Field(min_length=1)]
+
+    @field_validator('user_type')
+    @classmethod
+    def validate_user_type(cls, v):
+        if v not in USER_TYPES:
+            raise ValueError(f'Invalid user type: {v}')
+        return v
+
+    @model_validator(mode='after')
+    def _enforce_type(self) -> 'TypeGroup':
+        self.type = 'usertype'
+        return self
+
+
+# The seeded, non-posix group kinds. Membership is projected from User
+# fields by SyncUserToLDAP, never from GroupMembership edges, so these are
+# refused by the posix group ops and skipped by the group-side LDAP sync.
+SPECIAL_GROUP_CLASSES: tuple[type[Group], ...] = (
+    AccessGroup, StatusGroup, TypeGroup,
+)

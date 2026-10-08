@@ -13,7 +13,13 @@ from ..constants import (
     MIN_SPECIAL_GID,
     MIN_SYSTEM_UID,
 )
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import (
+    SPECIAL_GROUP_CLASSES,
+    AccessGroup,
+    Group,
+    StatusGroup,
+    TypeGroup,
+)
 from ..models.site import Site
 from ..models.base import link_target_id
 from ..models.user import User
@@ -44,6 +50,34 @@ DEFAULT_STATUS_GROUPS: tuple[tuple[str, str], ...] = (
     ('disabled', 'disabled-users'),
     ('offboarding', 'offboarding-users'),
 )
+
+# Standard user-type groups: one per `USER_TYPES` value. Every synced user
+# is a member of the group for their `User.type`.
+DEFAULT_TYPE_GROUPS: tuple[tuple[str, str], ...] = (
+    # (user_type, ldap_groupname stored as Group.name)
+    ('user', 'normal-users'),
+    ('admin', 'admin-users'),
+    ('system', 'system-users'),
+    ('class', 'class-users'),
+    ('shared', 'shared-users'),
+)
+
+
+async def _group_gids_in_use() -> set[int]:
+    # with_children=True: a bare Group.find_all() filters on the root
+    # `_class_id` and would miss the Access/Status/TypeGroup gids, so a seed
+    # would collide with them on the unique gid index.
+    return {g.gid for g in await Group.find_all(with_children=True).to_list()}
+
+
+def _allocate_special_gid(gid_start: int, used: set[int]) -> int:
+    # Lowest free gid at or above gid_start; reserves it in `used`.
+    gid = gid_start
+    while gid in used:
+        gid += 1
+    used.add(gid)
+    return gid
+
 
 async def _get_next_gid(min_id: int, max_id: int) -> int:
     result = await Group.find(
@@ -210,13 +244,14 @@ class CreateGroupFromSponsor(Operation):
             raise ValueError(f'Site {self.site_name} does not exist')
 
         expected_gid = MIN_PIGROUP_GID + sponsor.uid
-        # with_children=True so a colliding AccessGroup/StatusGroup is found
-        # here rather than surfacing as a DuplicateKeyError mid-transaction.
+        # with_children=True so a colliding access/status/type group is
+        # found here rather than surfacing as a DuplicateKeyError
+        # mid-transaction.
         existing = await find_group_by_name(self.group_name)
         if existing is not None:
             if not self.exist_ok:
                 raise ValueError(f'Group {self.group_name} already exists')
-            if (isinstance(existing, (AccessGroup, StatusGroup))
+            if (isinstance(existing, SPECIAL_GROUP_CLASSES)
                     or existing.type != 'group'):
                 raise ValueError(
                     f'Group {self.group_name} exists but is not a sponsor '
@@ -296,13 +331,6 @@ class SeedAccessStatusGroups(Operation):
         )
         self._created: dict[str, str] = {}
 
-    async def _next_gid(self, used: set[int]) -> int:
-        gid = self.gid_start + len(used)
-        while gid in used:
-            gid += 1
-        used.add(gid)
-        return gid
-
     async def _seed_access(
         self, access_name: str, ldap_name: str,
         used_gids: set[int], session: AsyncClientSession,
@@ -314,7 +342,7 @@ class SeedAccessStatusGroups(Operation):
             self._created[ldap_name] = 'already_exists'
             used_gids.add(existing.gid)
             return
-        gid = await self._next_gid(used_gids)
+        gid = _allocate_special_gid(self.gid_start, used_gids)
         record = AccessGroup(
             name=ldap_name, gid=gid, access_name=access_name, type='access',
         )
@@ -332,7 +360,7 @@ class SeedAccessStatusGroups(Operation):
             self._created[ldap_name] = 'already_exists'
             used_gids.add(existing.gid)
             return
-        gid = await self._next_gid(used_gids)
+        gid = _allocate_special_gid(self.gid_start, used_gids)
         record = StatusGroup(
             name=ldap_name, gid=gid, status_name=status_name, type='status',
         )
@@ -341,11 +369,10 @@ class SeedAccessStatusGroups(Operation):
 
     async def execute(self, session: AsyncClientSession) -> dict[str, str]:
         # Pre-load all gids in use across the polymorphic groups collection
-        # (regular Groups, AccessGroups, StatusGroups). The unique index on
+        # (regular Groups and every special subclass). The unique index on
         # gid will reject duplicates, but eagerly tracking lets us skip them
         # without round-tripping per attempt.
-        all_groups = await Group.find_all().to_list()
-        used_gids: set[int] = {g.gid for g in all_groups}
+        used_gids = await _group_gids_in_use()
 
         for access_name, ldap_name in self.access_groups:
             await self._seed_access(access_name, ldap_name, used_gids, session)
@@ -358,6 +385,63 @@ class SeedAccessStatusGroups(Operation):
             'gid_start': self.gid_start,
             'access_count': len(self.access_groups),
             'status_count': len(self.status_groups),
+            'created': dict(self._created),
+        }
+
+
+class SeedTypeGroups(Operation):
+    """Idempotently seed the standard `TypeGroup` records.
+
+    Required before `BootstrapLDAPSite` can create the user-type groups in
+    LDAP and before `SyncUserToLDAP` can place users in them (a missing
+    TypeGroup is skipped, not an error).
+
+    Idempotent: any record whose `user_type` already exists is skipped.
+    Newly-created records take the lowest free gids at or above
+    `gid_start`, so they land after the seeded access/status groups.
+
+    An optional `type_groups` constructor arg overrides DEFAULT_TYPE_GROUPS.
+    """
+
+    op_name = 'seed_type_groups'
+
+    def __init__(
+        self,
+        client: AsyncMongoClient,
+        author: User | None,
+        *,
+        gid_start: int = MIN_SPECIAL_GID,
+        type_groups: list[tuple[str, str]] | None = None,
+    ) -> None:
+        super().__init__(client, author)
+        self.gid_start = gid_start
+        self.type_groups = (
+            list(type_groups) if type_groups is not None
+            else list(DEFAULT_TYPE_GROUPS)
+        )
+        self._created: dict[str, str] = {}
+
+    async def execute(self, session: AsyncClientSession) -> dict[str, str]:
+        used_gids = await _group_gids_in_use()
+        for user_type, ldap_name in self.type_groups:
+            existing = await TypeGroup.find_one(
+                TypeGroup.user_type == user_type,
+            )
+            if existing is not None:
+                self._created[ldap_name] = 'already_exists'
+                continue
+            gid = _allocate_special_gid(self.gid_start, used_gids)
+            record = TypeGroup(
+                name=ldap_name, gid=gid, user_type=user_type, type='usertype',
+            )
+            await record.insert(session=session)
+            self._created[ldap_name] = 'created'
+        return dict(self._created)
+
+    def describe(self) -> dict[str, Any]:
+        return {
+            'gid_start': self.gid_start,
+            'type_count': len(self.type_groups),
             'created': dict(self._created),
         }
 
@@ -397,9 +481,9 @@ class DeleteGroup(Operation):
         group = await find_group_by_name(self.name)
         if group is None:
             raise ValueError(f'Group {self.name} does not exist')
-        if isinstance(group, (AccessGroup, StatusGroup)):
+        if isinstance(group, SPECIAL_GROUP_CLASSES):
             raise ValueError(
-                f'Group {self.name} is a seeded access/status group and '
+                f'Group {self.name} is a seeded access/status/type group and '
                 f'cannot be deleted'
             )
         if group.type == 'user':

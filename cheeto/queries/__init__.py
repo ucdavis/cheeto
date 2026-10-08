@@ -1,10 +1,12 @@
 from .access_status import (
     find_access_group,
     find_status_group,
+    find_type_group,
     resolve_access_ldapnames,
     resolve_access_names,
     resolve_status_ldapname,
     resolve_status_name,
+    resolve_type_ldapname,
 )
 from .history import find_history
 from .group import (

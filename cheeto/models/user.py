@@ -145,7 +145,8 @@ class User(LDAPSyncable, BaseDocument, Expirable):
 
     def ldap_fingerprint(self) -> str:
         # Exactly the fields LDAPUserRecord projects (operations/ldap.py)
-        # plus the access/status links that drive special-group membership.
+        # plus the access/status links and the user type that drive
+        # special-group membership.
         # SshKey / UserSiteInfo / GroupMembership changes are covered by
         # propagation hooks on those documents, not here.
         return stable_fingerprint({
@@ -161,6 +162,7 @@ class User(LDAPSyncable, BaseDocument, Expirable):
             'expires_at': self.expires_at,
             'status': str(link_target_id(self.status)),
             'access': sorted(str(link_target_id(a)) for a in self.access),
+            'type': self.type,
         })
 
     class Settings:

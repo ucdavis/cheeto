@@ -14,7 +14,7 @@ from .site import (
 )
 from .host import Host, StorageHost
 from .user import SshKey, UCDIAMInfo, User
-from .group import AccessGroup, Group, StatusGroup
+from .group import AccessGroup, Group, StatusGroup, TypeGroup
 from .slurm import (
     SlurmAccount,
     SlurmAccountLimits,
@@ -50,6 +50,7 @@ SshKey.model_rebuild()
 Group.model_rebuild()
 AccessGroup.model_rebuild()
 StatusGroup.model_rebuild()
+TypeGroup.model_rebuild()
 UserSiteInfo.model_rebuild()
 GroupMembership.model_rebuild()
 GroupSiteInfo.model_rebuild()
@@ -74,6 +75,7 @@ ALL_MODELS = [
     Group,
     AccessGroup,
     StatusGroup,
+    TypeGroup,
     UserSiteInfo,
     GroupMembership,
     GroupSiteInfo,
