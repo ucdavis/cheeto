@@ -57,10 +57,10 @@ def cmd_counter():
 MONGODB_PORT = 28080
 
 
-# Default seed data for AccessGroup / StatusGroup records used by the async
-# test fixtures. Mirrors operations.group.DEFAULT_*_GROUPS but kept inline
-# here to avoid pulling beanie at conftest-import time (operations import
-# beanie's Link, which requires init_beanie). The async beanie_client
+# Default seed data for AccessGroup / StatusGroup / TypeGroup records used by
+# the async test fixtures. Mirrors operations.group.DEFAULT_*_GROUPS but kept
+# inline here to avoid pulling beanie at conftest-import time (operations
+# import beanie's Link, which requires init_beanie). The async beanie_client
 # fixtures call seed_access_status_groups() after clean_db() so every test
 # starts with these records present.
 TEST_DEFAULT_ACCESS_GROUPS = (
@@ -77,17 +77,25 @@ TEST_DEFAULT_STATUS_GROUPS = (
     ('disabled', 'disabled-users'),
     ('offboarding', 'offboarding-users'),
 )
+TEST_DEFAULT_TYPE_GROUPS = (
+    ('user', 'normal-users'),
+    ('admin', 'admin-users'),
+    ('system', 'system-users'),
+    ('class', 'class-users'),
+    ('shared', 'shared-users'),
+)
 TEST_SPECIAL_GROUP_GID_START = 6000
 
 
 async def seed_access_status_groups():
-    """Insert the standard AccessGroup / StatusGroup records used by tests.
+    """Insert the standard AccessGroup / StatusGroup / TypeGroup records used
+    by tests.
 
     Async test fixtures call this after clean_db() so every test has the
     full set available for find_one(access_name=...) lookups in operations
     that require Links.
     """
-    from cheeto.models.group import AccessGroup, StatusGroup
+    from cheeto.models.group import AccessGroup, StatusGroup, TypeGroup
 
     gid = TEST_SPECIAL_GROUP_GID_START
     for access_name, ldap_name in TEST_DEFAULT_ACCESS_GROUPS:
@@ -98,6 +106,11 @@ async def seed_access_status_groups():
     for status_name, ldap_name in TEST_DEFAULT_STATUS_GROUPS:
         await StatusGroup(
             name=ldap_name, gid=gid, status_name=status_name, type='status',
+        ).insert()
+        gid += 1
+    for user_type, ldap_name in TEST_DEFAULT_TYPE_GROUPS:
+        await TypeGroup(
+            name=ldap_name, gid=gid, user_type=user_type, type='usertype',
         ).insert()
         gid += 1
 

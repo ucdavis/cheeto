@@ -607,3 +607,9 @@ async def migrate_all(args: Namespace):
     await MigrateSiteGlobals.run(args.db, args.author, sitenames=args.sites)
 
     console.rule('Migration complete')
+    # v1 had no user-type groups, so nothing above creates TypeGroups (and
+    # --drop removed any that existed with the `groups` collection).
+    console.print(
+        '[yellow]Run `cheeto ng group seed-type` to (re)create the '
+        'user-type groups.[/]'
+    )

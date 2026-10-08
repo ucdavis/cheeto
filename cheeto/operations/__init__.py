@@ -50,6 +50,7 @@ from .group import (
     CreateSystemGroup,
     DeleteGroup,
     SeedAccessStatusGroups,
+    SeedTypeGroups,
 )
 from .group_site import (
     AddSiteGroup,

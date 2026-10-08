@@ -1,7 +1,9 @@
-"""Resolve and look up `AccessGroup` / `StatusGroup` records.
+"""Resolve and look up `AccessGroup` / `StatusGroup` / `TypeGroup` records.
 
 Resolvers accept a `Link` or an already-fetched document. Lookups take a
-shorthand (`access_name` / `status_name`) and return the record or None.
+shorthand (`access_name` / `status_name` / `user_type`) and return the record
+or None. `User.type` is a plain string, not a Link, so the type resolver
+takes the string directly.
 """
 
 from __future__ import annotations
@@ -10,7 +12,7 @@ from typing import Iterable
 
 from beanie import Link
 
-from ..models.group import AccessGroup, StatusGroup
+from ..models.group import AccessGroup, StatusGroup, TypeGroup
 
 
 async def find_access_group(access_name: str) -> AccessGroup | None:
@@ -19,6 +21,17 @@ async def find_access_group(access_name: str) -> AccessGroup | None:
 
 async def find_status_group(status_name: str) -> StatusGroup | None:
     return await StatusGroup.find_one(StatusGroup.status_name == status_name)
+
+
+async def find_type_group(user_type: str) -> TypeGroup | None:
+    return await TypeGroup.find_one(TypeGroup.user_type == user_type)
+
+
+async def resolve_type_ldapname(user_type: str | None) -> str | None:
+    if user_type is None:
+        return None
+    tg = await find_type_group(user_type)
+    return tg.name if tg is not None else None
 
 
 async def resolve_status_name(

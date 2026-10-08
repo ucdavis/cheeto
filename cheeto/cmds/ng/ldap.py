@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .. import commands
+from ...constants import MIN_SPECIAL_GID
 from ...ldap_async import (
     AUTO_GROUP,
     AUTO_HOME,
@@ -624,7 +625,7 @@ async def ldap_show_group_cmd(args: Namespace):
 async def ldap_show_site_cmd(args: Namespace):
     console = Console()
     cfg = args.config.ldap
-    from ...models.group import AccessGroup, StatusGroup
+    from ...models.group import AccessGroup, StatusGroup, TypeGroup
     async with AsyncLDAPManager(cfg, sitename=args.site) as ldap:
         site_ou = ldap.site_ou_dn()
         groups_ou = ldap.groups_ou_dn()
@@ -639,7 +640,8 @@ async def ldap_show_site_cmd(args: Namespace):
         }
         access_records = await AccessGroup.find_all().to_list()
         status_records = await StatusGroup.find_all().to_list()
-        for record in access_records + status_records:
+        type_records = await TypeGroup.find_all().to_list()
+        for record in access_records + status_records + type_records:
             statuses[f'group:{record.name}'] = await ldap.group_exists(record.name)
 
     if args.yaml:
@@ -656,11 +658,11 @@ async def ldap_show_site_cmd(args: Namespace):
 
 
 # ---------------------------------------------------------------------------
-# `ng group seed-access-status` — beanie-side bootstrap
+# `ng group seed-access-status` / `seed-type` — beanie-side bootstrap
 # ---------------------------------------------------------------------------
 # Lives here rather than in cheeto/cmds/ng/group.py so the LDAP-related
-# bootstrap commands cluster together. Uses the SeedAccessStatusGroups
-# operation from cheeto.operations.group.
+# bootstrap commands cluster together. Uses the SeedAccessStatusGroups and
+# SeedTypeGroups operations from cheeto.operations.group.
 
 
 @commands.register('ng', 'group', 'seed-access-status',
@@ -686,3 +688,30 @@ def _(parser: ArgParser):
     parser.add_argument('--gid-start', type=int, default=6000,
                         help='Starting GID for newly-created records '
                              '(default 6000)')
+
+
+@commands.register('ng', 'group', 'seed-type',
+                   help='Seed standard TypeGroup (user-type) records in beanie')
+async def group_seed_type_cmd(args: Namespace):
+    from ...operations import SeedTypeGroups
+    console = Console()
+    result = await SeedTypeGroups.run(
+        args.db, args.author,
+        gid_start=args.gid_start,
+    )
+    table = Table(title='TypeGroup seed result')
+    table.add_column('record name', style='green')
+    table.add_column('status')
+    for name, status in result.items():
+        style = 'yellow' if status == 'created' else 'dim'
+        table.add_row(name, f'[{style}]{status}[/]')
+    console.print(table)
+
+
+@group_seed_type_cmd.args()
+def _(parser: ArgParser):
+    # New records take the lowest free gids at or above this, so on an
+    # already-seeded DB they land right after the access/status groups.
+    parser.add_argument('--gid-start', type=int, default=MIN_SPECIAL_GID,
+                        help='Starting GID for newly-created records '
+                             f'(default {MIN_SPECIAL_GID})')

@@ -3,9 +3,10 @@
 Six ops mirroring the IAM ops layout in `cheeto/operations/iam.py`:
 
 - `BootstrapLDAPSite` — create the per-site OU tree, automount maps, and
-  the LDAP-side entries for every AccessGroup/StatusGroup record in beanie.
+  the LDAP-side entries for every AccessGroup/StatusGroup/TypeGroup record
+  in beanie.
 - `SyncUserToLDAP` — project one User to LDAP (upsert dn + reconcile
-  access/status group memberships).
+  access/status/type group memberships).
 - `SyncGroupToLDAP` — project one beanie Group to LDAP at one site.
 - `SyncSiteAutomounts` — refresh home/group automount entries from beanie
   Storage rows.
@@ -42,7 +43,13 @@ from ..ldap_async import (
     LDAPTransientError,
     LDAPUserRecord,
 )
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import (
+    SPECIAL_GROUP_CLASSES,
+    AccessGroup,
+    Group,
+    StatusGroup,
+    TypeGroup,
+)
 from ..models.group_membership import GroupMembership
 from ..models.group_site_info import GroupSiteInfo
 from ..models.site import Site
@@ -52,6 +59,7 @@ from ..models.user_site_info import UserSiteInfo
 from ..queries.access_status import (
     resolve_access_ldapnames,
     resolve_status_ldapname,
+    resolve_type_ldapname,
 )
 from ..queries.group import (
     effective_group_members,
@@ -115,11 +123,13 @@ async def _build_user_record(
 
 
 class BootstrapLDAPSite(Operation):
-    """Create the per-site LDAP tree and the special access/status groups.
+    """Create the per-site LDAP tree and the special access/status/type
+    groups.
 
     Idempotent: re-running reports `already_exists` for things that were
     already there. Fails fast if no AccessGroup/StatusGroup records exist
-    in beanie (operator should run SeedAccessStatusGroups first).
+    in beanie (operator should run SeedAccessStatusGroups first). Missing
+    TypeGroups are not fatal: run SeedTypeGroups, then re-run this op.
     """
 
     op_name = 'bootstrap_ldap_site'
@@ -143,6 +153,7 @@ class BootstrapLDAPSite(Operation):
     ) -> dict[str, dict[str, str]]:
         access_groups = await AccessGroup.find_all().to_list()
         status_groups = await StatusGroup.find_all().to_list()
+        type_groups = await TypeGroup.find_all().to_list()
         if not access_groups and not status_groups:
             raise ValueError(
                 'No AccessGroup / StatusGroup records in beanie; run '
@@ -153,7 +164,7 @@ class BootstrapLDAPSite(Operation):
 
         records = [
             LDAPGroupRecord(groupname=g.name, gid=g.gid)
-            for g in itertools.chain(access_groups, status_groups)
+            for g in itertools.chain(access_groups, status_groups, type_groups)
         ]
         self._special_result = await self.ldap.ensure_special_groups(records)
 
@@ -196,10 +207,11 @@ class SyncUserToLDAP(Operation):
     reconciles the user's group memberships at the site against the targets:
       - access groups from `effective_access_links(user, usi)`,
       - the user's status group,
+      - the group for the user's `User.type` (TypeGroup),
       - the per-site posix groups the user is a `member` of (plus any
         sticky groups), from `effective_user_groups(user, site)`.
 
-    Both special (access/status) and posix groups live under the same
+    Both special (access/status/type) and posix groups live under the same
     per-site groups OU, so `list_user_memberships` returns them together.
     The posix groups MUST be included in the target set or the reconcile
     would treat them as stale and strip the user out of every lab/sponsor
@@ -284,6 +296,9 @@ class SyncUserToLDAP(Operation):
         )
         if status_ldapname is not None:
             target_groups.add(status_ldapname)
+        type_ldapname = await resolve_type_ldapname(user.type)
+        if type_ldapname is not None:
+            target_groups.add(type_ldapname)
 
         # Posix group memberships at this site share the per-site groups OU
         # with the special groups above. Include them so the reconcile keeps
@@ -371,11 +386,12 @@ class SyncUserToLDAP(Operation):
 
 
 class SyncGroupToLDAP(Operation):
-    """Project one beanie Group (regular, NOT AccessGroup/StatusGroup) to
+    """Project one beanie Group (regular, NOT Access/Status/TypeGroup) to
     LDAP at one site. Members are filtered to those with a UserSiteInfo
     for (member, site).
 
-    Skips access/status groups — those are reconciled by `SyncUserToLDAP`.
+    Skips access/status/type groups — those are reconciled by
+    `SyncUserToLDAP`.
 
     Incremental gate as in `SyncUserToLDAP`: clean groups are skipped
     unless `force`/`full`; the per-site watermark is written on success
@@ -418,7 +434,7 @@ class SyncGroupToLDAP(Operation):
         if group is None:
             raise ValueError(f'Group {self.groupname!r} does not exist')
 
-        if isinstance(group, (AccessGroup, StatusGroup)):
+        if isinstance(group, SPECIAL_GROUP_CLASSES):
             self._outcome = 'skipped_special'
             return LDAPSyncResult(
                 name=self.groupname, outcome='skipped_special',
@@ -727,7 +743,7 @@ class PruneSiteLDAP(Operation):
       - users: ldap users not in beanie's User collection
       - groups: ldap groups (under groups_ou) with no GroupSiteInfo at
         this site — a group detached from the site is pruned here even if
-        the Group document still exists. AccessGroup/StatusGroup names and
+        the Group document still exists. Access/Status/TypeGroup names and
         `ldap.ignore` records are NEVER pruned.
       - automounts: automountKey values in auto.home/auto.group not
         in beanie's Storage rows.
@@ -844,7 +860,7 @@ class PruneSiteLDAP(Operation):
             if present_ids else set()
         )
 
-        # Exemptions: access/status groups are global infrastructure that
+        # Exemptions: access/status/type groups are global infrastructure that
         # exists in every site's tree and never carries a GroupSiteInfo;
         # ldap.ignore records are never managed by cheeto (the old global
         # keep-set honored that contract implicitly).
@@ -854,13 +870,19 @@ class PruneSiteLDAP(Operation):
         status_names = {
             sg.name for sg in await StatusGroup.find_all().to_list()
         }
+        type_names = {
+            tg.name for tg in await TypeGroup.find_all().to_list()
+        }
         ignored_names = {
             g.name for g in await Group.find(
                 Group.ldap.ignore == True,  # noqa: E712 — beanie query syntax
                 with_children=True,
             ).to_list()
         }
-        keep = present_names | access_names | status_names | ignored_names
+        keep = (
+            present_names | access_names | status_names | type_names
+            | ignored_names
+        )
         return [
             g.groupname for g in ldap_groups
             if g.groupname not in keep
@@ -995,7 +1017,7 @@ class SyncSiteLDAP(Operation):
         if 'groups' in self.scope:
             # Presence-scoped: exactly the groups with a GroupSiteInfo at
             # this site. The base-class find (no with_children) is
-            # polymorphic-aware — AccessGroup/StatusGroup rows are filtered
+            # polymorphic-aware — Access/Status/TypeGroup rows are filtered
             # by _class_id even if a stray GSI points at one; their entries
             # are managed by BootstrapLDAPSite + SyncUserToLDAP instead.
             present_ids = await site_present_group_ids(site)

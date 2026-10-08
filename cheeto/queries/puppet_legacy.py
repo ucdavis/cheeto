@@ -26,7 +26,13 @@ from pathlib import PurePosixPath
 from beanie.operators import In
 
 from ..models.base import link_target_id
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import (
+    SPECIAL_GROUP_CLASSES,
+    AccessGroup,
+    Group,
+    StatusGroup,
+    TypeGroup,
+)
 from ..models.group_membership import GroupMembership
 from ..models.site import Site
 from ..models.slurm import SlurmAccount
@@ -131,10 +137,10 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         ).to_list()
         if referenced_group_ids else []
     )
-    # AccessGroup/StatusGroup are v2 metadata, not exportable POSIX groups.
+    # Access/Status/TypeGroups are v2 metadata, not exportable POSIX groups.
     candidate_groups = [
         g for g in raw_groups
-        if not isinstance(g, (AccessGroup, StatusGroup))
+        if not isinstance(g, SPECIAL_GROUP_CLASSES)
     ]
     group_by_id = {g.id: g for g in candidate_groups}
 
@@ -156,7 +162,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         # provisioning ops ensure one); include strays so the export stays
         # v1-correct, but surface the drift.
         if gid not in group_by_id and not isinstance(
-            s.group, (AccessGroup, StatusGroup),
+            s.group, SPECIAL_GROUP_CLASSES,
         ):
             logger.warning(
                 'Group %s owns storage %s at %s but has no GroupSiteInfo; '
@@ -182,7 +188,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     for account in slurm_accounts:
         g = account.group
         if g.id not in group_by_id and not isinstance(
-            g, (AccessGroup, StatusGroup),
+            g, SPECIAL_GROUP_CLASSES,
         ):
             logger.warning(
                 'Group %s owns a SlurmAccount at %s but has no '
@@ -221,7 +227,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     for e in edges:
         gid = link_target_id(e.group)
         if gid not in group_by_id:
-            continue  # access/status group or otherwise not exportable
+            continue  # special group or otherwise not exportable
         uid = link_target_id(e.user)
         if 'sponsor' in e.roles:
             sponsor_ids_by_group.setdefault(gid, set()).add(uid)
@@ -265,13 +271,14 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         ).to_list()
         sponsor_name_by_id.update({u.id: u.name for u in extras})
 
-    # Fetch the special access/status groups once, up front: their shorthands
-    # resolve every user's access tags below (an id->name map replaces a
-    # per-user `resolve_access_names`), and the records themselves are folded
-    # into the group map after the edge-attribution maps (so they never count
-    # toward posix memberships).
+    # Fetch the special access/status/type groups once, up front: the access
+    # shorthands resolve every user's access tags below (an id->name map
+    # replaces a per-user `resolve_access_names`), and the records themselves
+    # are folded into the group map after the edge-attribution maps (so they
+    # never count toward posix memberships).
     access_groups = await AccessGroup.find_all().to_list()
     status_groups = await StatusGroup.find_all().to_list()
+    type_groups = await TypeGroup.find_all().to_list()
     access_name_by_id = {ag.id: ag.access_name for ag in access_groups}
 
     user_records: dict[str, PuppetUserRecord] = {}
@@ -333,11 +340,12 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         user_records[u.name] = PuppetUserRecord.load(record_data)
 
     # v1 exported the special access/status groups (every site carried
-    # their SiteGroups); v2 keeps them as global AccessGroup/StatusGroup
-    # records. Folded in here (after the edge-attribution maps) so they never
-    # count toward user posix memberships — they render as plain gid records.
-    # Reuses the lists fetched above for access-tag resolution.
-    for g in access_groups + status_groups:
+    # their SiteGroups); v2 keeps them, plus the user-type groups, as global
+    # Access/Status/TypeGroup records. Folded in here (after the
+    # edge-attribution maps) so they never count toward user posix
+    # memberships — they render as plain gid records. Reuses the lists
+    # fetched above for access-tag resolution.
+    for g in access_groups + status_groups + type_groups:
         if g.id not in group_by_id:
             group_by_id[g.id] = g
             candidate_groups.append(g)

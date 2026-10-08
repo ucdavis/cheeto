@@ -22,7 +22,7 @@ from beanie import PydanticObjectId
 from beanie.operators import In
 
 from ..models.base import link_target_id
-from ..models.group import AccessGroup, Group, StatusGroup
+from ..models.group import SPECIAL_GROUP_CLASSES, Group
 from ..models.group_membership import GroupMembership
 from ..models.group_site_info import GroupSiteInfo
 from ..models.hippo import HippoEvent
@@ -102,7 +102,7 @@ async def imputed_group_ids_at_site(site: Site) -> set[PydanticObjectId]:
         ).to_list()
         ids = {
             g.id for g in groups
-            if not isinstance(g, (AccessGroup, StatusGroup))
+            if not isinstance(g, SPECIAL_GROUP_CLASSES)
         }
     return ids
 
@@ -112,7 +112,7 @@ async def find_group_by_name(
     fetch_links: bool = False,
 ) -> Group | None:
     """Look up a group by name. `with_children=True` (default) makes the
-    polymorphic find see `AccessGroup` / `StatusGroup` rows too."""
+    polymorphic find see the special (access/status/type) rows too."""
     return await Group.find_one(
         Group.name == name,
         with_children=with_children,
@@ -434,9 +434,9 @@ async def _gids_with_user(
 
 
 # Group types hidden from an unfiltered listing: personal groups (one per
-# user) and the seeded access/status infrastructure rows. An explicit
+# user) and the seeded access/status/type infrastructure rows. An explicit
 # --type or include_hidden reveals them.
-_HIDDEN_GROUP_TYPES = ('user', 'access', 'status')
+_HIDDEN_GROUP_TYPES = ('user', 'access', 'status', 'usertype')
 
 
 async def find_groups(

@@ -66,7 +66,8 @@ GROUP_TYPES : Final = (
     'system',
     'group',
     'admin',
-    'class'
+    'class',
+    'usertype'
 )
 
 USER_STATUSES : Final = (
