@@ -27,7 +27,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from beanie.operators import In, Set
+from beanie.operators import In, Set, Unset
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.client_session import AsyncClientSession
 
@@ -52,6 +52,7 @@ from ..models.group import (
 )
 from ..models.group_membership import GroupMembership
 from ..models.group_site_info import GroupSiteInfo
+from ..models.ldap_sync import queue_ldap_touch
 from ..models.site import Site
 from ..models.storage import Storage
 from ..models.user import SshKey, User
@@ -219,6 +220,13 @@ class SyncUserToLDAP(Operation):
     add/remove rather than a wholesale set, so it never clobbers a group's
     other members.
 
+    A target posix group with no LDAP entry is not an error: it is new (or
+    its entry was removed out of band) and `SyncGroupToLDAP` creates it with
+    its full member list. The op clears that group's watermark for this
+    site so the group is dirty — `SyncSiteLDAP` gathers groups after the
+    users phase, so the same incremental run creates it. A missing special
+    group does need `BootstrapLDAPSite`, and is warned about.
+
     Incremental gate: a user whose `ldap` dirty state is clean for this
     site is skipped before any further queries; `force` or `full` bypasses
     the gate (`force` additionally delete-recreates the entry). On success
@@ -253,6 +261,7 @@ class SyncUserToLDAP(Operation):
         self._outcome: str = ''
         self._added_groups: list[str] = []
         self._removed_groups: list[str] = []
+        self._missing_groups: list[str] = []
 
     async def execute(
         self, session: AsyncClientSession,
@@ -308,11 +317,12 @@ class SyncUserToLDAP(Operation):
         # SyncGroupToLDAP projects from the group side (a detached group is
         # excluded so the reconcile doesn't fight prune).
         posix_groups, _sticky_ids = await effective_user_groups(user, site)
-        target_groups.update(g.name for g in posix_groups)
+        posix_by_name = {g.name: g for g in posix_groups}
+        target_groups.update(posix_by_name)
 
         record = await _build_user_record(user, self.sitename)
         outcome = await self._upsert_user(record)
-        await self._reconcile_memberships(target_groups)
+        await self._reconcile_memberships(target_groups, posix_by_name)
 
         if (
             outcome == 'updated'
@@ -333,6 +343,7 @@ class SyncUserToLDAP(Operation):
                 'dn': self.ldap.user_dn(self.username),
                 'added_groups': list(self._added_groups),
                 'removed_groups': list(self._removed_groups),
+                'missing_groups': list(self._missing_groups),
             },
         )
 
@@ -351,7 +362,9 @@ class SyncUserToLDAP(Operation):
             await self.ldap.add_user(record)
             return 'created'
 
-    async def _reconcile_memberships(self, target_groups: set[str]) -> None:
+    async def _reconcile_memberships(
+        self, target_groups: set[str], posix_by_name: dict[str, Group],
+    ) -> None:
         current = await self.ldap.list_user_memberships(self.username)
         to_add = target_groups - current
         to_remove = current - target_groups
@@ -362,16 +375,41 @@ class SyncUserToLDAP(Operation):
                 )
                 self._added_groups.append(g)
             except LDAPNotFound:
-                self.logger.warning(
-                    'sync_user_to_ldap(%s): target group %s not in LDAP; '
-                    'run BootstrapLDAPSite first', self.username, g,
-                )
+                self._missing_groups.append(g)
+                group = posix_by_name.get(g)
+                if group is None:
+                    self.logger.warning(
+                        'sync_user_to_ldap(%s): special group %s not in '
+                        'LDAP; run `ng ldap bootstrap` for site %s',
+                        self.username, g, self.sitename,
+                    )
+                else:
+                    await self._mark_group_dirty(group)
         for g in sorted(to_remove):
             try:
                 await self.ldap.remove_users_from_group(g, [self.username])
                 self._removed_groups.append(g)
             except LDAPNotFound:
                 pass
+
+    async def _mark_group_dirty(self, group: Group) -> None:
+        # The group sync creates the entry with every member, this user
+        # included. Clear only this site's watermark: the other sites'
+        # entries are not affected. Queued, so the write runs after this
+        # op's transaction commits and outside it — concurrent user syncs
+        # that share the group then do not conflict.
+        if group.ldap.ignore:
+            return
+        self.logger.info(
+            'sync_user_to_ldap(%s): group %s not in LDAP; marked for '
+            'group sync at %s', self.username, group.name, self.sitename,
+        )
+        group_id, field = group.id, f'ldap.synced.{self.sitename}'
+        await queue_ldap_touch(
+            lambda: Group.find_one(
+                Group.id == group_id, with_children=True,
+            ).update(Unset({field: ''})),
+        )
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -382,6 +420,7 @@ class SyncUserToLDAP(Operation):
             'full': self.full,
             'added_groups': list(self._added_groups),
             'removed_groups': list(self._removed_groups),
+            'missing_groups': list(self._missing_groups),
         }
 
 

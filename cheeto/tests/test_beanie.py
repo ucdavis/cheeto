@@ -4585,10 +4585,17 @@ class _FakeLDAPManager:
     """Minimal stand-in for AsyncLDAPManager covering what the per-record
     sync ops touch. Records every write call and serves a seeded
     current-membership set so we can assert reconcile and gate decisions
-    without a live directory."""
+    without a live directory. Groups in `missing_groups` have no entry:
+    membership writes to them raise LDAPNotFound until add_group creates
+    them."""
 
-    def __init__(self, current_memberships: set[str] = frozenset()):
+    def __init__(
+        self,
+        current_memberships: set[str] = frozenset(),
+        missing_groups: set[str] = frozenset(),
+    ):
         self._current = set(current_memberships)
+        self._missing = set(missing_groups)
         self.added: list[str] = []
         self.removed: list[str] = []
         self.user_writes: list[str] = []
@@ -4614,6 +4621,9 @@ class _FakeLDAPManager:
         return set(self._current)
 
     async def add_users_to_group(self, group, usernames, verify_users=True):
+        from cheeto.ldap_async import LDAPNotFound
+        if group in self._missing:
+            raise LDAPNotFound(group)
         self.added.append(group)
 
     async def remove_users_from_group(self, group, usernames):
@@ -4624,9 +4634,13 @@ class _FakeLDAPManager:
 
     async def set_group_members(self, groupname, members) -> None:
         # Pretend the group already exists → 'membership_diffed' path.
+        from cheeto.ldap_async import LDAPNotFound
+        if groupname in self._missing:
+            raise LDAPNotFound(groupname)
         self.group_writes.append(groupname)
 
     async def add_group(self, record) -> None:
+        self._missing.discard(record.groupname)
         self.group_writes.append(record.groupname)
 
     async def upsert_automount(self, *, mountname, mapname, host, path,
@@ -4717,6 +4731,49 @@ class TestSyncUserToLDAPMembership:
         assert result.outcome != 'skipped_clean'
         assert result.extra['added_groups'] == ['admin-users']
         assert result.extra['removed_groups'] == ['normal-users']
+
+    async def test_missing_posix_group_marked_dirty(self, beanie_client):
+        user, site, lab = await self._seed_user_on_site()
+        from beanie.operators import Set
+        # The group is clean at both sites, but its ldapsite entry is gone.
+        lab = await Group.get(lab.id)
+        stamp = lab.ldap.modified_at
+        await Group.find_one(Group.id == lab.id).update(Set({
+            'ldap.synced.ldapsite': stamp, 'ldap.synced.othersite': stamp,
+        }))
+        ldap = _FakeLDAPManager(
+            {'login-ssh-users', 'active-users', 'normal-users'},
+            missing_groups={'labgrp'},
+        )
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.extra['missing_groups'] == ['labgrp']
+        assert result.extra['added_groups'] == []
+        lab = await Group.get(lab.id)
+        assert lab.ldap.needs_sync('ldapsite')
+        # Only this site's watermark is cleared.
+        assert not lab.ldap.needs_sync('othersite')
+
+    async def test_missing_special_group_warns(self, beanie_client, caplog):
+        user, site, lab = await self._seed_user_on_site()
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users'},
+            missing_groups={'normal-users'},
+        )
+
+        with caplog.at_level('WARNING'):
+            result = await SyncUserToLDAP.run(
+                beanie_client, None,
+                username='ldapu', sitename='ldapsite', ldap=ldap,
+            )
+
+        assert result.extra['missing_groups'] == ['normal-users']
+        assert 'ng ldap bootstrap' in caplog.text
+        assert 'labgrp' not in caplog.text
 
     async def test_missing_type_group_skipped(self, beanie_client):
         from cheeto.models.group import TypeGroup
@@ -5460,6 +5517,24 @@ class TestSyncSiteLDAPIncremental:
         assert r2['groups']['skipped_clean'] == 1
         # No per-record ops generated at all → no LDAP writes.
         assert ldap.write_count == writes_after_first
+
+    async def test_missing_group_recreated_in_same_run(self, beanie_client):
+        user, other, group, site = await self._seed()
+        ldap = _FakeLDAPManager()
+        await self._run(beanie_client, ldap)
+
+        # Out-of-band: the group entry vanishes while beanie says it is
+        # clean, and the user is dirtied by an unrelated change.
+        ldap._missing.add('gategrp')
+        user = await User.get(user.id)
+        user.shell = '/usr/bin/zsh'
+        await user.save()
+
+        r = await self._run(beanie_client, ldap)
+        assert r['groups']['created'] == 1
+        assert 'gategrp' not in ldap._missing
+        group = await Group.get(group.id)
+        assert not group.ldap.needs_sync('gatesite')
 
     async def test_full_resyncs_clean_records(self, beanie_client):
         await self._seed()
