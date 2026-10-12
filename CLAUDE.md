@@ -19,7 +19,7 @@ poetry run pytest -k "pattern"              # Tests matching pattern
 poetry version patch|minor|major            # Bump version (syncs cheeto/__init__.py)
 ```
 
-Tests require MongoDB with replica set support (for transactions). The test suite automatically starts an ephemeral `mongod` on port 28080 with replica set `mongoengine` via the session-scoped `start_mongodb` fixture in `cheeto/tests/conftest.py`. CI installs MongoDB 8.0 plus `libldap-dev`, `libsasl2-dev`, `libkrb5-dev`.
+Tests require MongoDB with replica set support (for transactions). The test suite automatically starts an ephemeral `mongod` on port 28080 with replica set `cheeto` via the session-scoped `start_mongodb` fixture in `cheeto/tests/conftest.py`. CI installs MongoDB 8.0 plus `libldap-dev` and `libsasl2-dev`.
 
 ## Architecture
 
@@ -30,10 +30,6 @@ CLI (cheeto/cmds/, cheeto/cmds/ng/)  →  Operations (cheeto/operations/) + Quer
                                      →  External APIs: HiPPO (cheeto/hippo.py), IAM (cheeto/iam_async.py), LDAP (cheeto/ldap_async.py)
 ```
 
-The v1 mongoengine layer (`cheeto/legacy/`) is retained **only** for the v1→v2 data
-migration and is gated behind the optional `legacy` extra (`pip install cheeto[legacy]`);
-nothing in the default install imports mongoengine.
-
 ### CLI framework
 
 Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are registered via `@commands.register('parent', 'child')` decorators in `cheeto/cmds/`. Each command module registers its subtree on the shared `commands` object from `cheeto/cmds/__init__.py`. Argument groups use `@arggroup` and postprocessors run setup logic (like DB connections) before command execution. Entry point: `cheeto.cmds.__main__:main`.
@@ -43,7 +39,7 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 `cheeto/__init__.py` installs a `sys.set_lazy_imports_filter` that makes only cheeto's own import statements lazy, and switches lazy mode on when `CHEETO_LAZY_IMPORTS=1` (the Docker image sets it). The source never uses the `lazy` keyword, so it still runs on 3.13. Rules that keep the import-time registries intact under lazy mode:
 
 - An import that exists only for its side effect (`@commands.register`, `@app.task`) must use `importlib.import_module(...)`, which is always eager. See `cheeto/cmds/__main__.py`, `cheeto/cmds/ng/__init__.py`, `cheeto/daemon/app.py`.
-- A package whose from-imports must execute sets `__eager_imports__ = True` before them (`cheeto/models/__init__.py`, `cheeto/legacy/database/__init__.py`). On a package `__init__` the marker covers every module in that package.
+- A package whose from-imports must execute sets `__eager_imports__ = True` before them (`cheeto/models/__init__.py`). On a package `__init__` the marker covers every module in that package.
 - The `OPERATIONS` registry is complete only after `operation_names()` or `get_operation()` ran (`cheeto/operations/base.py`). Do not call them at parser-build time; `cheeto/cmds/ng/history.py` shows the lazy `choices` pattern.
 - Do not copy module namespaces (`globals()`, `vars(module)`). A name that was never touched is still a lazy proxy.
 
@@ -51,9 +47,8 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 
 ### Data models
 
-- **beanie documents** (`cheeto/models/`): the live async MongoDB persistence layer. Global-plus-site pattern: identity on `User`/`Group`, per-site config on `UserSiteInfo`/`GroupMembership` edges. See `.cursor/rules/database.mdc`.
+- **beanie documents** (`cheeto/models/`): the live async MongoDB persistence layer. Global-plus-site pattern: identity on `User`/`Group`, per-site config on `UserSiteInfo`/`GroupMembership` edges.
 - **Marshmallow dataclasses** (`cheeto/types.py`, `cheeto/puppet.py`, `cheeto/config.py`): validation + YAML serialization for puppet/HiPPO/config data. Base class `_BaseModel` in `types.py` (`to_dict()`/`dumps()`/`save_yaml()`/`load_yaml()`, ruamel.yaml round-trip).
-- **v1 mongoengine documents** (`cheeto/legacy/database/`): the old `GlobalUser`/`SiteUser`, `GlobalGroup`/`SiteGroup`, etc. Retained only for migration; importing them requires the `legacy` extra.
 
 ### Key modules by role
 
@@ -61,7 +56,6 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 - **`cheeto/cmds/ng/`**: the `cheeto ng` CLI (beanie/async) — the live command surface.
 - **`cheeto/hippo.py`**: shared HiPPO API client/notifier; event handling lives in `cheeto/operations/hippo.py`.
 - **`cheeto/ldap_async.py`** + **`cheeto/operations/ldap.py`**: sync beanie state to LDAP directories (bonsai async client).
-- **`cheeto/legacy/migrate.py`** + **`cheeto/cmds/ng/migrate.py`**: the v1→v2 migration ops and their `cheeto ng migrate` CLI (gated behind the `legacy` extra).
 - **`cheeto/puppet.py`**: Puppet YAML schema and validation with deep-merge support (`puppet_merge` in `cheeto/yaml.py`).
 - **`cheeto/config.py`**: YAML config loaded from `~/.config/cheeto/config.yaml` with profile support. Sections: `ldap`, `mongo`, `hippo`, `ucdiam`, plus optional profiled `daemon` and `api`.
 - **`cheeto/daemon/`**: Persistent services (`cheeto daemon worker|beat|api`). Celery periodic tasks (RabbitMQ broker, mongodb result backend) run the syncs on schedules from `daemon.tasks` config; `slurm_sync` is routed to per-site `slurm.<site>` queues consumed by cluster head-node workers (`--site`). Task bodies are plain coroutines bridged via `run_op` (fresh event loop + fresh `connect_beanie` per run — AsyncMongoClient is loop-bound). `daemon/api.py` is the FastAPI app (`/puppet/root-keys/{site}`, optional X-API-Key auth).
@@ -85,13 +79,11 @@ Scoped reference rules live in `.claude/rules/` (mirrored as Cursor `.mdc` rules
 - **Access types**: `login-ssh`, `ondemand`, `compute-ssh`, `root-ssh`, `sudo`, `slurm`.
 - **Transactions**: Multi-document `Operation`s run inside a beanie/pymongo session (the `Operation` base's `transactional` flag); see `cheeto/operations/base.py`.
 
-### v1 → v2 status
+### v1 history
 
-v2 (beanie/async) is the live stack. The v1 mongoengine code has been retired to
-`cheeto/legacy/` and is kept only for the v1→v2 migration, gated behind the optional
-`legacy` extra. Install it with `poetry install --extras legacy` (or `pip install
-'cheeto[legacy]'`); `cheeto ng migrate …` and importing `cheeto.legacy.*` require it and
-raise a clear error otherwise (`cheeto/legacy/__init__.py::require_legacy`).
+v2 (beanie/async) is the only stack. The v1 mongoengine code and the v1→v2 migration
+were removed on 2026-10-12. `History` documents written by the migration still carry
+`migrate_*` op names; nothing registers those ops any more.
 
 Prefer consulting `beanie` documentation before introspecting its code: https://beanie-odm.dev/.
 Remember that `beanie` extends `pydantic` for its models: https://pydantic.dev/docs/

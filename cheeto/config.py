@@ -39,9 +39,6 @@ class LDAPConfig(BaseModel):
     pool_max_connections: int = 5
     pool_idle_connections: int = 2
     use_tls: bool = False
-    auth_mechanism: str = 'SIMPLE'   # 'SIMPLE' | 'GSSAPI' (only SIMPLE wired today)
-    gssapi_keytab: Optional[str] = None
-    gssapi_realm: Optional[str] = None
 
     # Explicit TLS trust for libldap. Debian builds OpenLDAP against GnuTLS,
     # which (unlike the OpenSSL build) does NOT fall back to the system CA
@@ -70,7 +67,6 @@ class MongoConfig(BaseModel):
     tls: bool
     password: str
     database: str
-    old_database: Optional[str] = None
     tls_ca_file: Optional[str] = None
 
 

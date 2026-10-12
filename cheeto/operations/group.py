@@ -305,7 +305,7 @@ class SeedAccessStatusGroups(Operation):
     so re-runs after manual gid adjustments don't collide.
 
     Optional `access_groups` / `status_groups` constructor args override the
-    DEFAULT_*_GROUPS tuples (e.g. for migration from a custom v1 config).
+    DEFAULT_*_GROUPS tuples (e.g. for a site with a custom group set).
     """
 
     op_name = 'seed_access_status_groups'

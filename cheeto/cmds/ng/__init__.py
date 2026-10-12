@@ -57,5 +57,5 @@ async def resolve_author(args: Namespace):
 # is the @commands.register calls at import, which PEP 810 lazy imports would
 # defer since nothing references these names. See cheeto/__init__.py.
 for _name in ('site', 'user', 'user_site', 'group', 'group_site', 'slurm',
-              'storage', 'history', 'migrate', 'hippo', 'iam', 'ldap'):
+              'storage', 'history', 'hippo', 'iam', 'ldap'):
     importlib.import_module(f'.{_name}', __name__)

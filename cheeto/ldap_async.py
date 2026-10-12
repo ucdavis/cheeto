@@ -351,24 +351,11 @@ class LDAPClientFactory:
             cli.set_ca_cert(self.config.ca_file)
         if self.config.cert_policy:
             cli.set_cert_policy(self.config.cert_policy)
-        if self.config.auth_mechanism == 'SIMPLE':
-            cli.set_credentials(
-                'SIMPLE',
-                user=self.config.login_dn,
-                password=self.config.password,
-            )
-        elif self.config.auth_mechanism == 'GSSAPI':
-            cli.set_credentials(
-                'GSSAPI',
-                user=self.config.login_dn,
-                password=self.config.password,
-                realm=self.config.gssapi_realm,
-                keytab=self.config.gssapi_keytab,
-            )
-        else:
-            raise LDAPError(
-                f'Unsupported auth_mechanism {self.config.auth_mechanism!r}'
-            )
+        cli.set_credentials(
+            'SIMPLE',
+            user=self.config.login_dn,
+            password=self.config.password,
+        )
         return cli
 
 

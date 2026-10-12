@@ -218,8 +218,8 @@ class RemoveSiteUser(Operation):
 class BackfillUserSiteInfo(Operation):
     """Create `UserSiteInfo` records for users who hold a site-implying role
     (`SITE_USER_ROLES`) on a group at a site but have no presence record
-    there — the state left by membership ops before they ensured presence,
-    and by the legacy group migration. Sponsor-only edges are left alone.
+    there — the state left by membership ops before they ensured presence.
+    Sponsor-only edges are left alone.
     New records inherit `User.status` (status=None). Safe to re-run.
     """
 

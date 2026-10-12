@@ -369,8 +369,8 @@ def _(parser: ArgParser):
 def _confirm_clear_tree(
     console: Console, base: str, exclude_bases: list[str], count: int,
 ) -> bool:
-    """Typed 6-digit confirmation before a destructive clear. Mirrors
-    the migrate --drop confirm flow. Returns True only on exact match."""
+    """Typed 6-digit confirmation before a destructive clear. Returns True
+    only on exact match."""
     code = f'{secrets.randbelow(1_000_000):06d}'
     console.print()
     console.rule(

@@ -20,8 +20,6 @@ cheeto/operations/  write path: Operation classes (one per mutation/export),
                     transactional, recorded in the History collection
 cheeto/queries/     read path: pure query helpers over the models
 cheeto/models/      beanie (async MongoDB ODM) documents — the data model
-cheeto/legacy/      v1 mongoengine models + migration, behind the optional
-                    `legacy` extra (used only for the v1->v2 migration)
 ```
 
 External integration modules:
@@ -50,11 +48,6 @@ External integration modules:
 - **History**: every Operation records an audit entry (author, op name,
   describe() payload).
 
-The v1 mongoengine model now lives in `cheeto/legacy/`, behind the optional
-`legacy` extra (`poetry install --extras legacy`). It exists only so
-`cheeto ng migrate ...` can migrate v1 data into the v2 collections; the v1
-`cheeto db` CLI has been removed.
-
 ### Operations vs queries
 
 All mutations go through `Operation` subclasses
@@ -71,7 +64,7 @@ Entry point: `cheeto` (`cheeto.cmds.__main__:main`). Top-level groups:
 cheeto config            show/write configuration
 cheeto daemon            persistent services: celery worker/beat and REST API
 cheeto ng                beanie/async operations:
-  site | user | group | slurm | storage | history | migrate | hippo | iam | ldap
+  site | user | group | slurm | storage | history | hippo | iam | ldap
 cheeto puppet            legacy puppet YAML validation/merging
 cheeto nocloud           cloud-init nocloud template rendering
 cheeto monitor           ad-hoc monitoring helpers
@@ -328,8 +321,8 @@ Requirements:
   single-node).
 - RabbitMQ reachable from the hub and every cluster head node (daemon
   only).
-- System packages for the LDAP/Kerberos bindings: `libldap-dev`,
-  `libsasl2-dev`, `libkrb5-dev`.
+- System packages for the LDAP bindings (bonsai builds from source):
+  `libldap-dev`, `libsasl2-dev`.
 
 Install:
 

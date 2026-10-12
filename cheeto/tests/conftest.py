@@ -241,7 +241,7 @@ def start_mongodb(tmp_path_factory):
             '--dbpath', str(data_dir),
             '--port', str(MONGODB_PORT),
             '--logpath', str(log_file),
-            '--replSet', 'mongoengine',
+            '--replSet', 'cheeto',
         ]
     )
     time.sleep(2)  # Give mongod time to bind and accept connections
@@ -311,29 +311,8 @@ def config(config_file):
 
 
 @pytest.fixture(scope='session')
-def db_config(config):
-    return config.mongo
-
-
-@pytest.fixture(scope='session')
 def hippo_config(config):
     return config.hippo
-
-
-def pytest_collection_modifyitems(config, items):
-    """Skip the v1->v2 migration tests when the optional `legacy` extra
-    (mongoengine) isn't installed. All such tests live in TestMigrate* classes,
-    so their node ids contain 'Migrate'."""
-    try:
-        import mongoengine  # noqa: F401
-        return
-    except ImportError:
-        skip = pytest.mark.skip(
-            reason="needs the optional 'legacy' extra (mongoengine)"
-        )
-        for item in items:
-            if 'Migrate' in item.nodeid:
-                item.add_marker(skip)
 
 
 # ---------------------------------------------------------------------------
