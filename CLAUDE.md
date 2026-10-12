@@ -8,7 +8,7 @@ cheeto is a Python CLI tool for managing HPC infrastructure at UC Davis. It hand
 
 ## Build and Development
 
-**Package manager:** Poetry (v2.0.1) | **Python:** >=3.12, <3.14
+**Package manager:** Poetry (v2.5.1) | **Python:** >=3.13, <3.16
 
 ```bash
 poetry install                              # Install dependencies
@@ -37,6 +37,17 @@ nothing in the default install imports mongoengine.
 ### CLI framework
 
 Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are registered via `@commands.register('parent', 'child')` decorators in `cheeto/cmds/`. Each command module registers its subtree on the shared `commands` object from `cheeto/cmds/__init__.py`. Argument groups use `@arggroup` and postprocessors run setup logic (like DB connections) before command execution. Entry point: `cheeto.cmds.__main__:main`.
+
+### Lazy imports (Python 3.15+, PEP 810)
+
+`cheeto/__init__.py` installs a `sys.set_lazy_imports_filter` that makes only cheeto's own import statements lazy, and switches lazy mode on when `CHEETO_LAZY_IMPORTS=1` (the Docker image sets it). The source never uses the `lazy` keyword, so it still runs on 3.13. Rules that keep the import-time registries intact under lazy mode:
+
+- An import that exists only for its side effect (`@commands.register`, `@app.task`) must use `importlib.import_module(...)`, which is always eager. See `cheeto/cmds/__main__.py`, `cheeto/cmds/ng/__init__.py`, `cheeto/daemon/app.py`.
+- A package whose from-imports must execute sets `__eager_imports__ = True` before them (`cheeto/models/__init__.py`, `cheeto/legacy/database/__init__.py`). On a package `__init__` the marker covers every module in that package.
+- The `OPERATIONS` registry is complete only after `operation_names()` or `get_operation()` ran (`cheeto/operations/base.py`). Do not call them at parser-build time; `cheeto/cmds/ng/history.py` shows the lazy `choices` pattern.
+- Do not copy module namespaces (`globals()`, `vars(module)`). A name that was never touched is still a lazy proxy.
+
+`cheeto/tests/test_lazy_imports.py` is the tripwire. It runs subprocess probes in eager and lazy mode and asserts that the command tree, the celery tasks, the op registry and the model rebuilds match, and that `cheeto --help` does not load pymongo, beanie, celery, bonsai, IPython or sh.
 
 ### Data models
 

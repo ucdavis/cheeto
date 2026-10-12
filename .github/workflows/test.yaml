@@ -18,6 +18,15 @@ on:
 jobs:
   test:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.15"]
+        include:
+          # 3.15 runs the whole suite with PEP 810 lazy imports switched on,
+          # the way the Docker image runs (see cheeto/__init__.py).
+          - python: "3.15"
+            lazy_imports: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,17 +40,17 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       - name: cache poetry install
         uses: actions/cache@v4
         with:
           path: ~/.local
-          key: poetry-2.0.1-0
+          key: poetry-2.5.1-0
 
       - uses: snok/install-poetry@v1
         with:
-          version: 2.0.1
+          version: 2.5.1
           virtualenvs-create: true
           virtualenvs-in-project: true
 
@@ -50,14 +59,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: pydeps-${{ hashFiles('**/poetry.lock') }}
+          key: pydeps-${{ matrix.python }}-${{ hashFiles('**/poetry.lock') }}
 
       - run: poetry install --no-interaction --no-root -E legacy
         if: steps.cache-deps.outputs.cache-hit != 'true'
 
       - run: poetry install --no-interaction -E legacy
 
-      - run: poetry run pytest cheeto/tests --ignore=cheeto/tests/test_db.py -q
+      - run: poetry run pytest cheeto/tests -q
+        env:
+          CHEETO_LAZY_IMPORTS: ${{ matrix.lazy_imports || '0' }}
 
   # Live Slurm integration: stand up giovtorres/slurm-docker-cluster via
   # docker compose and run the CHEETO_SLURM_LIVE-gated tests against a real
@@ -85,11 +96,11 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.15"
 
       - uses: snok/install-poetry@v1
         with:
-          version: 2.0.1
+          version: 2.5.1
           virtualenvs-create: true
           virtualenvs-in-project: true
 
@@ -98,7 +109,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .venv
-          key: pydeps-${{ hashFiles('**/poetry.lock') }}
+          key: pydeps-3.15-${{ hashFiles('**/poetry.lock') }}
 
       - run: poetry install --no-interaction --no-root
         if: steps.cache-deps.outputs.cache-hit != 'true'

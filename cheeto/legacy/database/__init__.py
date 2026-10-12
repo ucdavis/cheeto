@@ -7,7 +7,13 @@
 # this package requires the optional `legacy` extra (mongoengine); the guard
 # below turns a missing dependency into an actionable message.
 
-from .. import require_legacy
+# PEP 810 (Python 3.15+): keep this package's imports eager, submodules
+# included. mongoengine resolves string references such as
+# ReferenceField('SiteGroup') from its document registry at class creation,
+# so site.py's import of SiteGroup must execute, not defer. See cheeto/__init__.py.
+__eager_imports__ = True
+
+from .. import require_legacy  # noqa: E402
 
 require_legacy()
 

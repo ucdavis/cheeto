@@ -12,10 +12,9 @@ from pathlib import Path
 import sys
 
 from ponderosa import ArgParser, arggroup
-import sh
 
 from . import commands
-from ..monitor import parse_dcmi_power, poll_dcmi_power
+from ..monitor import poll_dcmi_power
 
 
 @commands.register('monitor',

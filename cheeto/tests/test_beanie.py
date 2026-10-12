@@ -3534,7 +3534,11 @@ class TestOperationRegistry:
         assert get_operation('edit_volume_allocation') is EditVolumeAllocation
 
     async def test_op_names_unique_and_consistent(self):
-        from cheeto.operations.base import OPERATIONS, Operation
+        from cheeto.operations.base import OPERATIONS, Operation, operation_names
+
+        # Under lazy imports the op modules execute on demand; load them all so
+        # the __subclasses__ walk below is independent of test order.
+        operation_names()
 
         def subclasses(cls):
             for sub in cls.__subclasses__():

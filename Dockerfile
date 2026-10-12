@@ -14,18 +14,24 @@
 # the runtime mount/env contract.
 
 # ---------------------------------------------------------------------------
-# Builder: compile C-extension deps (python-ldap, gssapi, bonsai, pyescrypt)
-# and install cheeto + its main deps into an in-project venv.
+# Builder: compile C-extension deps (bonsai, pyescrypt, and any dep without
+# a cp315 wheel) and install cheeto + its main deps into an in-project venv.
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm AS builder
+# Override to bridge a tag that is not on Docker Hub yet, e.g.
+#   docker build --build-arg PYTHON_IMAGE=python:3.15-rc-slim-bookworm .
+# Stay on bookworm: the runtime apt names below (libldap-2.5-0, ...) are
+# bookworm's; trixie renames them.
+ARG PYTHON_IMAGE=python:3.15-slim-bookworm
 
-ENV POETRY_VERSION=2.0.1 \
+FROM ${PYTHON_IMAGE} AS builder
+
+ENV POETRY_VERSION=2.5.1 \
     POETRY_VIRTUALENVS_IN_PROJECT=1 \
     POETRY_NO_INTERACTION=1 \
     PIP_NO_CACHE_DIR=1
 
 # build-essential + headers for the C extensions; git for the git-pinned
-# mongoengine dependency (see pyproject.toml).
+# beanie dependency (see pyproject.toml).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         git \
@@ -41,7 +47,7 @@ COPY pyproject.toml poetry.lock README.md ./
 COPY cheeto ./cheeto
 
 # Installs the root package + main deps into /app/.venv, honoring the
-# lockfile (including the git-pinned mongoengine). The dev group is optional
+# lockfile (including the git-pinned beanie). The dev group is optional
 # and excluded by --only main.
 RUN poetry install --only main
 
@@ -49,7 +55,7 @@ RUN poetry install --only main
 # Runtime: just the venv + the shared libraries the C extensions need at
 # runtime, plus munge (munged + libmunge2 + the munge user).
 # ---------------------------------------------------------------------------
-FROM python:3.13-slim-bookworm
+FROM ${PYTHON_IMAGE}
 
 # ca-certificates provides the public CA bundle libldap verifies the LDAPS
 # server cert against — bonsai sets no CA of its own, so without it the TLS
@@ -76,10 +82,20 @@ COPY --from=builder /app /app
 # Slurm client lib dirs the head-node mount lands in (harmless when empty);
 # libslurm dlopens its plugins from the compiled PluginDir, so the mount must
 # match the host path (commonly /usr/lib64/slurm) — adjust per head-node distro.
+# CHEETO_LAZY_IMPORTS=1 turns on PEP 810 lazy imports for cheeto's own modules
+# (see cheeto/__init__.py); `docker exec` inherits it too. Set it to 0 to debug
+# with eager imports.
 ENV PATH="/app/.venv/bin:${PATH}" \
     LD_LIBRARY_PATH="/usr/lib64:/usr/lib64/slurm" \
     SLURM_CONF="/etc/slurm/slurm.conf" \
-    CHEETO_CONFIG="/etc/cheeto/config.yaml"
+    CHEETO_CONFIG="/etc/cheeto/config.yaml" \
+    CHEETO_LAZY_IMPORTS=1
+
+# Eager import smoke test: under lazy imports a broken C extension (bonsai,
+# pyescrypt, pymongo's _cmessage) would only surface at first use inside a
+# task, so fail the build here instead. CHEETO_CONFIG does not exist yet;
+# daemon/app.py tolerates that at import.
+RUN CHEETO_LAZY_IMPORTS=0 python -c "import cheeto.cmds.__main__, cheeto.daemon.tasks, cheeto.daemon.api"
 
 # GitHub's published SSH host keys (https://api.github.com/meta .ssh_keys), baked
 # so the puppet-sync git push verifies the host without a TOFU prompt. The

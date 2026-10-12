@@ -202,7 +202,7 @@ firewall for 5671.
 
 ### Container
 
-The `Dockerfile` (base `python:3.13-slim`) builds one image that runs any
+The `Dockerfile` (base `python:3.15-slim-bookworm`) builds one image that runs any
 daemon role; pick the role as the command. Mount the config at
 `/etc/cheeto/config.yaml` (or set `CHEETO_CONFIG`):
 
@@ -211,6 +211,13 @@ docker build -t cheeto .
 docker run --rm -v /etc/cheeto/config.yaml:/etc/cheeto/config.yaml:ro \
     cheeto daemon worker          # hub worker (also: beat | api --host 0.0.0.0)
 ```
+
+The image sets `CHEETO_LAZY_IMPORTS=1`, which turns on PEP 810 lazy imports
+(Python 3.15) for cheeto's own modules so the CLI and the workers start
+faster. Pass `-e CHEETO_LAZY_IMPORTS=0` to debug with eager imports. The base
+image can be overridden at build time, for example while a new Python tag is
+not on Docker Hub yet:
+`docker build --build-arg PYTHON_IMAGE=python:3.15-rc-slim-bookworm -t cheeto .`
 
 The image deliberately does **not** bundle a Slurm client — Slurm's RPC is
 only compatible across a few major releases, so the **site worker** binds the
@@ -316,7 +323,7 @@ api:
 
 Requirements:
 
-- Python >=3.12,<3.14; Poetry 2.x.
+- Python >=3.13,<3.16; Poetry 2.x.
 - MongoDB with a replica set (transactions are required, even
   single-node).
 - RabbitMQ reachable from the hub and every cluster head node (daemon

@@ -256,14 +256,19 @@ async def migrate_user(args: Namespace):
     console.print(f'Migrated user [green]{user.name}[/] (uid={user.uid})')
 
 
-USER_DROP_MODELS: list[type[Document]] = [User, UserSiteInfo, SshKey]
+# The drop lists are functions, not module constants: a module-level list of
+# model classes would reify them (and with them beanie and pymongo) at
+# `cheeto --help` under PEP 810 lazy imports. See cheeto/__init__.py.
+def user_drop_models() -> list[type[Document]]:
+    return [User, UserSiteInfo, SshKey]
 
 
 # AccessGroup and StatusGroup share the `groups` collection with Group
 # (polymorphic via is_root=True). --drop on this step drops the entire
 # `groups` collection, including any regular Group records. The
 # confirmation prompt names `groups` so the operator can see this.
-ACCESS_STATUS_DROP_MODELS: list[type[Document]] = [AccessGroup, StatusGroup]
+def access_status_drop_models() -> list[type[Document]]:
+    return [AccessGroup, StatusGroup]
 
 
 @commands.register('ng', 'migrate', 'access-status-groups',
@@ -273,7 +278,7 @@ async def migrate_access_status_groups(args: Namespace):
     console = Console()
     if not await _maybe_drop(
         args, console, 'AccessGroup/StatusGroup records',
-        ACCESS_STATUS_DROP_MODELS,
+        access_status_drop_models(),
     ):
         return 1
     result = await MigrateAccessStatusGroups.run(args.db, args.author)
@@ -298,7 +303,7 @@ async def migrate_users(args: Namespace):
     console = Console()
     if not _validate_sites_filter(console, args.sites):
         return 1
-    if not await _maybe_drop(args, console, 'all users', USER_DROP_MODELS):
+    if not await _maybe_drop(args, console, 'all users', user_drop_models()):
         return 1
     users = await MigrateUsers.run(args.db, args.author, sitenames=args.sites)
     console.print(f'Migrated [green]{len(users)}[/] users')
@@ -386,9 +391,9 @@ async def migrate_slurm_associations(args: Namespace):
     console.print(f'Migrated [green]{len(assocs)}[/] Slurm associations')
 
 
-SLURM_DROP_MODELS: list[type[Document]] = [
-    SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
-]
+def slurm_drop_models() -> list[type[Document]]:
+    return [SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation,
+            SlurmPartition]
 
 
 async def _run_slurm_migrations(args: Namespace, console: Console) -> None:
@@ -425,15 +430,14 @@ async def migrate_slurm_all(args: Namespace):
     if not _validate_sites_filter(console, args.sites):
         return 1
     if not await _maybe_drop(args, console, 'all Slurm records',
-                             SLURM_DROP_MODELS):
+                             slurm_drop_models()):
         return 1
     await _run_slurm_migrations(args, console)
     console.rule('Slurm migration complete')
 
 
-STORAGE_DROP_MODELS: list[type[Document]] = [
-    Storage, StaticMount, StorageVolume, AutomountMap,
-]
+def storage_drop_models() -> list[type[Document]]:
+    return [Storage, StaticMount, StorageVolume, AutomountMap]
 
 
 async def _reset_site_storage_settings(console: Console) -> None:
@@ -536,7 +540,7 @@ async def migrate_storage_all(args: Namespace):
     if not _validate_sites_filter(console, args.sites):
         return 1
     if not await _maybe_drop(args, console, 'all storage records',
-                             STORAGE_DROP_MODELS):
+                             storage_drop_models()):
         return 1
     if args.drop:
         await _reset_site_storage_settings(console)
@@ -544,11 +548,12 @@ async def migrate_storage_all(args: Namespace):
     console.rule('Storage migration complete')
 
 
-ALL_DROP_MODELS: list[type[Document]] = [
-    SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
-    Storage, StaticMount, StorageVolume, AutomountMap,
-    Group, SshKey, UserSiteInfo, User, Site, AccessGroup, StatusGroup,
-]
+def all_drop_models() -> list[type[Document]]:
+    return [
+        SlurmAssociation, SlurmAccount, SlurmQOS, SlurmAllocation, SlurmPartition,
+        Storage, StaticMount, StorageVolume, AutomountMap,
+        Group, SshKey, UserSiteInfo, User, Site, AccessGroup, StatusGroup,
+    ]
 
 
 @sites_filter_args.apply()
@@ -566,7 +571,7 @@ async def migrate_all(args: Namespace):
         )
     if not await _maybe_drop(args, console,
                              'EVERYTHING the migration writes',
-                             ALL_DROP_MODELS):
+                             all_drop_models()):
         return 1
 
     console.rule('Migrating sites')
