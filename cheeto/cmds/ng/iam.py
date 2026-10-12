@@ -1,8 +1,6 @@
 """`cheeto ng iam` — sync UC Davis IAM data into beanie User records.
 
 Wraps the SyncUserIAM / SyncAllUsersIAM / ReapOffboardedUsers operations.
-The hand-written v1 client at `cheeto/iam.py` keeps working in parallel; this
-namespace is the new async/beanie path.
 """
 
 from argparse import Namespace

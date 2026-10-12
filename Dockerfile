@@ -37,7 +37,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         libldap-dev \
         libsasl2-dev \
-        libkrb5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install "poetry==${POETRY_VERSION}"
@@ -66,8 +65,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         libldap-2.5-0 \
         libsasl2-2 \
-        libkrb5-3 \
-        libgssapi-krb5-2 \
         libgomp1 \
         munge \
         git \

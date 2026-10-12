@@ -10,10 +10,7 @@ This module exists to:
     populated `UCDIAMInfo` so the operation layer can stay focused on
     state-machine logic.
 
-Auth is via the `key=` query parameter (matches the v1 client and how the IAM
-API is actually wired today).
-
-The v1 hand-written client at `cheeto/iam.py` is intentionally not modified.
+Auth is via the `key=` query parameter (how the IAM API is wired today).
 """
 
 from __future__ import annotations

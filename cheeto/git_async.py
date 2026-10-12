@@ -7,8 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 12.06.2026
 
-"""Async-friendly git wrapper (the v2 counterpart of cheeto/git.py, which
-lingers for the v1 stack until cutover).
+"""Async-friendly git wrapper.
 
 Builders return BAKED `sh` commands; execution is the caller's job (see
 .claude/rules/sh.md). The base command bakes `_async=True` (the

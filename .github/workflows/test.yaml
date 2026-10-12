@@ -36,7 +36,7 @@ jobs:
           curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
           echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
           sudo apt update
-          sudo apt install -y libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev gnupg curl mongodb-org
+          sudo apt install -y libldap-dev libsasl2-dev mongodb-org
 
       - uses: actions/setup-python@v5
         with:
@@ -61,10 +61,10 @@ jobs:
           path: .venv
           key: pydeps-${{ matrix.python }}-${{ hashFiles('**/poetry.lock') }}
 
-      - run: poetry install --no-interaction --no-root -E legacy
+      - run: poetry install --no-interaction --no-root
         if: steps.cache-deps.outputs.cache-hit != 'true'
 
-      - run: poetry install --no-interaction -E legacy
+      - run: poetry install --no-interaction
 
       - run: poetry run pytest cheeto/tests -q
         env:
@@ -92,7 +92,7 @@ jobs:
           curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | sudo gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
           echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/8.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-8.0.list
           sudo apt update
-          sudo apt install -y libldap-2.5-0 libldap-dev libsasl2-dev libkrb5-dev gnupg curl mongodb-org
+          sudo apt install -y libldap-dev libsasl2-dev mongodb-org
 
       - uses: actions/setup-python@v5
         with:

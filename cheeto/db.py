@@ -3,9 +3,7 @@
 # (c) The Regents of the University of California, Davis
 # License: Modified BSD
 #
-# The v2 (beanie/async) MongoDB connection. Kept mongoengine-free so the whole
-# v2 path can run without the optional `legacy` extra installed. The v1
-# mongoengine connection lives in cheeto/legacy/database/base.py.
+# The beanie/async MongoDB connection.
 
 from .config import MongoConfig
 from .log import Console

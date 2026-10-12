@@ -1053,8 +1053,7 @@ class RehomeUser(Operation):
 
 class CreateAutomountMap(Operation):
     """Create an AutomountMap — an autofs table (e.g. 'home', 'group') that
-    Storages attach to as their automount mechanism. Mirrors the record
-    MigrateAutomountMaps builds from v1."""
+    Storages attach to as their automount mechanism."""
 
     op_name = 'create_automount_map'
 
@@ -1249,7 +1248,7 @@ class SetVolumeStorageMounts(Operation):
     # Bulk: a home subtree can be thousands of storages, which would exceed the
     # server's transactionLifetimeLimitSeconds in one transaction. Run in a
     # bare session (per-storage saves commit individually); the op is
-    # idempotent. Same rationale as _BulkMigrateOperation.
+    # idempotent.
     transactional = False
 
     def __init__(

@@ -66,9 +66,8 @@ def test_ng_leaves_follow_grammar():
     violations = []
     for p in leaves:
         path = _path_tokens(p)
-        if not path or path[0] == 'migrate':
-            # bare `ng`, and the one-shot v1->v2 migration tree, are exempt.
-            continue
+        if not path:
+            continue   # bare `ng`
         if path in EXCEPTIONS:
             continue
         # category [sub...] verb [object]: token after the category must be

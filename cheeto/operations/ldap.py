@@ -679,8 +679,8 @@ class ClearLDAPTree(Operation):
     """Delete every LDAP entry under a base (default: configured
     searchbase), excluding any subtree listed in `exclude_bases`.
 
-    The LDAP-side analogue of `cheeto ng migrate --drop`: wipe the
-    directory so a subsequent `bootstrap` + `sync-site` starts clean.
+    Wipes the directory so a subsequent `bootstrap` + `sync-site` starts
+    clean.
     The Services OU is excluded by default since cheeto doesn't manage
     it.
 

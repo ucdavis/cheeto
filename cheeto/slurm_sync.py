@@ -14,8 +14,8 @@ Slurm accounting state (assembled from beanie in
 - `AsyncSAcctMgr` — an asyncio-friendly `sacctmgr` wrapper that reads state
   and dispatches commands via `sh`'s `_async=True`.
 
-This module imports nothing from the v1 `cheeto.slurm` module or
-`cheeto.puppet`; the only shared dependency is `size_to_megs`.
+This module imports nothing from `cheeto.puppet`; the only shared
+dependency is `size_to_megs`.
 """
 
 from __future__ import annotations

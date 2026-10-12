@@ -24,7 +24,7 @@ covered by propagation hooks on those documents that set
 Transaction safety: the propagation write runs OUTSIDE any session. If it
 executed while an Operation's transaction holds an uncommitted write to
 the same parent document (e.g. SetUserStatus saves the USI and then the
-user; MigrateUser folds access and then inserts USIs), the two writes
+user), the two writes
 deadlock until mongod aborts the transaction at transactionLifetimeLimit.
 So inside an Operation the touches are DEFERRED: `Operation._run` opens a
 deferral scope (contextvar, task-local) and the hooks queue their writes,
