@@ -7,6 +7,7 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.06.2026
 
+import importlib
 import os
 import ssl
 from functools import lru_cache
@@ -139,4 +140,8 @@ if os.environ.get('CHEETO_CONFIG'):
     except Exception:
         pass
 
-from . import tasks  # noqa: E402, F401  — register tasks on `app` at import
+# Register the @app.task functions on `app`. tasks.py imports `app` back from
+# here, hence bottom-of-module. importlib (always eager) rather than
+# `from . import tasks`, which PEP 810 lazy imports would defer since `tasks`
+# is never referenced. See cheeto/__init__.py.
+importlib.import_module('.tasks', __package__)

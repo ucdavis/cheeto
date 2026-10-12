@@ -1,5 +1,13 @@
-from .base import BaseDocument, Expirable
-from .ldap_sync import LDAPInfo, LDAPSyncable
+# PEP 810 (Python 3.15+): keep this package's imports eager. The
+# model_rebuild() calls below resolve string forward refs (Link['StatusGroup']
+# ...) against a *copy* of this namespace, and a dict copy carries unresolved
+# lazy proxies through untouched. Honored by the filter in cheeto/__init__.py.
+# This package only runs when a model is needed, and then every model is
+# needed (init_beanie(ALL_MODELS)), so nothing is lost.
+__eager_imports__ = True
+
+from .base import BaseDocument, Expirable  # noqa: E402
+from .ldap_sync import LDAPInfo, LDAPSyncable  # noqa: E402
 from .storage_defaults import (
     NFSExportConfig,
     StorageDefaults,

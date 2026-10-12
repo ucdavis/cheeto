@@ -1,3 +1,4 @@
+import importlib
 import os
 from argparse import Namespace
 
@@ -51,5 +52,10 @@ async def resolve_author(args: Namespace):
     args.author = await User.find_one(User.name == username)
 
 
-# Import submodules after registration to avoid circular re-registration
-from . import site, user, user_site, group, group_site, slurm, storage, history, migrate, hippo, iam, ldap  # noqa: E402, F401
+# Import the leaf-command submodules after `ng` is registered (they import
+# `ng_cmd`/`parent` back). Via importlib (always eager): their only effect here
+# is the @commands.register calls at import, which PEP 810 lazy imports would
+# defer since nothing references these names. See cheeto/__init__.py.
+for _name in ('site', 'user', 'user_site', 'group', 'group_site', 'slurm',
+              'storage', 'history', 'migrate', 'hippo', 'iam', 'ldap'):
+    importlib.import_module(f'.{_name}', __name__)

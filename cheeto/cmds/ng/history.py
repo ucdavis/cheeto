@@ -99,9 +99,22 @@ async def history_cmd(args: Namespace):
     console.print(table)
 
 
+class _OpNames:
+    """Lazy `choices` container: argparse calls __contains__ to validate and
+    __iter__ to render help, so the op registry (every operations module) is
+    only loaded when `--op` is used or this help is shown, not at
+    `cheeto --help`."""
+
+    def __contains__(self, item) -> bool:
+        return item in operation_names()
+
+    def __iter__(self):
+        return iter(operation_names())
+
+
 @history_cmd.args()
 def _(parser: ArgParser):
-    parser.add_argument('--op', default=None, choices=sorted(operation_names()),
+    parser.add_argument('--op', default=None, choices=_OpNames(),
                         help='Filter by operation name (e.g., create_user)')
     parser.add_argument('--since', default=None,
                         help='Only entries at/after this date or datetime '

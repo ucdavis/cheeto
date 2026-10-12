@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -30,19 +31,33 @@ UNSET: Final = _UnsetType()
 
 
 # Registry of concrete Operation subclasses keyed by op_name, populated
-# automatically via Operation.__init_subclass__. Lets callers discover/look up
-# ops by name (e.g. the `cheeto ng history --op` choices). Fully populated once
-# `cheeto.operations` is imported — its __init__ imports every op module.
+# automatically via Operation.__init_subclass__ as each op module executes.
+# Lets callers discover/look up ops by name (e.g. the `cheeto ng history --op`
+# choices). The package __init__ imports every op module, but under PEP 810
+# lazy imports (Python 3.15+) those from-imports are deferred until a name is
+# touched, so the registry is complete only after operation_names() or
+# get_operation() has run (or after every op module was imported).
 OPERATIONS: dict[str, type['Operation']] = {}
+
+
+def _load_all_ops() -> None:
+    """Make sure every op module has executed: touch each name re-exported by
+    the `cheeto.operations` package. Module attribute access reifies a lazy
+    import proxy; on eager Pythons this is a cheap no-op."""
+    pkg = sys.modules[__package__]
+    for name in list(vars(pkg)):
+        getattr(pkg, name)
 
 
 def operation_names() -> list[str]:
     """Sorted op_names of every registered Operation subclass."""
+    _load_all_ops()
     return sorted(OPERATIONS)
 
 
 def get_operation(op_name: str) -> type['Operation'] | None:
     """The Operation subclass registered under `op_name`, or None."""
+    _load_all_ops()
     return OPERATIONS.get(op_name)
 
 
