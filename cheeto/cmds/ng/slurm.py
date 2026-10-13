@@ -8,8 +8,7 @@ from rich.table import Table
 
 from . import parent
 from .. import commands
-from ...args import regex_argtype
-from ...constants import QOS_TRES_REGEX, SLURM_QOS_VALID_FLAGS
+from ...constants import SLURM_QOS_VALID_FLAGS
 from ...log import Console
 from ...models.group import Group
 from ...models.site import Site
@@ -42,7 +41,8 @@ from ...queries.slurm import (
     total_tres,
 )
 from ...operations.base import UNSET
-from ...types import parse_qos_tres
+from ...tres import (count_argtype, mem_argtype, normalize_count,
+                     normalize_mem, tres_argtype)
 from ...yaml import print_yaml
 from ._args import (EXPIRABLE_CLEAR, expirable_args, group_args, site_args,
                     yaml_args)
@@ -51,11 +51,20 @@ from ._slurm_show import _tres_compact
 
 _QOS_ALLOC_FIELDS = ('group_limits', 'user_limits', 'job_limits')
 
+# Shared help text for every flag parsed by `tres_argtype`.
+_TRES_HELP = (
+    'key=value tokens separated by spaces or commas. cpus and mem are '
+    'required; gpus defaults to 0. Keys: cpus|cpu, gpus|gpu|gres/gpu, '
+    'mem|memory. mem needs a unit (M, G, T, P); mem=0 is allowed. '
+    'Unlimited: -1, inf or unlimited.'
+)
 
-def _tres_from_string(s: str | None) -> SlurmTRES | None:
-    if s is None:
+
+def _tres_or_none(parsed: dict | None) -> SlurmTRES | None:
+    """`tres_argtype` output (or an absent flag) -> SlurmTRES."""
+    if parsed is None:
         return None
-    return SlurmTRES(**parse_qos_tres(s))
+    return SlurmTRES(**parsed)
 
 
 def _expirable_kwarg(value):
@@ -112,8 +121,8 @@ def _(parser: ArgParser):
 async def slurm_qos_new(args: Namespace):
     console = Console()
 
-    def _alloc(tres_str: str | None) -> list[SlurmAllocation]:
-        tres = _tres_from_string(tres_str)
+    def _alloc(parsed: dict | None) -> list[SlurmAllocation]:
+        tres = _tres_or_none(parsed)
         if tres is None:
             return []
         return [SlurmAllocation(tres=tres, comment=args.comment)]
@@ -127,6 +136,10 @@ async def slurm_qos_new(args: Namespace):
         priority=args.priority, flags=args.flags,
     )
     console.print(f'Created QOS [green]{qos.name}[/] on site {args.site}')
+    for field in _QOS_ALLOC_FIELDS:
+        parsed = getattr(args, field)
+        if parsed is not None:
+            console.print(f'  {field}: {_tres_compact(SlurmTRES(**parsed))}')
 
 
 @slurm_qos_new.args()
@@ -134,15 +147,13 @@ def _(parser: ArgParser):
     parser.add_argument('--name', '-n', required=True)
     parser.add_argument('--priority', type=int, default=0)
     parser.add_argument('--flags', nargs='+', default=None)
-    parser.add_argument('--group-limits', default=None,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='Initial group-limits TRES (e.g. "cpus=128 mem=1T")')
-    parser.add_argument('--user-limits', default=None,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='Initial user-limits TRES')
-    parser.add_argument('--job-limits', default=None,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='Initial job-limits TRES')
+    parser.add_argument('--group-limits', default=None, type=tres_argtype,
+                        help='Initial group-limits TRES, for example '
+                             '"cpus=128 mem=1T gpus=8": ' + _TRES_HELP)
+    parser.add_argument('--user-limits', default=None, type=tres_argtype,
+                        help='Initial user-limits TRES (same format)')
+    parser.add_argument('--job-limits', default=None, type=tres_argtype,
+                        help='Initial job-limits TRES (same format)')
     parser.add_argument('--comment', default='initial allocation',
                         help='Comment recorded on each initial allocation')
 
@@ -178,7 +189,7 @@ def _(parser: ArgParser):
                    help='Add an allocation to an existing QOS')
 async def slurm_allocation_add(args: Namespace):
     console = Console()
-    tres = _tres_from_string(args.tres)
+    tres = _tres_or_none(args.tres)
     alloc = await AddQOSAllocation.run(
         args.db, args.author,
         qos_name=args.qos, site_name=args.site,
@@ -188,7 +199,7 @@ async def slurm_allocation_add(args: Namespace):
     )
     console.print(
         f'Added allocation [green]{alloc.id}[/] to '
-        f'{args.qos}.{args.field}'
+        f'{args.qos}.{args.field}: {_tres_compact(alloc.tres)}'
     )
 
 
@@ -199,9 +210,9 @@ def _(parser: ArgParser):
     parser.add_argument('--field', required=True,
                         choices=list(_QOS_ALLOC_FIELDS),
                         help='Which QOS limits list to append to')
-    parser.add_argument('--tres', required=True,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='TRES string (e.g. "cpus=128 gpus=8 mem=1T")')
+    parser.add_argument('--tres', required=True, type=tres_argtype,
+                        help='TRES, for example "cpus=128 gpus=8 mem=1T": '
+                             + _TRES_HELP)
     parser.add_argument('--comment', default='',
                         help='Descriptive comment')
 
@@ -211,23 +222,41 @@ def _(parser: ArgParser):
                    help='Edit an existing allocation by id')
 async def slurm_allocation_edit(args: Namespace):
     console = Console()
-    tres = _tres_from_string(args.tres)
+    per_field = (args.cpus, args.gpus, args.mem)
+    if args.tres is not None and any(v is not None for v in per_field):
+        console.print('[red]--tres replaces the whole TRES; do not combine '
+                      'it with --cpus/--gpus/--mem[/]')
+        return 1
     alloc = await EditSlurmAllocation.run(
         args.db, args.author,
-        allocation_id=args.id, tres=tres, comment=args.comment,
+        allocation_id=args.id,
+        tres=_tres_or_none(args.tres),
+        cpus=UNSET if args.cpus is None else normalize_count(args.cpus, 'cpus'),
+        gpus=UNSET if args.gpus is None else normalize_count(args.gpus, 'gpus'),
+        mem=UNSET if args.mem is None else normalize_mem(args.mem),
+        comment=args.comment,
         expires_at=_expirable_kwarg(args.expires_at),
         provisioned_at=_expirable_kwarg(args.provisioned_at),
     )
-    console.print(f'Updated allocation [green]{alloc.id}[/]')
+    console.print(
+        f'Updated allocation [green]{alloc.id}[/]: {_tres_compact(alloc.tres)}'
+    )
 
 
 @slurm_allocation_edit.args()
 def _(parser: ArgParser):
     parser.add_argument('--id', required=True,
                         help='ObjectId of the allocation to edit')
-    parser.add_argument('--tres', default=None,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='New TRES string (replaces existing)')
+    parser.add_argument('--tres', default=None, type=tres_argtype,
+                        help='New TRES. Replaces the whole TRES, so an omitted '
+                             'gpus becomes 0; use --cpus/--gpus/--mem to change '
+                             'one field. Format: ' + _TRES_HELP)
+    parser.add_argument('--cpus', default=None, type=count_argtype('cpus'),
+                        help='New cpus limit only (whole number, or inf)')
+    parser.add_argument('--gpus', default=None, type=count_argtype('gpus'),
+                        help='New gpus limit only (whole number, or inf)')
+    parser.add_argument('--mem', default=None, type=mem_argtype,
+                        help='New mem limit only (size with unit, 0, or inf)')
     parser.add_argument('--comment', default=None,
                         help='New comment (replaces existing)')
 
@@ -355,7 +384,7 @@ def _render_qos_panel(data: dict) -> Panel:
         for a in allocs:
             sub.add_row(
                 a['id'], _fmt(a['tres']['cpus']), _fmt(a['tres']['gpus']),
-                str(a['tres']['mem'] or ''), a['comment'],
+                _fmt(a['tres']['mem']), a['comment'],
             )
         table.add_row(limit_key, sub)
 
@@ -525,17 +554,9 @@ async def slurm_association_show(args: Namespace):
     table.add_column('group total tres', style='bold')
     for a in assocs:
         d = _assoc_dict(a)
-        tt = d['group_total_tres']
-        parts = []
-        if tt['cpus'] != -1:
-            parts.append(f'{tt["cpus"]}c')
-        if tt['gpus'] != -1:
-            parts.append(f'{tt["gpus"]}g')
-        if tt['mem'] is not None:
-            parts.append(str(tt['mem']))
         table.add_row(
             d['group'], d['partition'], d['qos'], str(d['qos_priority']),
-            '/'.join(parts) if parts else '∞',
+            _tres_compact(total_tres(a.qos.group_limits)),
         )
     console.print(table)
 
@@ -558,7 +579,18 @@ def _(parser: ArgParser):
                         'QOS (if absent) and an association in one step')
 async def slurm_provision(args: Namespace):
     console = Console()
-    tres = _tres_from_string(args.group_limits)
+    tres = _tres_or_none(args.group_limits)
+    qos_name = args.qos or f'{args.group}-{args.partition}-qos'
+
+    # The operation only applies --group-limits to a QOS it creates. Say so
+    # up front rather than letting the flag vanish silently.
+    site = await Site.find_one(Site.name == args.site)
+    if site is not None and tres is not None:
+        if await qos_at_site(site, qos_name) is not None:
+            console.print(f'[yellow]QOS {qos_name} already exists: '
+                          '--group-limits is ignored; use '
+                          '`ng slurm add allocation` to grant more[/]')
+
     assoc = await ProvisionSlurmAllocation.run(
         args.db, args.author,
         site_name=args.site,
@@ -572,9 +604,21 @@ async def slurm_provision(args: Namespace):
     )
     console.print(
         f'Provisioned allocation: group=[green]{args.group}[/] '
-        f'partition=[green]{args.partition}[/] '
-        f'qos=[green]{args.qos or args.group + "-" + args.partition + "-qos"}[/]'
+        f'partition=[green]{args.partition}[/] qos=[green]{qos_name}[/]'
     )
+
+    # Echo the stored state so applied defaults (and the absence of any
+    # limit) are visible.
+    qos = await qos_at_site(site, qos_name) if site is not None else None
+    if qos is not None:
+        total = total_tres(qos.group_limits)
+        if total.cpus is None and total.gpus is None and total.mem is None:
+            console.print('[yellow]Warning: the QOS group total is unlimited '
+                          '(cpu=-1,mem=-1,gres/gpu=-1). Pass --group-limits, '
+                          'or add an allocation with '
+                          '`ng slurm add allocation`[/]')
+        else:
+            console.print(f'  group total: {_tres_compact(total)}')
 
 
 @slurm_provision.args()
@@ -582,10 +626,9 @@ def _(parser: ArgParser):
     parser.add_argument('--partition', required=True)
     parser.add_argument('--qos', default=None,
                         help='QOS name (default: {group}-{partition}-qos)')
-    parser.add_argument('--group-limits', default=None,
-                        type=regex_argtype(QOS_TRES_REGEX),
-                        help='Group-limits TRES for the new QOS (e.g. '
-                             '"cpus=128 mem=1T")')
+    parser.add_argument('--group-limits', default=None, type=tres_argtype,
+                        help='Group-limits TRES for the new QOS, for example '
+                             '"cpus=128 mem=1T gpus=8": ' + _TRES_HELP)
     parser.add_argument('--comment', default='initial allocation',
                         help='Comment on the initial allocation')
     parser.add_argument('--priority', type=int, default=0,
@@ -806,7 +849,7 @@ async def slurm_allocation_show(args: Namespace):
         a = qa.allocation
         table.add_row(
             str(a.id), qa.qos.name, qa.field,
-            _fmt_tres(a.tres.cpus), _fmt_tres(a.tres.gpus), str(a.tres.mem or ''),
+            _fmt_tres(a.tres.cpus), _fmt_tres(a.tres.gpus), _fmt_tres(a.tres.mem),
             _fmt_dt(a.provisioned_at), _fmt_dt(a.expires_at),
             a.comment,
         )

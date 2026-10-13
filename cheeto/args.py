@@ -10,10 +10,8 @@
 # pyright: reportMissingTypeArgument=true
 
 
-from argparse import (Action,
-                      ArgumentTypeError)
+from argparse import Action
 from enum import Enum
-import re
 
 from . import __version__
 from .templating import PKG_TEMPLATES
@@ -25,21 +23,6 @@ banner = f'''
 \b
 {splash}
 '''
-
-def regex_argtype(pattern: re.Pattern[str] | str):
-    _pattern = pattern
-    def inner(value: str | None):
-        if value is None:
-            return value
-        if not isinstance(_pattern, re.Pattern):
-            pattern = re.compile(_pattern)
-        else:
-            pattern = _pattern
-        if not pattern.match(value):
-            raise ArgumentTypeError(f'Invalid value, should match: {pattern.pattern}')
-        return value
-    return inner
-
 
 class EnumAction(Action):
     """

@@ -63,4 +63,8 @@ per-user / per-job. `DenyOnLimit` is our default flag (reject at submit instead 
   sync logic should follow that read → reconcile → emit-commands shape rather than mutating
   Slurm imperatively.
 - QOS names are derived, not free-form: `get_qos_name(account, partition)`.
+- CLI TRES strings are parsed by `cheeto/tres.py` (`parse_tres`, `tres_argtype`), not by
+  a regex. `cpus` and `mem` are required, `gpus` defaults to 0, and unlimited is explicit
+  (`-1`/`inf`/`unlimited`). `SlurmTRES.mem` is canonicalized by `normalize_mem` from the
+  same module, so the CLI and the model agree on what a size string is.
 - Don't hand-edit generated clients; this is all first-party code.

@@ -7,7 +7,8 @@ from beanie import Link
 from pymongo import IndexModel
 from pydantic import BaseModel, Field, field_validator
 
-from ..constants import DATA_QUOTA_REGEX, SLURM_QOS_VALID_FLAGS
+from ..constants import SLURM_QOS_VALID_FLAGS
+from ..tres import is_unlimited, normalize_mem
 from ..utils import size_to_megs
 from .base import BaseDocument, Expirable
 from .site import Site
@@ -20,21 +21,25 @@ if TYPE_CHECKING:
 class SlurmTRES(BaseModel):
     """Trackable resources for a Slurm allocation.
 
-    `cpus` and `gpus` use None to mean 'unlimited' (translated to -1 when
-    emitted to slurm/sacctmgr). The validator also accepts -1 on input and
-    normalizes it to None for storage clarity.
+    None means 'unlimited' (translated to -1 when emitted to sacctmgr). The
+    validators accept the explicit unlimited spellings (-1, inf, unlimited)
+    and store None. `mem` is stored in the canonical '<number><UNIT>' form
+    from `cheeto.tres.normalize_mem`, so '16gb' and '16G' are one value.
     """
 
-    cpus: int | None = None
-    gpus: int | None = None
-    mem: Annotated[str | None, Field(default=None, pattern=DATA_QUOTA_REGEX)]
+    cpus: Annotated[int, Field(ge=0)] | None = None
+    gpus: Annotated[int, Field(ge=0)] | None = None
+    mem: str | None = None
 
     @field_validator('cpus', 'gpus', mode='before')
     @classmethod
     def _normalize_unlimited(cls, v):
-        if v == -1 or v == '-1':
-            return None
-        return v
+        return None if is_unlimited(v) else v
+
+    @field_validator('mem', mode='before')
+    @classmethod
+    def _normalize_mem(cls, v):
+        return normalize_mem(v)
 
     @property
     def slurm_cpus(self) -> int:
