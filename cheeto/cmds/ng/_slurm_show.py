@@ -19,15 +19,16 @@ from ...queries.slurm import (
 
 
 def _tres_compact(tres: SlurmTRES) -> str:
-    """Compact display: '128c/8g/1T', omits fields at their unlimited default."""
-    parts: list[str] = []
-    if tres.cpus is not None:
-        parts.append(f'{tres.cpus}c')
-    if tres.gpus is not None:
-        parts.append(f'{tres.gpus}g')
-    if tres.mem is not None:
-        parts.append(str(tres.mem))
-    return '/'.join(parts) if parts else '\u221e'   # ∞
+    """Compact display: '128c/8g/1T'. An unlimited field shows as ∞
+    ('128c/∞g/1T'); a fully unlimited TRES is a bare ∞. Unlimited is rare
+    and deliberate now that the CLI defaults gpus to 0, so it stays visible."""
+    if tres.cpus is None and tres.gpus is None and tres.mem is None:
+        return '\u221e'   # ∞
+
+    def _fmt(value, suffix: str = '') -> str:
+        return '\u221e' if value is None else f'{value}{suffix}'
+
+    return f'{_fmt(tres.cpus, "c")}/{_fmt(tres.gpus, "g")}/{_fmt(tres.mem)}'
 
 
 def _account_dict(account: SlurmAccount) -> dict:

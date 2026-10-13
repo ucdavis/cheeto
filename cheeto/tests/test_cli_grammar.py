@@ -79,3 +79,40 @@ def test_ng_leaves_follow_grammar():
         'ng commands violating the category-verb-object grammar '
         f'(add a verb path or a documented EXCEPTION): {sorted(violations)}'
     )
+
+
+# Object tokens under `ng slurm` that must carry a short alias on every
+# verb they appear under, so `slurm show part` works wherever
+# `slurm show partition` does.
+SLURM_OBJECT_ALIASES = {
+    'allocation': 'alloc',
+    'association': 'assoc',
+    'partition': 'part',
+}
+
+
+def test_ng_slurm_objects_have_matching_aliases():
+    import cheeto.cmds.ng  # noqa: F401 — registers the full ng command tree
+    from cheeto.cmds import commands
+
+    missing = []
+    for parser in commands.gather_subtree('ng'):
+        path = _path_tokens(parser)
+        if not path or path[0] != 'slurm':
+            continue
+        for action in parser._actions:
+            if not isinstance(action, argparse._SubParsersAction):
+                continue
+            # argparse maps every name and alias to the same subparser
+            # object, so group the names by that object.
+            names_by_parser: dict[int, set[str]] = {}
+            for name, sub in action.choices.items():
+                names_by_parser.setdefault(id(sub), set()).add(name)
+            for names in names_by_parser.values():
+                for obj, alias in SLURM_OBJECT_ALIASES.items():
+                    if obj in names and alias not in names:
+                        missing.append(f'{" ".join(path)} {obj} (needs {alias})')
+
+    assert not missing, (
+        f'ng slurm commands missing their object alias: {sorted(missing)}'
+    )

@@ -35,24 +35,10 @@ from .constants import (UINT_MAX,
                         USER_TYPES, 
                         USER_STATUSES, 
                         ACCESS_TYPES, 
-                        QOS_TRES_REGEX,
                         SHELLS)
 
 def is_listlike(obj):
     return isinstance(obj, (Sequence, set)) and not isinstance(obj, (str, bytes, bytearray))
-
-
-def parse_qos_tres(tres: str | None):
-    if tres is None:
-        return {'cpus': None, 'gpus': None, 'mem': None}
-    parsed = re.match(QOS_TRES_REGEX, tres)
-    if parsed is None:
-        raise ValueError(f'Invalid TRES specification: {tres}')
-    parsed = parsed.groupdict()
-    for key in parsed.keys():
-        if parsed[key] == 'inf':
-            parsed[key] = -1
-    return parsed
 
 
 class _BaseModel:

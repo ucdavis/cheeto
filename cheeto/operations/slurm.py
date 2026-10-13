@@ -293,6 +293,10 @@ class AddQOSAllocation(Operation):
 
 
 class EditSlurmAllocation(Operation):
+    """Edit one allocation. `tres` replaces the whole TRES; `cpus`/`gpus`/`mem`
+    change single fields and leave the others as stored. The two forms are
+    mutually exclusive."""
+
     op_name = 'edit_slurm_allocation'
 
     def __init__(
@@ -302,6 +306,9 @@ class EditSlurmAllocation(Operation):
         *,
         allocation_id: str,
         tres: SlurmTRES | None = None,
+        cpus: int | None | Any = UNSET,
+        gpus: int | None | Any = UNSET,
+        mem: str | None | Any = UNSET,
         comment: str | None = None,
         expires_at: datetime | None | Any = UNSET,
         provisioned_at: datetime | None | Any = UNSET,
@@ -309,6 +316,16 @@ class EditSlurmAllocation(Operation):
         super().__init__(client, author)
         self.allocation_id = allocation_id
         self.tres = tres
+        self.tres_updates = {
+            key: value
+            for key, value in (('cpus', cpus), ('gpus', gpus), ('mem', mem))
+            if value is not UNSET
+        }
+        if tres is not None and self.tres_updates:
+            raise ValueError(
+                'tres replaces the whole TRES; it cannot be combined with '
+                f'{", ".join(self.tres_updates)}'
+            )
         self.comment = comment
         self.expires_at = expires_at
         self.provisioned_at = provisioned_at
@@ -320,6 +337,9 @@ class EditSlurmAllocation(Operation):
 
         if self.tres is not None:
             alloc.tres = self.tres
+        elif self.tres_updates:
+            # Rebuild rather than model_copy(update=): the copy skips validation.
+            alloc.tres = SlurmTRES(**{**alloc.tres.model_dump(), **self.tres_updates})
         if self.comment is not None:
             alloc.comment = self.comment
         if self.expires_at is not UNSET:
@@ -335,6 +355,8 @@ class EditSlurmAllocation(Operation):
         data: dict[str, Any] = {'allocation_id': self.allocation_id}
         if self.tres is not None:
             data['tres'] = self.tres.model_dump()
+        elif self.tres_updates:
+            data['tres'] = dict(self.tres_updates)
         if self.comment is not None:
             data['comment'] = self.comment
         if self.expires_at is not UNSET:

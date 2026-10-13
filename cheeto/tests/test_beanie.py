@@ -804,6 +804,54 @@ class TestSlurmModels:
         # 1T = 1024*1024 MB = 1048576
         assert t.to_slurm() == 'cpu=128,mem=1048576,gres/gpu=8'
 
+    async def test_slurm_tres_mem_is_canonicalized(self):
+        # The mem validator shares cheeto.tres.normalize_mem with the CLI.
+        assert SlurmTRES(mem='16gb').mem == '16G'
+        assert SlurmTRES(mem='16GiB').mem == '16G'
+        assert SlurmTRES(mem='1.0T').mem == '1T'
+        # Previously '16GB' passed the unanchored pattern and crashed later
+        # in size_to_megs; now it renders.
+        assert SlurmTRES(mem='16GB').to_slurm() == 'cpu=-1,mem=16384,gres/gpu=-1'
+        # Stored forms are untouched on load.
+        for stored in ('512000M', '1620G', '2.9296875T'):
+            assert SlurmTRES(mem=stored).mem == stored
+
+    async def test_slurm_tres_mem_unlimited_and_zero(self):
+        assert SlurmTRES(mem=-1).mem is None
+        assert SlurmTRES(mem='-1').mem is None
+        assert SlurmTRES(mem='inf').mem is None
+        assert SlurmTRES(mem='unlimited').mem is None
+        # issue #92: a bare 0 is a real zero limit, not unlimited.
+        t = SlurmTRES(mem='0')
+        assert t.mem == '0M'
+        assert t.to_slurm() == 'cpu=-1,mem=0,gres/gpu=-1'
+
+    async def test_slurm_tres_rejects_bad_values(self):
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match='unit'):
+            SlurmTRES(mem='16')
+        with pytest.raises(ValidationError):
+            SlurmTRES(mem='1K')
+        with pytest.raises(ValidationError):
+            SlurmTRES(cpus=-5)
+        with pytest.raises(ValidationError):
+            SlurmTRES(gpus='abc')
+
+    async def test_slurm_tres_count_unlimited_spellings(self):
+        t = SlurmTRES(cpus='inf', gpus='unlimited')
+        assert t.cpus is None
+        assert t.gpus is None
+        assert SlurmTRES(cpus='8').cpus == 8
+
+    async def test_slurm_tres_from_parse_tres(self):
+        from cheeto.tres import parse_tres
+        # issue #91: the singular `gpu=` spelling must reach slurm.
+        t = SlurmTRES(**parse_tres('cpus=256,mem=768G,gpu=8'))
+        assert t.to_slurm() == 'cpu=256,mem=786432,gres/gpu=8'
+        # gpus omitted -> 0, not unlimited.
+        t = SlurmTRES(**parse_tres('cpus=256 mem=768G'))
+        assert t.to_slurm() == 'cpu=256,mem=786432,gres/gpu=0'
+
     async def test_slurm_allocation(self):
         a = SlurmAllocation(
             tres=SlurmTRES(cpus=8), comment='test',
@@ -813,6 +861,27 @@ class TestSlurmModels:
         # SlurmAllocation is now a Document — it has BaseDocument timestamps
         assert a.created_at is not None
         assert a.updated_at is not None
+
+    async def test_slurm_allocation_mem_normalized_on_load(self, beanie_client):
+        # Beanie runs the SlurmTRES validators on every load, so a document
+        # written by an older cheeto (or by hand) is canonicalized on read.
+        from bson import ObjectId
+        collection = SlurmAllocation.get_pymongo_collection()
+        ids = {}
+        for stored in ('1620G', '10g', '16GB', None):
+            oid = ObjectId()
+            await collection.insert_one({
+                '_id': oid,
+                'tres': {'cpus': 8, 'gpus': None, 'mem': stored},
+                'comment': 'raw',
+            })
+            ids[stored] = oid
+        for stored, expected in (('1620G', '1620G'), ('10g', '10G'),
+                                 ('16GB', '16G'), (None, None)):
+            fetched = await SlurmAllocation.get(ids[stored])
+            assert fetched is not None
+            assert fetched.tres.mem == expected
+            assert fetched.tres.gpus is None
 
     async def test_storage_allocation_validation(self):
         a = StorageAllocation(quota='100G', comment='ok')
@@ -2369,6 +2438,50 @@ class TestSlurmOps:
         assert updated.comment == 'doubled'
         # created_at is preserved, updated_at is bumped
         assert updated.updated_at >= updated.created_at
+
+    async def test_edit_slurm_allocation_partial_fields(self, beanie_client, site):
+        from cheeto.models.history import History
+        await CreateSlurmQOS.run(
+            beanie_client, None,
+            name='qpartial', site_name='slurmsite',
+        )
+        alloc = await AddQOSAllocation.run(
+            beanie_client, None,
+            qos_name='qpartial', site_name='slurmsite',
+            field='group_limits',
+            tres=SlurmTRES(cpus=256, gpus=8, mem='768G'),
+        )
+        # One field changes; the other two stay as stored.
+        updated = await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id), cpus=128,
+        )
+        assert (updated.tres.cpus, updated.tres.gpus, updated.tres.mem) == (128, 8, '768G')
+        # Unlimited and zero are both legal per-field values, and mem is
+        # canonicalized through the model validator.
+        updated = await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id), gpus=None, mem='1tb',
+        )
+        assert (updated.tres.cpus, updated.tres.gpus, updated.tres.mem) == (128, None, '1T')
+        updated = await EditSlurmAllocation.run(
+            beanie_client, None,
+            allocation_id=str(alloc.id), mem='0',
+        )
+        assert updated.tres.mem == '0M'
+        # History records only the changed fields.
+        last = await History.find(
+            History.op == 'edit_slurm_allocation',
+        ).sort('-timestamp').first_or_none()
+        assert last is not None
+        assert last.changes['tres'] == {'mem': '0'}
+        # The two forms are mutually exclusive.
+        with pytest.raises(ValueError, match='cannot be combined'):
+            await EditSlurmAllocation.run(
+                beanie_client, None,
+                allocation_id=str(alloc.id),
+                tres=SlurmTRES(cpus=1, mem='1G'), gpus=2,
+            )
 
     async def test_edit_slurm_allocation_expirable(self, beanie_client, site):
         from datetime import datetime, timedelta, timezone
