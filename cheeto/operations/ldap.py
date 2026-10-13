@@ -227,6 +227,12 @@ class SyncUserToLDAP(Operation):
     users phase, so the same incremental run creates it. A missing special
     group does need `BootstrapLDAPSite`, and is warned about.
 
+    An update also adds any of `USER_OBJECT_CLASSES` the entry lacks
+    (entries created by the v1 ldap3 stack have no `shadowAccount`, so
+    projecting an expiry onto them failed with an object class violation
+    until the entry was force-recreated). The classes added are reported
+    in `extra['added_classes']` and count as a change (not `no_op`).
+
     Incremental gate: a user whose `ldap` dirty state is clean for this
     site is skipped before any further queries; `force` or `full` bypasses
     the gate (`force` additionally delete-recreates the entry). On success
@@ -262,6 +268,7 @@ class SyncUserToLDAP(Operation):
         self._added_groups: list[str] = []
         self._removed_groups: list[str] = []
         self._missing_groups: list[str] = []
+        self._added_classes: list[str] = []
 
     async def execute(
         self, session: AsyncClientSession,
@@ -328,6 +335,7 @@ class SyncUserToLDAP(Operation):
             outcome == 'updated'
             and not self._added_groups
             and not self._removed_groups
+            and not self._added_classes
         ):
             outcome = 'no_op'
         self._outcome = outcome
@@ -344,6 +352,7 @@ class SyncUserToLDAP(Operation):
                 'added_groups': list(self._added_groups),
                 'removed_groups': list(self._removed_groups),
                 'missing_groups': list(self._missing_groups),
+                'added_classes': list(self._added_classes),
             },
         )
 
@@ -356,7 +365,7 @@ class SyncUserToLDAP(Operation):
         # Try update first; fall back to add on miss. Saves the existence
         # probe round-trip per user across the driver.
         try:
-            await self.ldap.update_user(record)
+            self._added_classes = list(await self.ldap.update_user(record))
             return 'updated'
         except LDAPNotFound:
             await self.ldap.add_user(record)
@@ -421,6 +430,7 @@ class SyncUserToLDAP(Operation):
             'added_groups': list(self._added_groups),
             'removed_groups': list(self._removed_groups),
             'missing_groups': list(self._missing_groups),
+            'added_classes': list(self._added_classes),
         }
 
 

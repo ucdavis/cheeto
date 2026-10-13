@@ -4441,9 +4441,11 @@ class _FakeLDAPManager:
         self,
         current_memberships: set[str] = frozenset(),
         missing_groups: set[str] = frozenset(),
+        added_classes: list[str] = (),
     ):
         self._current = set(current_memberships)
         self._missing = set(missing_groups)
+        self._added_classes = list(added_classes)
         self.added: list[str] = []
         self.removed: list[str] = []
         self.user_writes: list[str] = []
@@ -4458,9 +4460,11 @@ class _FakeLDAPManager:
     async def delete_user(self, username: str) -> None:
         self.deleted_users.append(username)
 
-    async def update_user(self, record) -> None:
-        # Pretend the user already exists → 'updated' path.
+    async def update_user(self, record) -> list[str]:
+        # Pretend the user already exists → 'updated' path. Reports the
+        # object classes it "added" (seeded via `added_classes`).
         self.user_writes.append(record.username)
+        return list(self._added_classes)
 
     async def add_user(self, record) -> None:
         self.user_writes.append(record.username)
@@ -4561,6 +4565,26 @@ class TestSyncUserToLDAPMembership:
         )
 
         assert result.extra['added_groups'] == ['class-users']
+        assert result.extra['removed_groups'] == []
+
+    async def test_added_object_classes_reported(self, beanie_client):
+        # A v1-era entry gains shadowAccount on update. That is a change
+        # (not no_op) even when memberships already match, and it is
+        # surfaced for the CLI and History.
+        await self._seed_user_on_site()
+        ldap = _FakeLDAPManager(
+            {'labgrp', 'login-ssh-users', 'active-users', 'normal-users'},
+            added_classes=['top', 'shadowAccount'],
+        )
+
+        result = await SyncUserToLDAP.run(
+            beanie_client, None,
+            username='ldapu', sitename='ldapsite', ldap=ldap,
+        )
+
+        assert result.outcome == 'updated'
+        assert result.extra['added_classes'] == ['top', 'shadowAccount']
+        assert result.extra['added_groups'] == []
         assert result.extra['removed_groups'] == []
 
     async def test_type_change_moves_type_group(self, beanie_client):

@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Iterable, TypeVar
 
 import bonsai
-from bonsai import LDAPClient, LDAPEntry, LDAPSearchScope
+from bonsai import LDAPClient, LDAPEntry, LDAPModOp, LDAPSearchScope
 from bonsai.asyncio import AIOConnectionPool
 
 from .config import LDAPConfig
@@ -40,8 +40,11 @@ AUTO_GROUP = 'auto.group'
 AUTO_SHARE = 'auto.share'
 
 
-# Object-class sets cheeto writes for new entries. shadowAccount lets
-# us project User.expires_at as `shadowExpire` (days since epoch).
+# Object-class sets cheeto writes for new entries. `update_user` also adds
+# any user class an existing entry lacks: entries created by the v1 ldap3
+# stack carry only inetOrgPerson/posixAccount/ldapPublicKey (its
+# config-driven `user_classes`). shadowAccount lets us project
+# User.expires_at as `shadowExpire` (days since epoch).
 USER_OBJECT_CLASSES = (
     'top', 'inetOrgPerson', 'posixAccount', 'ldapPublicKey', 'shadowAccount',
 )
@@ -502,15 +505,20 @@ class AsyncLDAPManager:
     async def _modify_attrs(
         self, dn: str, attrs: dict[str, list[Any]], *,
         clear: Iterable[str] = (),
+        ensure_classes: Iterable[str] = (),
         missing_msg: str,
-    ) -> None:
-        """Patch attributes on the existing entry at `dn`: set everything in
+    ) -> list[str]:
+        """Patch the existing entry at `dn` in one modify: add each object
+        class in `ensure_classes` the entry lacks, set everything in
         `attrs`, then delete each attribute in `clear` that is present on
-        the entry. Empty `attrs` + `clear` no-ops. Raises
+        the entry. Returns the object classes it added. Classes are only
+        ever added, never removed, and the comparison is case-insensitive
+        like the server's. Empty inputs no-op. Raises
         `LDAPNotFound(missing_msg)` if the entry is gone."""
         clear = tuple(clear)
-        if not attrs and not clear:
-            return
+        ensure_classes = tuple(ensure_classes)
+        if not attrs and not clear and not ensure_classes:
+            return []
 
         async def _op(conn):
             entry = await _fetch_entry_at_dn(
@@ -518,13 +526,23 @@ class AsyncLDAPManager:
             )
             if entry is None:
                 raise LDAPNotFound(missing_msg)
+            current = {
+                str(v).lower() for v in (entry.get('objectClass') or ())
+            }
+            added = [c for c in ensure_classes if c.lower() not in current]
+            if added:
+                # First in the mod list, so the class precedes any attribute
+                # it permits (shadowExpire needs shadowAccount) in the same
+                # request.
+                entry.change_attribute('objectClass', LDAPModOp.ADD, *added)
             for k, v in attrs.items():
                 entry[k] = v
             for k in clear:
                 if k in entry:
                     del entry[k]
             await entry.modify()
-        await self._pooled_op(_op)
+            return added
+        return await self._pooled_op(_op)
 
     async def _patch_member_set(
         self, dn: str, members_attr: str, *,
@@ -736,18 +754,25 @@ class AsyncLDAPManager:
             self.user_dn(record.username), user_to_entry_attrs(record),
         )
 
-    async def update_user(self, record: LDAPUserRecord) -> None:
+    async def update_user(self, record: LDAPUserRecord) -> list[str]:
         """Patch the user dn to match `record`. Writes everything `add_user`
-        would write minus `objectClass`, and clears the optional attributes
-        the record no longer carries (stale password / SSH keys / surname /
-        expiry). Raises `LDAPNotFound` if absent."""
+        would write, adds any of `USER_OBJECT_CLASSES` the entry lacks
+        (added rather than replaced, so classes other tooling put on the
+        entry survive), and clears the optional attributes the record no
+        longer carries (stale password / SSH keys / expiry). Returns the
+        object classes it added. Raises `LDAPNotFound` if absent."""
         attrs = user_to_entry_attrs(record)
         attrs.pop('objectClass', None)
-        await self._modify_attrs(
-            self.user_dn(record.username), attrs,
+        dn = self.user_dn(record.username)
+        added = await self._modify_attrs(
+            dn, attrs,
             clear=[a for a in _OPTIONAL_USER_ATTRS if a not in attrs],
+            ensure_classes=USER_OBJECT_CLASSES,
             missing_msg=f'No such user: {record.username}',
         )
+        if added:
+            logger.info('%s: added object classes %s', dn, ', '.join(added))
+        return added
 
     async def delete_user(self, username: str) -> None:
         """Idempotent."""

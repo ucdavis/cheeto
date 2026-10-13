@@ -236,6 +236,11 @@ async def ldap_sync_user_cmd(args: Namespace):
                 console.print(f'    [green]+ groups:[/] {", ".join(added)}')
             if removed:
                 console.print(f'    [red]- groups:[/] {", ".join(removed)}')
+            classes = result.extra.get('added_classes') or []
+            if classes:
+                console.print(
+                    f'    [green]+ objectClass:[/] {", ".join(classes)}'
+                )
     if failed:
         console.print(
             f'[red]{len(failed)}/{len(args.user)} failed:[/] '
