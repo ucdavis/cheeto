@@ -887,6 +887,7 @@ async def slurm_sync(args: Namespace):
     sacctmgr = None
     offline = bool(
         args.from_qos_dump or args.from_assoc_dump or args.from_user_dump
+        or args.from_coord_dump
     )
     if offline:
         if args.apply:
@@ -897,6 +898,7 @@ async def slurm_sync(args: Namespace):
             return 1
         sacctmgr = DumpSAcctMgr.from_files(
             args.from_qos_dump, args.from_assoc_dump, args.from_user_dump,
+            coordinators_path=args.from_coord_dump,
         )
 
     try:
@@ -969,6 +971,11 @@ def _(parser: ArgParser):
                         help='Read current user default accounts from a saved '
                              '`sacctmgr show -P user format=User,DefaultAccount` '
                              'dump instead of the controller (offline preview)')
+    parser.add_argument('--from-coord-dump', type=Path, default=None,
+                        help='Read current account coordinators from a saved '
+                             '`sacctmgr show -P account withcoord '
+                             'format=Account,Coordinators` dump instead of '
+                             'the controller (offline preview)')
 
 
 # ---------------------------------------------------------------------------

@@ -8,7 +8,8 @@ Slurm accounting state (assembled from beanie in
 - Normalized, equality-comparable value types (`TRESLimit`, `QOSState`,
   `AccountState`, `SlurmSyncState`) that are the diff currency for both the
   desired side and the current (parsed-from-`sacctmgr`) side.
-- Parsers for `sacctmgr show -P qos` / `show -P associations` output.
+- Parsers for `sacctmgr show -P qos` / `show -P associations` /
+  `show -P account withcoord` output.
 - `reconcile()` — a native diff that emits ordered `sacctmgr` command
   batches (the dependency-safe ordering proven by the v1 implementation).
 - `AsyncSAcctMgr` — an asyncio-friendly `sacctmgr` wrapper that reads state
@@ -129,6 +130,9 @@ class AccountState:
 # An association is keyed by (user, account, partition) -> qos name.
 AssocKey = tuple[str, str, str]
 
+# A coordinator seat is keyed by (account, user).
+CoordKey = tuple[str, str]
+
 
 @dataclass
 class SlurmSyncState:
@@ -140,6 +144,13 @@ class SlurmSyncState:
     # Per-user default account (sacctmgr's user-level DefaultAccount), keyed
     # by username. Empty when the site has no configured default account.
     default_accounts: dict[str, str] = field(default_factory=dict)
+    # Account coordinator seats as (account, user) pairs.
+    coordinators: set[CoordKey] = field(default_factory=set)
+    # Coordinators of the protected root account. Coordinator rights are
+    # inherited down the account tree, so sacctmgr reports these on every
+    # account. They are managed outside cheeto; `reconcile` masks them from
+    # the diff so they're never added or removed here.
+    root_coordinators: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +228,29 @@ def parse_user_default_accounts(text: str) -> dict[str, str]:
     return out
 
 
+def parse_account_coordinators(text: str) -> dict[str, frozenset[str]]:
+    """Parse `sacctmgr show -P account withcoord format=Account,Coordinators`
+    into an {account -> coordinator usernames} map. Accounts with no
+    coordinators are omitted. Protected accounts (root) are kept so the
+    caller can split their inherited coordinators out.
+
+    Read by column index for the same reason as `parse_user_default_accounts`:
+    the `format=` order is fixed (Account, then Coordinators) while the
+    header text may be abbreviated. The header line is skipped (detected by
+    a first cell of `Account`)."""
+    out: dict[str, frozenset[str]] = {}
+    for row in csv.reader(io.StringIO(text), delimiter='|'):
+        if len(row) < 2:
+            continue
+        account = row[0].strip()
+        if not account or account == 'Account':  # header row
+            continue
+        users = frozenset(u.strip() for u in row[1].split(',') if u.strip())
+        if users:
+            out[account] = users
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Command specs + sacctmgr argument rendering
 # ---------------------------------------------------------------------------
@@ -228,7 +262,7 @@ class CommandSpec:
     baked `sh.Command` (via `AsyncSAcctMgr.render`)."""
 
     verb: str        # 'add' | 'modify' | 'remove'
-    entity: str      # 'qos' | 'account' | 'user'
+    entity: str      # 'qos' | 'account' | 'user' | 'coordinator'
     args: tuple[str, ...] = ()
 
     def tokens(self) -> list[str]:
@@ -316,6 +350,20 @@ def _remove_user(key: AssocKey) -> CommandSpec:
     ))
 
 
+def _add_coordinator(key: CoordKey) -> CommandSpec:
+    account, user = key
+    return CommandSpec('add', 'coordinator', (
+        f'account={account}', f'names={user}',
+    ))
+
+
+def _remove_coordinator(key: CoordKey) -> CommandSpec:
+    account, user = key
+    return CommandSpec('remove', 'coordinator', (
+        f'account={account}', f'names={user}',
+    ))
+
+
 def _set_user_default_account(user: str, account: str) -> CommandSpec:
     # DefaultAccount is a user-level attribute; scope the `where` to the user
     # only (not a specific association).
@@ -353,6 +401,13 @@ def reconcile(
       - Add-sets and delete-sets are disjoint by name/key (a same-named change
         is a modify, never delete+add), so doing all adds before all deletes
         introduces no collisions.
+      - Coordinator seats are added after user associations (slurmctld only
+        honors a seat for a user it knows) and removed before accounts are
+        deleted (the account must still exist for the removal to apply).
+        Seats are only removed on accounts in the desired state: an account
+        being deleted takes its seats with it, and an account absent from
+        the desired state isn't managed here. Root's coordinators are
+        inherited by every account and are masked from both sides.
     """
     qos_add, qos_upd, qos_del = _diff(desired.qos, current.qos)
     acct_add, acct_upd, acct_del = _diff(desired.accounts, current.accounts)
@@ -363,6 +418,14 @@ def reconcile(
         if current.default_accounts.get(u) != acct
     ]
 
+    mask = current.root_coordinators
+    desired_coords = {k for k in desired.coordinators if k[1] not in mask}
+    current_coords = {k for k in current.coordinators if k[1] not in mask}
+    coord_add = sorted(desired_coords - current_coords)
+    coord_del = sorted(
+        k for k in current_coords - desired_coords if k[0] in desired.accounts
+    )
+
     return [
         CommandBatch('Add QOS', [_add_qos(n, desired.qos[n]) for n in qos_add]),
         CommandBatch('Modify QOS', [_modify_qos(n, desired.qos[n]) for n in qos_upd]),
@@ -372,9 +435,12 @@ def reconcile(
                      [_add_user(k, desired.associations[k]) for k in user_add]),
         CommandBatch('Modify user associations',
                      [_modify_user(k, desired.associations[k]) for k in user_upd]),
+        CommandBatch('Add coordinators', [_add_coordinator(k) for k in coord_add]),
         CommandBatch('Set user default accounts',
                      [_set_user_default_account(u, desired.default_accounts[u])
                       for u in default_changes]),
+        CommandBatch('Remove coordinators',
+                     [_remove_coordinator(k) for k in coord_del], is_deletion=True),
         CommandBatch('Delete user associations',
                      [_remove_user(k) for k in user_del], is_deletion=True),
         CommandBatch('Delete QOS', [_remove_qos(n) for n in qos_del], is_deletion=True),
@@ -389,16 +455,28 @@ def count_deletions(batches: list[CommandBatch]) -> int:
 
 def parse_state(
     qos_text: str, associations_text: str, user_text: str = '',
+    coordinators_text: str = '',
 ) -> SlurmSyncState:
     """Assemble a `SlurmSyncState` from raw `sacctmgr show -P` output for qos,
-    associations, and (optionally) users. Shared by the live and dump
-    readers."""
+    associations, and (optionally) users and account coordinators. Shared by
+    the live and dump readers."""
     associations, accounts = parse_association_state(associations_text)
+    coords_by_account = parse_account_coordinators(coordinators_text)
+    root_coordinators: set[str] = set()
+    for name in PROTECTED_ACCOUNTS:
+        root_coordinators |= coords_by_account.pop(name, frozenset())
+    coordinators = {
+        (account, user)
+        for account, users in coords_by_account.items()
+        for user in users
+    }
     return SlurmSyncState(
         qos=parse_qos_state(qos_text),
         accounts=accounts,
         associations=associations,
         default_accounts=parse_user_default_accounts(user_text),
+        coordinators=coordinators,
+        root_coordinators=frozenset(root_coordinators),
     )
 
 
@@ -457,6 +535,11 @@ class AsyncSAcctMgr:
             'user', 'format=User,DefaultAccount',
         )(_async=True))
 
+    async def show_account_coordinators(self) -> str:
+        return str(await self._show.bake(
+            'account', 'withcoord', 'format=Account,Coordinators',
+        )(_async=True))
+
     def render(self, spec: CommandSpec) -> sh.Command:
         return self._base.bake(*spec.tokens())
 
@@ -465,11 +548,12 @@ class AsyncSAcctMgr:
         return await self.render(spec)(_async=True)
 
     async def read_current_state(self) -> SlurmSyncState:
-        # The three reads are independent; fetch them concurrently.
-        qos_text, assoc_text, user_text = await asyncio.gather(
+        # The four reads are independent; fetch them concurrently.
+        qos_text, assoc_text, user_text, coord_text = await asyncio.gather(
             self.show_qos(), self.show_associations(), self.show_user(),
+            self.show_account_coordinators(),
         )
-        return parse_state(qos_text, assoc_text, user_text)
+        return parse_state(qos_text, assoc_text, user_text, coord_text)
 
 
 class DumpSAcctMgr:
@@ -478,7 +562,8 @@ class DumpSAcctMgr:
 
     For testing and offline planning: feed it the saved output of
     `sacctmgr show -P qos` / `show -P associations` / `show -P user
-    format=User,DefaultAccount` and run a `SyncSlurm` against it without a
+    format=User,DefaultAccount` / `show -P account withcoord
+    format=Account,Coordinators` and run a `SyncSlurm` against it without a
     Slurm controller. `dispatch` performs no controller I/O — it records the
     command it would have run on `self.dispatched`, so the apply path's
     batching/tally can be exercised offline (it never mutates anything).
@@ -486,11 +571,12 @@ class DumpSAcctMgr:
 
     def __init__(
         self, *, qos_text: str = '', associations_text: str = '',
-        user_text: str = '',
+        user_text: str = '', coordinators_text: str = '',
     ) -> None:
         self._qos_text = qos_text
         self._associations_text = associations_text
         self._user_text = user_text
+        self._coordinators_text = coordinators_text
         self.dispatched: list[str] = []
 
     @classmethod
@@ -499,6 +585,7 @@ class DumpSAcctMgr:
         qos_path: str | os.PathLike | None = None,
         associations_path: str | os.PathLike | None = None,
         user_path: str | os.PathLike | None = None,
+        coordinators_path: str | os.PathLike | None = None,
     ) -> 'DumpSAcctMgr':
         def _read(p) -> str:
             if p is None:
@@ -509,6 +596,7 @@ class DumpSAcctMgr:
             qos_text=_read(qos_path),
             associations_text=_read(associations_path),
             user_text=_read(user_path),
+            coordinators_text=_read(coordinators_path),
         )
 
     def render(self, spec: CommandSpec) -> str:
@@ -523,4 +611,5 @@ class DumpSAcctMgr:
     async def read_current_state(self) -> SlurmSyncState:
         return parse_state(
             self._qos_text, self._associations_text, self._user_text,
+            self._coordinators_text,
         )
