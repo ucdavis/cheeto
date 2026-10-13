@@ -3,3 +3,8 @@ cheeto/**/__pycache__
 *.txt
 .vscode
 scratch
+# per-worktree Poetry venv (see CLAUDE.md, Git worktrees)
+.venv/
+poetry.toml
+hpccf-admin-docs
+dist
