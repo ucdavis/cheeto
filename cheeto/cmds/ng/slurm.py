@@ -99,7 +99,7 @@ parent('ng', 'slurm', 'show',
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'new', 'partition',
+@commands.register('ng', 'slurm', 'new', 'partition', aliases=['part'],
                    help='Create a new Slurm partition')
 async def slurm_partition_new(args: Namespace):
     console = Console()
@@ -267,7 +267,7 @@ def _(parser: ArgParser):
 
 
 @site_args.apply(required=True)
-@commands.register('ng', 'slurm', 'remove', 'partition',
+@commands.register('ng', 'slurm', 'remove', 'partition', aliases=['part'],
                    help='Remove a Slurm partition')
 async def slurm_partition_remove(args: Namespace):
     console = Console()
@@ -654,7 +654,7 @@ def _partition_to_dict(p: SlurmPartition) -> dict:
 
 @site_args.apply(required=True)
 @yaml_args.apply()
-@commands.register('ng', 'slurm', 'show', 'partition',
+@commands.register('ng', 'slurm', 'show', 'partition', aliases=['part'],
                    help='Show one partition or list partitions at a site, '
                         'optionally filtered by group')
 async def slurm_partition_show(args: Namespace):
