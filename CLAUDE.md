@@ -19,7 +19,20 @@ poetry run pytest -k "pattern"              # Tests matching pattern
 poetry version patch|minor|major            # Bump version (syncs cheeto/__init__.py)
 ```
 
-Tests require MongoDB with replica set support (for transactions). The test suite automatically starts an ephemeral `mongod` on port 28080 with replica set `cheeto` via the session-scoped `start_mongodb` fixture in `cheeto/tests/conftest.py`. CI installs MongoDB 8.0 plus `libldap-dev` and `libsasl2-dev`.
+Tests require MongoDB with replica set support (for transactions). The test suite automatically starts an ephemeral `mongod` with replica set `cheeto` via the session-scoped `start_mongodb` fixture in `cheeto/tests/conftest.py`. The `mongod` and `slapd` fixtures each use a free port, or `CHEETO_TEST_MONGODB_PORT` / `CHEETO_TEST_SLAPD_PORT` when set, so two pytest sessions can run at the same time. CI installs MongoDB 8.0 plus `libldap-dev` and `libsasl2-dev`.
+
+### Git worktrees
+
+The editable install in the main checkout's env points at the main checkout, so a worktree needs its own Poetry-managed `.venv`:
+
+1. Start the worktree session with no conda env or virtualenv active (`conda deactivate` or `deactivate`). Poetry uses an active conda env or `VIRTUAL_ENV` before its own venv, and `virtualenvs.in-project` does not override that.
+2. In the worktree, run `poetry config --local virtualenvs.in-project true`.
+3. Run `poetry env info -p`. Make sure that it prints `<worktree>/.venv` before you continue.
+4. Run `poetry install`.
+
+Do not run `poetry install` in a worktree while `poetry env info -p` prints the main checkout's env. The install points that env's editable install at the worktree and can change packages that other tools in that env need.
+
+`.worktreeinclude` lists the gitignored files that Claude Code copies into a new worktree. A nested git repo cannot go there, so the `SessionStart` hook in `.claude/settings.json` runs `.claude/hooks/clone-admin-docs.sh`. If the main checkout has an `hpccf-admin-docs/` clone, the hook clones it into the worktree. Push docs commits before you remove a worktree. The removal deletes its clone.
 
 ## Architecture
 

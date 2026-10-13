@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/.claude/hooks/clone-admin-docs.sh\"; [ ! -f \"$f\" ] || bash \"$f\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

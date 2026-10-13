@@ -1,0 +1,8 @@
+# Gitignored files that Claude Code copies into each new worktree (gitignore syntax).
+# Only files that git ignores are copied. See CLAUDE.md, "Git worktrees".
+
+# Local Claude Code permissions and output style
+.claude/settings.local.json
+
+# hpccf-admin-docs/ is a nested git repo, which git does not list, so it cannot
+# go here. .claude/hooks/clone-admin-docs.sh clones it at session start.

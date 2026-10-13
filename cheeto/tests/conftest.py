@@ -2,6 +2,7 @@ from collections.abc import Sequence
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ import re
 
 from pymongo import MongoClient, monitoring
 import pytest
+from ruamel.yaml import YAML
 
 from ..config import get_config
 from ..log import setup as _setup_logging
@@ -54,7 +56,18 @@ def cmd_counter():
         CMD_COUNTER.commands.clear()
 
 
-MONGODB_PORT = 28080
+def _test_port(env_var: str) -> int:
+    '''Port for an ephemeral test server: `env_var` if it is set, else a free
+    port picked by the kernel. Fixed ports collide when two pytest sessions
+    run at the same time (for example, in two git worktrees).'''
+    if value := os.environ.get(env_var):
+        return int(value)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(('127.0.0.1', 0))
+        return sock.getsockname()[1]
+
+
+MONGODB_PORT = _test_port('CHEETO_TEST_MONGODB_PORT')
 
 
 # Default seed data for AccessGroup / StatusGroup / TypeGroup records used by
@@ -301,7 +314,11 @@ def start_mongodb(tmp_path_factory):
 def config_file(tmp_path_factory):
     data_dir = Path(__file__).parent / 'data'
     config_file = tmp_path_factory.mktemp('cheeto-config') / 'config.yaml'
-    shutil.copy(data_dir / 'config.yaml', config_file)
+    # Point the mongo profile at this session's ephemeral mongod.
+    yaml = YAML()
+    data = yaml.load(data_dir / 'config.yaml')
+    data['mongo']['default']['port'] = MONGODB_PORT
+    yaml.dump(data, config_file)
     return config_file
 
 
@@ -319,8 +336,7 @@ def hippo_config(config):
 # slapd: ephemeral OpenLDAP for async LDAP integration tests
 # ---------------------------------------------------------------------------
 
-# Port chosen to avoid collision with system slapd (389) and MongoDB (28080).
-SLAPD_PORT = 28389
+SLAPD_PORT = _test_port('CHEETO_TEST_SLAPD_PORT')
 SLAPD_BASE_DN = 'dc=hpc,dc=test'
 SLAPD_ADMIN_DN = 'cn=admin,dc=hpc,dc=test'
 SLAPD_ADMIN_PASSWORD = 'test-admin-password'
