@@ -9,6 +9,8 @@ Skips automatically when `slapd` isn't available on the host.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import bonsai
 import pytest
 import pytest_asyncio
@@ -250,6 +252,52 @@ class TestUserCRUD:
         record.ssh_keys = []
         await manager.update_user(record)
         assert await _raw_attr(slapd_ldap_config, dn, 'sshPublicKey') is None
+
+    async def test_update_user_adds_missing_object_classes(
+        self, manager, site, slapd_ldap_config,
+    ):
+        # Entries created by the v1 ldap3 stack carry only these three
+        # classes (its config-driven `user_classes`), so projecting an
+        # expiry onto them failed with "attribute 'shadowExpire' not
+        # allowed" until the entry was force-recreated. update_user must
+        # add the missing classes in the same modify as the attributes.
+        dn = manager.user_dn('v1user')
+        await manager._add_entry(dn, {
+            'objectClass': ['inetOrgPerson', 'posixAccount', 'ldapPublicKey'],
+            'uid': ['v1user'],
+            'cn': ['V1 User'],
+            'sn': ['User'],
+            'uidNumber': [10013],
+            'gidNumber': [10013],
+            'homeDirectory': ['/home/v1user'],
+        })
+        record = LDAPUserRecord(
+            username='v1user', email='v1user@x.test',
+            uid=10013, gid=10013, fullname='V1 User', surname='User',
+            home_directory='/home/v1user', shell='/usr/bin/bash',
+            expires_at=datetime(2026, 7, 23),
+        )
+
+        assert await manager.update_user(record) == ['top', 'shadowAccount']
+
+        classes = await _raw_attr(slapd_ldap_config, dn, 'objectClass')
+        assert {c.lower() for c in classes} >= {'top', 'shadowaccount'}
+        assert await _raw_attr(slapd_ldap_config, dn, 'shadowExpire') == [
+            '20657',
+        ]
+        fetched = await manager.get_user('v1user')
+        assert fetched.expires_at == datetime(2026, 7, 23)
+        # Idempotent: a second update finds nothing to add.
+        assert await manager.update_user(record) == []
+
+    async def test_update_user_v2_entry_adds_no_classes(self, manager, site):
+        record = LDAPUserRecord(
+            username='v2user', email='v2user@x.test',
+            uid=10014, gid=10014, fullname='V2 User', surname='User',
+            home_directory='/home/v2user', shell='/usr/bin/bash',
+        )
+        await manager.add_user(record)
+        assert await manager.update_user(record) == []
 
 
 class TestGroupCRUD:
