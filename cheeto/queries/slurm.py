@@ -6,6 +6,7 @@ Rich/YAML display happens in the caller (e.g. cheeto/cmds/ng/_slurm_show.py).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
@@ -32,6 +33,8 @@ from ..models.user_site_info import UserSiteInfo
 from ..utils import megs_to_size, size_to_megs, size_to_megs_exact
 from .group import group_members_at_site, user_groups_at_site
 from .user import find_users
+
+logger = logging.getLogger(__name__)
 
 
 def _slurm_sticky_account_ids(site: Site) -> set[PydanticObjectId]:
@@ -483,12 +486,14 @@ def _tres_limit(tres: SlurmTRES):
 
 
 async def build_desired_slurm_state(site: Site):
-    """Assemble the site's desired Slurm state (QOS, accounts, associations)
-    from beanie into a `SlurmSyncState` for reconciliation against a
-    controller. Associations are the cross product of each group's
+    """Assemble the site's desired Slurm state (QOS, accounts, associations,
+    coordinators) from beanie into a `SlurmSyncState` for reconciliation
+    against a controller. Associations are the cross product of each group's
     SlurmAssociations with its slurm-eligible members/slurmers at the site
     (users whose effective access at the site includes `slurm`). Only
-    accounts that end up with at least one association are included.
+    accounts that end up with at least one association are included, and
+    coordinator seats are emitted only for those accounts and only for users
+    that hold at least one association at the site.
     """
     from ..slurm_sync import (
         AccountState,
@@ -556,6 +561,33 @@ async def build_desired_slurm_state(site: Site):
         gname: acct for gname, acct in account_state_by_group.items()
         if gname in used_groups
     }
+
+    # Coordinator seats. A seat only takes effect for a user slurmctld knows,
+    # i.e. one with at least one association at this site; any other seat is
+    # reported and skipped rather than emitted as a dangling row.
+    slurm_users = {user for (user, _account, _partition) in state.associations}
+    skipped: dict[str, list[str]] = {}
+    for acct in accounts:
+        gname = acct.group.name
+        if gname not in used_groups:
+            continue
+        for coord in acct.coordinators:
+            # Resolved at nesting_depth=1; a dangling link has no name.
+            name = getattr(coord, 'name', None) or str(link_target_id(coord))
+            if name in slurm_users:
+                state.coordinators.add((gname, name))
+            else:
+                skipped.setdefault(gname, []).append(name)
+    if skipped:
+        logger.warning(
+            'Skipping Slurm coordinator seats at %s for users with no '
+            'association there: %s',
+            site.name,
+            '; '.join(
+                f'{gname}: {", ".join(sorted(names))}'
+                for gname, names in sorted(skipped.items())
+            ),
+        )
 
     # Per-user default account. Today every at-site user resolves to the
     # site's configured default; `_desired_default_account` is the seam for a

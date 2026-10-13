@@ -72,6 +72,22 @@ class TestParsers:
             ('bob', 'lab', 'hi'): 'lab-q',
         }
 
+    def test_parse_account_coordinators_by_index(self):
+        from ..slurm_sync import parse_account_coordinators
+        # Parsed by position: an abbreviated header is tolerated, root is
+        # kept (parse_state splits it out), empty cells are dropped.
+        text = (
+            'Account|Coords\n'
+            'root|admin\n'
+            'lab|alice,bob\n'
+            'empty|\n'
+            '|orphan\n'              # blank account → skipped
+        )
+        assert parse_account_coordinators(text) == {
+            'root': frozenset({'admin'}),
+            'lab': frozenset({'alice', 'bob'}),
+        }
+
 
 class TestReconcile:
 
@@ -83,7 +99,8 @@ class TestReconcile:
         assert self._labels(batches) == [
             'Add QOS', 'Modify QOS', 'Add accounts', 'Modify accounts',
             'Add user associations', 'Modify user associations',
-            'Set user default accounts', 'Delete user associations',
+            'Add coordinators', 'Set user default accounts',
+            'Remove coordinators', 'Delete user associations',
             'Delete QOS', 'Delete accounts',
         ]
         # The default re-point must precede association deletes: a user's
@@ -91,6 +108,12 @@ class TestReconcile:
         labels = self._labels(batches)
         assert labels.index('Set user default accounts') < \
             labels.index('Delete user associations')
+        # Coordinator seats need the user to exist, and must be removed
+        # while the account still exists.
+        assert labels.index('Add coordinators') > \
+            labels.index('Add user associations')
+        assert labels.index('Remove coordinators') < \
+            labels.index('Delete accounts')
 
     def test_identical_states_produce_no_commands(self):
         q = QOSState(group=TRESLimit(cpus=8), priority=5, flags=frozenset({'DenyOnLimit'}))
@@ -148,6 +171,85 @@ class TestReconcile:
         assert 'Flags=DenyOnLimit' in cmd
 
 
+class TestCoordinators:
+
+    def _batch(self, desired, current, label):
+        return next(b for b in reconcile(desired, current) if b.label == label)
+
+    def test_add_and_remove_classification(self):
+        desired = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            coordinators={('lab', 'alice'), ('lab', 'carol')},
+        )
+        current = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            coordinators={('lab', 'alice'), ('lab', 'bob')},
+        )
+        add = self._batch(desired, current, 'Add coordinators')
+        remove = self._batch(desired, current, 'Remove coordinators')
+        assert [str(s) for s in add.specs] == [
+            'sacctmgr -iQ add coordinator account=lab names=carol',
+        ]
+        assert [str(s) for s in remove.specs] == [
+            'sacctmgr -iQ remove coordinator account=lab names=bob',
+        ]
+        assert remove.is_deletion
+        assert count_deletions(reconcile(desired, current)) == 1
+
+    def test_identical_seats_produce_no_commands(self):
+        state = SlurmSyncState(
+            accounts={'lab': AccountState()}, coordinators={('lab', 'alice')},
+        )
+        other = SlurmSyncState(
+            accounts={'lab': AccountState()}, coordinators={('lab', 'alice')},
+        )
+        assert not self._batch(state, other, 'Add coordinators').specs
+        assert not self._batch(state, other, 'Remove coordinators').specs
+
+    def test_remove_skipped_for_deleted_account(self):
+        # The account itself is going away; its seats go with it and must
+        # not be counted twice against the deletion cap.
+        desired = SlurmSyncState()
+        current = SlurmSyncState(
+            accounts={'stale': AccountState()},
+            coordinators={('stale', 'alice')},
+        )
+        batches = reconcile(desired, current)
+        by_label = {b.label: b for b in batches}
+        assert [s.args[0] for s in by_label['Delete accounts'].specs] == ['stale']
+        assert by_label['Remove coordinators'].specs == []
+        assert count_deletions(batches) == 1
+
+    def test_remove_skipped_for_unmanaged_account(self):
+        # `show account` lists accounts with no associations on this
+        # cluster; they're in neither accounts map and are left alone.
+        desired = SlurmSyncState(accounts={'lab': AccountState()})
+        current = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            coordinators={('elsewhere', 'alice')},
+        )
+        assert not self._batch(desired, current, 'Remove coordinators').specs
+
+    def test_root_coordinators_masked_on_both_sides(self):
+        # Root's coordinators are inherited by every account: never removed
+        # (the seat isn't on this account) and never added (already there).
+        desired = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            coordinators={('lab', 'admin'), ('lab', 'alice')},
+        )
+        current = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            coordinators={('lab', 'admin'), ('other', 'admin')},
+            root_coordinators=frozenset({'admin'}),
+        )
+        add = self._batch(desired, current, 'Add coordinators')
+        remove = self._batch(desired, current, 'Remove coordinators')
+        assert [str(s) for s in add.specs] == [
+            'sacctmgr -iQ add coordinator account=lab names=alice',
+        ]
+        assert remove.specs == []
+
+
 class TestDumpSAcctMgr:
 
     QOS_DUMP = (
@@ -161,31 +263,46 @@ class TestDumpSAcctMgr:
         'lab||||-1|-1|-1|-1\n'
         'lab|alice|hi|lab-q||||\n'
     )
+    COORD_DUMP = (
+        'Account|Coordinators\n'
+        'root|admin\n'
+        'lab|alice,admin\n'
+    )
 
     async def test_reads_state_from_text(self):
         from ..slurm_sync import DumpSAcctMgr, AccountState, TRESLimit
 
         mgr = DumpSAcctMgr(
             qos_text=self.QOS_DUMP, associations_text=self.ASSOC_DUMP,
+            coordinators_text=self.COORD_DUMP,
         )
         state = await mgr.read_current_state()
         assert set(state.qos) == {'lab-q'}  # normal skipped
         assert state.qos['lab-q'].group == TRESLimit(cpus=8, gpus=2, mem_megs=16384)
         assert state.accounts == {'lab': AccountState()}  # root skipped
         assert state.associations == {('alice', 'lab', 'hi'): 'lab-q'}
+        # root's seats are split out; the inherited copy on lab stays in
+        # `coordinators` and is masked by reconcile.
+        assert state.root_coordinators == frozenset({'admin'})
+        assert state.coordinators == {('lab', 'alice'), ('lab', 'admin')}
 
     async def test_from_files(self, tmp_path):
         from ..slurm_sync import DumpSAcctMgr
 
         qos_file = tmp_path / 'qos.txt'
         assoc_file = tmp_path / 'assoc.txt'
+        coord_file = tmp_path / 'coord.txt'
         qos_file.write_text(self.QOS_DUMP)
         assoc_file.write_text(self.ASSOC_DUMP)
+        coord_file.write_text(self.COORD_DUMP)
 
-        mgr = DumpSAcctMgr.from_files(qos_file, assoc_file)
+        mgr = DumpSAcctMgr.from_files(
+            qos_file, assoc_file, coordinators_path=coord_file,
+        )
         state = await mgr.read_current_state()
         assert set(state.qos) == {'lab-q'}
         assert state.associations == {('alice', 'lab', 'hi'): 'lab-q'}
+        assert ('lab', 'alice') in state.coordinators
 
     async def test_dispatch_records_without_side_effects(self):
         from ..slurm_sync import DumpSAcctMgr, CommandSpec
@@ -201,6 +318,8 @@ class TestDumpSAcctMgr:
         assert state.qos == {}
         assert state.accounts == {}
         assert state.associations == {}
+        assert state.coordinators == set()
+        assert state.root_coordinators == frozenset()
 
 
 class TestDefaultAccounts:
@@ -262,3 +381,11 @@ class TestAsyncSAcctMgrExecPrefix:
         assert rendered.endswith(
             'modify user set defaultaccount=lab where user=alice'
         )
+
+    def test_coordinator_spec_renders_through_prefix(self):
+        from ..slurm_sync import AsyncSAcctMgr, CommandSpec
+        mgr = AsyncSAcctMgr(exec_prefix=['env'])
+        rendered = str(mgr.render(CommandSpec(
+            'add', 'coordinator', ('account=lab', 'names=alice'),
+        )))
+        assert rendered.endswith('add coordinator account=lab names=alice')

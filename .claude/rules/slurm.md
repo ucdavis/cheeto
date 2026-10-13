@@ -60,10 +60,12 @@ per-user / per-job. `DenyOnLimit` is our default flag (reject at submit instead 
 - Build commands through `AsyncSAcctMgr` (`cheeto/slurm_sync.py`), which returns **baked
   `sh.Command` objects** — never shell out by hand. See the `sh` rule for `sh` usage
   (including awaiting commands from async code paths).
-- State is read into dicts (`get_slurm_qos_state`, `get_slurm_association_state`), diffed by
-  the `reconcile_*` functions, and turned into a command list by `generate_commands`. New
-  sync logic should follow that read → reconcile → emit-commands shape rather than mutating
-  Slurm imperatively.
+- State is read into a `SlurmSyncState` (current side via the `parse_*` functions over
+  `sacctmgr show -P` output, desired side via `queries/slurm.py::build_desired_slurm_state`),
+  diffed by `reconcile`, which emits ordered `CommandBatch`es of `CommandSpec`s. New sync
+  logic should follow that read → reconcile → emit-commands shape rather than mutating
+  Slurm imperatively. Coordinator seats live in `SlurmSyncState.coordinators` as
+  `(account, user)` pairs; root's inherited coordinators are masked from the diff.
 - QOS names are derived, not free-form: `get_qos_name(account, partition)`.
 - CLI TRES strings are parsed by `cheeto/tres.py` (`parse_tres`, `tres_argtype`), not by
   a regex. `cpus` and `mem` are required, `gpus` defaults to 0, and unlimited is explicit

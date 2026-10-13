@@ -5489,7 +5489,7 @@ class TestBackfillLDAPInfo:
 
 
 async def _seed_slurm_site(with_default=False, partition_name='hi',
-                           extra_sticky_user=False):
+                           extra_sticky_user=False, coordinators=()):
     """Seed a site with one group, a slurm account, partition, QOS, and an
     association, plus a slurm-eligible member (alice) and an ineligible one
     (bob, no slurm access). When `with_default`, mark the account sticky and
@@ -5497,7 +5497,8 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
     `sl_carol`: at the site and slurm-eligible, but NOT a member of the group —
     so she can only reach the account via `site.slurm.sticky`. `partition_name`
     lets the live integration test use a partition the controller actually has
-    (e.g. 'cpu'). Returns the Site."""
+    (e.g. 'cpu'). `coordinators` names seeded users (sl_alice, sl_bob,
+    sl_carol) to place on the account's coordinator list. Returns the Site."""
     site = Site(name='slsite', fqdn='sl.test')
     await site.insert()
 
@@ -5522,6 +5523,7 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
     for u in (alice, bob):
         await UserSiteInfo(user=u, site=site, status=await status_link('active')).insert()
         await GroupMembership(user=u, group=group, site=site, roles=['member']).insert()
+    users = {'sl_alice': alice, 'sl_bob': bob}
 
     if extra_sticky_user:
         carol = User(
@@ -5533,8 +5535,12 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
         await carol.insert()
         # USI at the site (so she's "present") but no GroupMembership edge.
         await UserSiteInfo(user=carol, site=site, status=await status_link('active')).insert()
+        users['sl_carol'] = carol
 
-    account = SlurmAccount(group=group, site=site)
+    account = SlurmAccount(
+        group=group, site=site,
+        coordinators=[users[name] for name in coordinators],
+    )
     await account.insert()
     partition = SlurmPartition(name=partition_name, site=site)
     await partition.insert()
@@ -5611,6 +5617,30 @@ class TestBuildDesiredSlurmState:
         state = await build_desired_slurm_state(site)
         assert not any(user == 'sl_carol' for (user, _, _) in state.associations)
         assert 'sl_carol' not in state.default_accounts
+
+    async def test_coordinators_follow_db(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(coordinators=('sl_alice',))
+        state = await build_desired_slurm_state(site)
+        assert state.coordinators == {('sllab', 'sl_alice')}
+        assert state.root_coordinators == frozenset()
+
+    async def test_coordinator_without_association_dropped_with_warning(
+        self, beanie_client, caplog,
+    ):
+        """bob has no slurm access, so no association and no Slurm user
+        record at the site: his seat is skipped and reported, alice's is
+        kept."""
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(coordinators=('sl_alice', 'sl_bob'))
+        with caplog.at_level('WARNING'):
+            state = await build_desired_slurm_state(site)
+        assert state.coordinators == {('sllab', 'sl_alice')}
+        assert 'sl_bob' in caplog.text
+        assert 'sllab' in caplog.text
+        assert 'sl_alice' not in caplog.text
 
 
 class _FakeSAcctMgr:
@@ -5777,6 +5807,68 @@ class TestSyncSlurmOperation:
         )
         assert result['plan'] == {}  # already in sync, defaults included
 
+    async def test_coordinator_add_planned_offline(self, beanie_client):
+        """A DB coordinator the controller doesn't know is planned as an
+        add, after the user association that makes alice a Slurm user."""
+        from cheeto.slurm_sync import DumpSAcctMgr
+        site = await _seed_slurm_site(coordinators=('sl_alice',))
+        mgr = DumpSAcctMgr()  # empty controller
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert result['plan']['Add coordinators'] == [
+            'sacctmgr -iQ add coordinator account=sllab names=sl_alice'
+        ]
+        labels = list(result['plan'])
+        assert labels.index('Add coordinators') > \
+            labels.index('Add user associations')
+
+    async def test_coordinator_idempotent_offline(self, beanie_client):
+        """When the controller dump already lists alice as coordinator (and
+        qos/assoc/accounts match), the plan is empty. The empty root row is
+        what a real `withcoord` dump contains."""
+        from cheeto.slurm_sync import DumpSAcctMgr
+        site = await _seed_slurm_site(coordinators=('sl_alice',))
+        qos_dump = (
+            'Name|Priority|GrpTRES|MaxTRES|MaxTRESPU|Flags\n'
+            'sllab-q|10|cpu=8,mem=16384,gres/gpu=-1|||DenyOnLimit\n'
+        )
+        assoc_dump = (
+            'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
+            'sllab||||-1|-1|-1|-1\n'
+            'sllab|sl_alice|hi|sllab-q||||\n'
+        )
+        coord_dump = 'Account|Coordinators\nroot|\nsllab|sl_alice\n'
+        mgr = DumpSAcctMgr(
+            qos_text=qos_dump, associations_text=assoc_dump,
+            coordinators_text=coord_dump,
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert result['plan'] == {}
+
+    async def test_coordinator_removal_counts_toward_cap(self, beanie_client):
+        """A seat in Slurm that the DB doesn't have is a removal, and
+        removals are deletions for the blast-radius cap."""
+        from cheeto.slurm_sync import AccountState, SlurmSyncState, SlurmSyncAborted
+        site = await _seed_slurm_site()
+        current = SlurmSyncState(
+            accounts={'sllab': AccountState()},
+            associations={('sl_alice', 'sllab', 'hi'): 'sllab-q'},
+            coordinators={('sllab', 'ghost')},
+        )
+        fake = _FakeSAcctMgr(current)
+        with pytest.raises(SlurmSyncAborted) as excinfo:
+            await SyncSlurm.run(
+                beanie_client, None, sitename=site.name, sacctmgr=fake,
+                apply=True, max_deletions=0,
+            )
+        assert excinfo.value.would_delete == [
+            'sacctmgr -iQ remove coordinator account=sllab names=ghost'
+        ]
+        assert fake.dispatched == []  # aborted before any mutation
+
 
 
 
@@ -5850,7 +5942,9 @@ class TestSlurmLive:
     async def test_apply_then_converge(self, beanie_client):
         from cheeto.slurm_sync import AsyncSAcctMgr
         # partition 'cpu' is the default partition in slurm-docker-cluster.
-        site = await _seed_slurm_site(with_default=True, partition_name='cpu')
+        site = await _seed_slurm_site(
+            with_default=True, partition_name='cpu', coordinators=('sl_alice',),
+        )
         mgr = AsyncSAcctMgr(exec_prefix=['docker', 'exec', 'slurmctld'])
 
         # A freshly-registered cluster has only root/normal (both protected),
@@ -5862,12 +5956,32 @@ class TestSlurmLive:
         )
         for label, tally in r1['tally'].items():
             assert tally['failed'] == 0, (label, tally, r1['plan'])
+        assert r1['tally']['Add coordinators']['ok'] == 1
 
         # Re-running must converge: the controller now matches desired state.
+        # This is the only check that real `withcoord` output parses.
         r2 = await SyncSlurm.run(
             beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
         )
         assert r2['plan'] == {}, r2['plan']
+
+        # Dropping the seat in the DB removes it from the controller, and the
+        # controller accepts `remove coordinator`.
+        await EditSlurmAccount.run(
+            beanie_client, None, site_name=site.name, group_name='sllab',
+            coordinators=[],
+        )
+        r3 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=1,
+        )
+        assert r3['tally']['Remove coordinators'] == {
+            'ok': 1, 'failed': 0, 'total': 1,
+        }, r3['plan']
+        r4 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert r4['plan'] == {}, r4['plan']
 
 
 class TestExportRootSSHKeys:
