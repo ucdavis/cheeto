@@ -973,8 +973,9 @@ class SyncSlurm(Operation):
                 str(spec) for b in batches if b.is_deletion for spec in b.specs
             ]
             raise SlurmSyncAborted(
-                f'Sync would delete {deletions} Slurm entities, exceeding the '
-                f'cap of {self.max_deletions}. Pass --max-deletions=-1 to '
+                f'Sync would delete {deletions} Slurm association rows and '
+                f'coordinator seats in {len(would_delete)} commands, exceeding '
+                f'the cap of {self.max_deletions}. Pass --max-deletions=-1 to '
                 f'disable the cap.',
                 would_delete=would_delete,
             )

@@ -5630,6 +5630,48 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
     return site
 
 
+async def _seed_second_slurm_account(site, group_name='sllab2', gid=72010,
+                                     members=('sl_alice',), partition_name='hi'):
+    """Add a second group with its own Slurm account at `site`, reusing the
+    site's partition and `sllab-q` QOS, and make `members` (seeded user
+    names) members of it. Returns the Group."""
+    group = Group(name=group_name, gid=gid)
+    await group.insert()
+    await GroupSiteInfo(group=group, site=site).insert()
+    for name in members:
+        user = await User.find_one(User.name == name)
+        await GroupMembership(
+            user=user, group=group, site=site, roles=['member'],
+        ).insert()
+    account = SlurmAccount(group=group, site=site)
+    await account.insert()
+    partition = await SlurmPartition.find_one(
+        SlurmPartition.name == partition_name,
+        SlurmPartition.site.id == site.id,
+    )
+    qos = await SlurmQOS.find_one(
+        SlurmQOS.name == 'sllab-q', SlurmQOS.site.id == site.id,
+    )
+    await SlurmAssociation(
+        site=site, account=account, partition=partition, qos=qos,
+    ).insert()
+    return group
+
+
+async def _leave_slurm_group(username, group_name):
+    """Delete `username`'s GroupMembership edge for `group_name` at slsite."""
+    site = await Site.find_one(Site.name == 'slsite')
+    user = await User.find_one(User.name == username)
+    group = await Group.find_one(Group.name == group_name)
+    edge = await GroupMembership.find_one(
+        GroupMembership.user.id == user.id,
+        GroupMembership.group.id == group.id,
+        GroupMembership.site.id == site.id,
+    )
+    assert edge is not None, (username, group_name)
+    await edge.delete()
+
+
 async def _set_slurm_site_status(username, status_name):
     """Set (or clear, with None) `username`'s per-site status override at
     slsite. `_seed_slurm_site` gives every seeded user an explicit `active`
@@ -5912,7 +5954,40 @@ class TestSyncSlurmOperation:
         assert fake.dispatched == []
         assert result['plan']['Delete QOS'] == ['sacctmgr -iQ remove qos stale-q']
 
-    async def test_inactive_user_association_deleted(self, beanie_client):
+    async def test_inactive_user_removed_entirely(self, beanie_client):
+        """An inactive user holds no desired row, so the Slurm user is
+        removed as a whole: sacctmgr refuses to delete rows on the user's
+        default account one by one."""
+        from cheeto.slurm_sync import AccountState, SlurmSyncState
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        current = SlurmSyncState(
+            accounts={'sllab': AccountState(), 'oldlab': AccountState()},
+            associations={
+                ('sl_alice', 'sllab', 'hi'): 'sllab-q',
+                ('sl_alice', 'oldlab', 'hi'): 'sllab-q',
+            },
+            association_max_jobs={
+                ('sl_alice', 'sllab', 'hi'): -1,
+                ('sl_alice', 'oldlab', 'hi'): -1,
+            },
+            default_accounts={'sl_alice': 'sllab'},
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name,
+            sacctmgr=_FakeSAcctMgr(current), apply=False,
+        )
+        assert result['plan']['Delete users'] == [
+            'sacctmgr -iQ remove user user=sl_alice',
+        ]
+        assert 'Delete user associations' not in result['plan']
+        assert 'Set user default accounts' not in result['plan']
+        assert 'Add user associations' not in result['plan']
+        assert 'Set user MaxJobs' not in result['plan']
+
+    async def test_inactive_root_coordinator_falls_back_to_scoped_removal(
+        self, beanie_client,
+    ):
         from cheeto.slurm_sync import AccountState, SlurmSyncState
         site = await _seed_slurm_site()
         await _set_slurm_site_status('sl_alice', 'inactive')
@@ -5920,16 +5995,78 @@ class TestSyncSlurmOperation:
             accounts={'sllab': AccountState()},
             associations={('sl_alice', 'sllab', 'hi'): 'sllab-q'},
             association_max_jobs={('sl_alice', 'sllab', 'hi'): -1},
+            root_coordinators=frozenset({'sl_alice'}),
         )
         result = await SyncSlurm.run(
             beanie_client, None, sitename=site.name,
             sacctmgr=_FakeSAcctMgr(current), apply=False,
         )
+        assert 'Delete users' not in result['plan']
         assert result['plan']['Delete user associations'] == [
-            'sacctmgr -iQ remove user user=sl_alice account=sllab partition=hi',
+            'sacctmgr -iQ remove user user=sl_alice account=sllab',
         ]
-        assert 'Add user associations' not in result['plan']
-        assert 'Set user MaxJobs' not in result['plan']
+
+    async def test_whole_user_removal_counts_rows_toward_cap(self, beanie_client):
+        from cheeto.slurm_sync import (
+            AccountState, SlurmSyncAborted, SlurmSyncState,
+        )
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        current = SlurmSyncState(
+            accounts={'sllab': AccountState()},
+            associations={
+                ('sl_alice', 'sllab', 'hi'): 'sllab-q',
+                ('sl_alice', 'sllab', 'lo'): 'sllab-q',
+            },
+            association_max_jobs={
+                ('sl_alice', 'sllab', 'hi'): -1,
+                ('sl_alice', 'sllab', 'lo'): -1,
+            },
+        )
+        fake = _FakeSAcctMgr(current)
+        # Two rows for the user plus the emptied account: 3 > 2.
+        with pytest.raises(SlurmSyncAborted) as excinfo:
+            await SyncSlurm.run(
+                beanie_client, None, sitename=site.name, sacctmgr=fake,
+                apply=True, max_deletions=2,
+            )
+        assert fake.dispatched == []
+        assert excinfo.value.would_delete.count(
+            'sacctmgr -iQ remove user user=sl_alice',
+        ) == 1
+        assert 'delete 3 ' in str(excinfo.value)
+
+    async def test_user_leaving_account_removed_at_account_level(
+        self, beanie_client,
+    ):
+        from cheeto.slurm_sync import AccountState, SlurmSyncState
+        site = await _seed_slurm_site()
+        current = SlurmSyncState(
+            accounts={'sllab': AccountState(), 'oldlab': AccountState()},
+            associations={
+                ('sl_alice', 'sllab', 'hi'): 'sllab-q',
+                ('sl_alice', 'oldlab', 'hi'): 'sllab-q',
+                ('sl_alice', 'oldlab', 'lo'): 'sllab-q',
+            },
+            association_max_jobs={
+                ('sl_alice', 'sllab', 'hi'): -1,
+                ('sl_alice', 'oldlab', 'hi'): -1,
+                ('sl_alice', 'oldlab', 'lo'): -1,
+            },
+            default_accounts={'sl_alice': 'sllab'},
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name,
+            sacctmgr=_FakeSAcctMgr(current), apply=False,
+        )
+        assert 'Delete users' not in result['plan']
+        assert result['plan']['Delete user associations'] == [
+            'sacctmgr -iQ remove user user=sl_alice account=oldlab',
+        ]
+        assert result['plan']['Delete accounts'] == [
+            'sacctmgr -iQ remove account oldlab',
+        ]
+        assert 'Set user default accounts' not in result['plan']
 
     async def test_disabled_user_gets_max_jobs_zero(self, beanie_client):
         from cheeto.slurm_sync import SlurmSyncState
@@ -6183,6 +6320,105 @@ class TestSlurmLive:
             beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
         )
         assert r4['plan'] == {}, r4['plan']
+
+        # An inactive user is removed as a whole Slurm user. Alice's default
+        # account is sllab, so a row-by-row delete would be refused by the
+        # controller; this is the production failure mode. The account she
+        # empties goes in the same run.
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        r5 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=None,
+        )
+        assert r5['tally']['Delete users'] == {
+            'ok': 1, 'failed': 0, 'total': 1,
+        }, r5['plan']
+        assert 'Delete user associations' not in r5['plan'], r5['plan']
+        current = await mgr.read_current_state()
+        assert 'sl_alice' not in current.default_accounts
+        assert not any(u == 'sl_alice' for (u, _a, _p) in current.associations)
+        r6 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert r6['plan'] == {}, r6['plan']
+
+    async def test_default_account_repointed_live(self, beanie_client):
+        """A user who leaves one of two accounts loses every row there with
+        one account-scoped remove, parent row included. When that account
+        is the user's DefaultAccount, the sync first moves the default to
+        the remaining account, which a real slurmdbd requires."""
+        import csv
+        import io
+        from cheeto.slurm_sync import AsyncSAcctMgr
+        site = await _seed_slurm_site(partition_name='cpu')
+        await _seed_second_slurm_account(
+            site, group_name='sllab2', members=('sl_alice',),
+            partition_name='cpu',
+        )
+        mgr = AsyncSAcctMgr(exec_prefix=['docker', 'exec', 'slurmctld'])
+
+        # The controller may hold leftovers from the other live test, so
+        # the cap is off. Alice ends up on both accounts.
+        r1 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=None,
+        )
+        for label, tally in r1['tally'].items():
+            assert tally['failed'] == 0, (label, tally, r1['plan'])
+        current = await mgr.read_current_state()
+        assert {
+            a for (u, a, _p) in current.associations if u == 'sl_alice'
+        } == {'sllab', 'sllab2'}
+        # The adds in one batch run concurrently, so whichever landed first
+        # became the default. Leave that account to hit the refusal path.
+        leaving = current.default_accounts['sl_alice']
+        assert leaving in ('sllab', 'sllab2'), current.default_accounts
+        staying = 'sllab2' if leaving == 'sllab' else 'sllab'
+        await _leave_slurm_group('sl_alice', leaving)
+
+        r2 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=None,
+        )
+        assert r2['plan']['Set user default accounts'] == [
+            f'sacctmgr -iQ modify user set defaultaccount={staying} '
+            f'where user=sl_alice',
+        ], r2['plan']
+        assert r2['plan']['Delete user associations'] == [
+            f'sacctmgr -iQ remove user user=sl_alice account={leaving}',
+        ], r2['plan']
+        assert r2['tally']['Set user default accounts'] == {
+            'ok': 1, 'failed': 0, 'total': 1,
+        }, r2['plan']
+        assert r2['tally']['Delete user associations'] == {
+            'ok': 1, 'failed': 0, 'total': 1,
+        }, r2['plan']
+        r3 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr, apply=False,
+        )
+        assert r3['plan'] == {}, r3['plan']
+
+        # The parser skips partition-less parent rows, so only the raw dump
+        # proves that the account-scoped remove took the parent row too.
+        rows = list(csv.DictReader(
+            io.StringIO(await mgr.show_associations()), delimiter='|',
+        ))
+        assert not any(
+            row.get('Account') == leaving and row.get('User') == 'sl_alice'
+            for row in rows
+        ), [r for r in rows if r.get('User') == 'sl_alice']
+        current = await mgr.read_current_state()
+        assert current.default_accounts['sl_alice'] == staying
+
+        # Leave the controller as the other live test expects it: no alice,
+        # no managed accounts.
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        r4 = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=mgr,
+            apply=True, max_deletions=None,
+        )
+        for label, tally in r4['tally'].items():
+            assert tally['failed'] == 0, (label, tally, r4['plan'])
 
 
 class TestExportRootSSHKeys:
