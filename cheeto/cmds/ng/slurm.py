@@ -956,7 +956,9 @@ def _(parser: ArgParser):
                         help='Max concurrent sacctmgr commands per batch')
     parser.add_argument('--max-deletions', type=int, default=50,
                         help='Abort before applying if the plan would delete '
-                             'more than this many entities; -1 disables the cap')
+                             'more than this many association rows (a user- '
+                             'or account-scoped remove counts its rows); '
+                             '-1 disables the cap')
     parser.add_argument('--dump-commands', type=Path, default=None,
                         help='Write the planned sacctmgr commands to this file')
     parser.add_argument('--from-qos-dump', type=Path, default=None,

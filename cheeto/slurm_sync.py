@@ -48,6 +48,10 @@ class SlurmSyncAborted(Exception):
 # reconciliation candidates.
 PROTECTED_QOS = frozenset({'normal'})
 PROTECTED_ACCOUNTS = frozenset({'root'})
+# The root user is never removed as a whole Slurm user. The users seen on a
+# protected account and root's coordinators join it; see
+# `SlurmSyncState.protected_users`.
+PROTECTED_USERS = frozenset({'root'})
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +162,10 @@ class SlurmSyncState:
     # account. They are managed outside cheeto; `reconcile` masks them from
     # the diff so they're never added or removed here.
     root_coordinators: frozenset[str] = frozenset()
+    # Users holding an association on a protected account (root). Those rows
+    # are not parsed into `associations`, and `reconcile` never removes such
+    # a user as a whole Slurm user. Managed outside cheeto.
+    protected_users: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -188,23 +196,33 @@ def parse_qos_state(text: str) -> dict[str, QOSState]:
 
 def parse_association_state(
     text: str,
-) -> tuple[dict[AssocKey, str], dict[str, AccountState], dict[AssocKey, int]]:
+) -> tuple[
+    dict[AssocKey, str], dict[str, AccountState], dict[AssocKey, int],
+    frozenset[str],
+]:
     """Parse `sacctmgr show -P associations` output into
-    (associations, accounts, association_max_jobs). Account-level rows (no
-    User) carry the account limits; partition-scoped user rows carry the
-    (user, account, partition) -> QOS mapping and that association's MaxJobs
-    (empty -> -1). A user row without a Partition is the user's parent
-    association, which this sync does not manage: it is skipped rather than
-    read as an account row. The root account is skipped."""
+    (associations, accounts, association_max_jobs, protected_users).
+    Account-level rows (no User) carry the account limits; partition-scoped
+    user rows carry the (user, account, partition) -> QOS mapping and that
+    association's MaxJobs (empty -> -1). A user row without a Partition is
+    the user's parent association, which this sync does not manage: it is
+    skipped rather than read as an account row. Rows on protected accounts
+    (root) are skipped, but the users seen on them are returned as
+    `protected_users` so `reconcile` never removes them as whole users."""
     associations: dict[AssocKey, str] = {}
     accounts: dict[str, AccountState] = {}
     association_max_jobs: dict[AssocKey, int] = {}
+    protected_users: set[str] = set()
     for row in csv.DictReader(io.StringIO(text), delimiter='|'):
         account = (row.get('Account') or '').strip()
-        if not account or account in PROTECTED_ACCOUNTS:
+        if not account:
             continue
         partition = (row.get('Partition') or '').strip()
         user = (row.get('User') or '').strip()
+        if account in PROTECTED_ACCOUNTS:
+            if user:
+                protected_users.add(user)
+            continue
         if user:
             if partition:
                 key = (user, account, partition)
@@ -220,7 +238,9 @@ def parse_association_state(
             max_submit_jobs=int((row.get('MaxSubmit') or '-1').strip() or -1),
             max_job_length=(row.get('MaxWall') or '-1').strip() or '-1',
         )
-    return associations, accounts, association_max_jobs
+    return (
+        associations, accounts, association_max_jobs, frozenset(protected_users),
+    )
 
 
 def parse_user_default_accounts(text: str) -> dict[str, str]:
@@ -280,6 +300,10 @@ class CommandSpec:
     verb: str        # 'add' | 'modify' | 'remove'
     entity: str      # 'qos' | 'account' | 'user' | 'coordinator'
     args: tuple[str, ...] = ()
+    # Managed association rows this command removes; summed by
+    # `count_deletions` over the deletion batches. 1 for everything except
+    # the user- and account-scoped removals, which drop several rows at once.
+    deletions: int = 1
 
     def tokens(self) -> list[str]:
         return [self.verb, self.entity, *self.args]
@@ -366,6 +390,23 @@ def _remove_user(key: AssocKey) -> CommandSpec:
     ))
 
 
+def _remove_user_account(user: str, account: str, *, rows: int) -> CommandSpec:
+    # No partition filter: removes every row of the user on the account,
+    # including the partition-less parent row that per-partition removal
+    # leaves behind and that slurmctld falls back to for partitions without
+    # a specific association.
+    return CommandSpec('remove', 'user', (
+        f'user={user}', f'account={account}',
+    ), deletions=rows)
+
+
+def _remove_whole_user(user: str, *, rows: int) -> CommandSpec:
+    # No account/partition filter: removes the user record, its parent rows
+    # and every partition row on the cluster. This is the only form sacctmgr
+    # accepts for rows on the user's default account.
+    return CommandSpec('remove', 'user', (f'user={user}',), deletions=rows)
+
+
 def _add_coordinator(key: CoordKey) -> CommandSpec:
     account, user = key
     return CommandSpec('add', 'coordinator', (
@@ -412,18 +453,109 @@ def _diff(desired: dict, current: dict):
     return additions, updates, deletions
 
 
+def _plan_user_removals(
+    desired: SlurmSyncState, current: SlurmSyncState, user_del: list[AssocKey],
+) -> tuple[list[CommandSpec], list[AssocKey]]:
+    """Split the stale association keys into whole-user removals and the
+    residual keys. A user with rows to delete and no desired row at the site
+    is removed outright: sacctmgr refuses to delete any row on the user's
+    default account, and the unscoped `remove user` is the only form it
+    accepts for those. Protected users (root, anyone with a row on a
+    protected account, root's coordinators) keep scoped removal. Candidates
+    come from the stale keys only, never from `show user`, so a user with no
+    managed row is never touched."""
+    desired_users = {u for (u, _a, _p) in desired.associations}
+    protected = (
+        PROTECTED_USERS | current.protected_users | current.root_coordinators
+    )
+    rows: dict[str, int] = {}
+    for (u, _a, _p) in user_del:
+        rows[u] = rows.get(u, 0) + 1
+    whole = sorted(
+        u for u in rows if u not in desired_users and u not in protected
+    )
+    removed = set(whole)
+    specs = [_remove_whole_user(u, rows=rows[u]) for u in whole]
+    residual = [k for k in user_del if k[0] not in removed]
+    return specs, residual
+
+
+def _plan_association_removals(
+    desired: SlurmSyncState, residual: list[AssocKey],
+) -> list[CommandSpec]:
+    """Render the residual stale keys. When the user keeps no desired row on
+    an account, one account-scoped `remove user` drops every row there,
+    including the partition-less parent row that slurmctld falls back to
+    for partitions without a specific association. Otherwise each stale
+    partition row is removed on its own."""
+    desired_pairs = {(u, a) for (u, a, _p) in desired.associations}
+    by_pair: dict[tuple[str, str], list[AssocKey]] = {}
+    for key in sorted(residual):
+        by_pair.setdefault((key[0], key[1]), []).append(key)
+    specs: list[CommandSpec] = []
+    for (user, account), keys in by_pair.items():
+        if (user, account) in desired_pairs:
+            specs.extend(_remove_user(k) for k in keys)
+        else:
+            specs.append(_remove_user_account(user, account, rows=len(keys)))
+    return specs
+
+
+def _default_account_repoints(
+    desired: SlurmSyncState, current: SlurmSyncState, residual: list[AssocKey],
+) -> dict[str, str]:
+    """Default accounts that must move before the residual rows can be
+    deleted. sacctmgr refuses to delete any row on a user's current default
+    account, so a user losing rows there is re-pointed to a desired account
+    first: the lowest-sorted one with no deletions this run, else the
+    lowest-sorted one other than the current default. A user with a desired
+    default (the site has one configured) is governed by that comparison
+    instead. With no other account to move to the rows cannot be deleted; a
+    warning is logged and the delete is left to fail as before."""
+    deleting: dict[str, set[str]] = {}
+    for (u, a, _p) in residual:
+        deleting.setdefault(u, set()).add(a)
+    keeping: dict[str, set[str]] = {}
+    for (u, a, _p) in desired.associations:
+        keeping.setdefault(u, set()).add(a)
+    out: dict[str, str] = {}
+    for u in sorted(deleting):
+        if u in desired.default_accounts:
+            continue
+        cur = current.default_accounts.get(u)
+        if cur is None or cur not in deleting[u]:
+            continue
+        have = keeping.get(u, set())
+        choice = sorted(have - deleting[u]) or sorted(have - {cur})
+        if not choice:
+            logger.warning(
+                'Slurm user %s: rows on default account %s are stale but no '
+                'other account can take the default; sacctmgr will refuse '
+                'to delete them', u, cur,
+            )
+            continue
+        out[u] = choice[0]
+    return out
+
+
 def reconcile(
     desired: SlurmSyncState, current: SlurmSyncState,
 ) -> list[CommandBatch]:
     """Diff desired vs current and emit ordered sacctmgr command batches.
 
     Ordering is dependency-safe: emit all creates, then re-point user default
-    accounts, then all deletes. Two constraints drive it:
-      - A user's default account must point at a surviving account before its
-        stale associations are deleted (sacctmgr refuses to delete a user's
-        current default association). So 'Set user default accounts' runs
-        before 'Delete user associations', and after 'Add user associations'
-        so the (sticky) default-account association exists to point at.
+    accounts, then all deletes. The constraints:
+      - sacctmgr refuses to delete any association row on a user's current
+        default account. A user with no desired row at the site is removed
+        as a whole ('Delete users'), the only form sacctmgr accepts for those
+        rows. A user keeping rows elsewhere has the default re-pointed first:
+        'Set user default accounts' runs before 'Delete user associations',
+        and after 'Add user associations' so a new target row exists. The
+        desired default is the site default when one is configured, else the
+        pick made by `_default_account_repoints`.
+      - A user who keeps no desired row on an account loses every row there
+        with one account-scoped remove, parent row included; otherwise stale
+        partition rows are removed one by one.
       - Add-sets and delete-sets are disjoint by name/key (a same-named change
         is a modify, never delete+add), so doing all adds before all deletes
         introduces no collisions.
@@ -439,15 +571,22 @@ def reconcile(
         being deleted takes its seats with it, and an account absent from
         the desired state isn't managed here. Root's coordinators are
         inherited by every account and are masked from both sides.
+        'Remove coordinators' also precedes 'Delete users' so a removed
+        user's seats go explicitly even when the user removal fails on
+        running jobs, and 'Delete users' precedes 'Delete accounts' because
+        it empties accounts that are deleted in the same run.
     """
     qos_add, qos_upd, qos_del = _diff(desired.qos, current.qos)
     acct_add, acct_upd, acct_del = _diff(desired.accounts, current.accounts)
     user_add, user_upd, user_del = _diff(desired.associations, current.associations)
+    remove_users, residual = _plan_user_removals(desired, current, user_del)
+    remove_assocs = _plan_association_removals(desired, residual)
 
-    default_changes = [
-        u for u, acct in desired.default_accounts.items()
+    default_changes: dict[str, str] = {
+        u: acct for u, acct in desired.default_accounts.items()
         if current.default_accounts.get(u) != acct
-    ]
+    }
+    default_changes.update(_default_account_repoints(desired, current, residual))
 
     # The desired value is uniform per user (build_desired_slurm_state derives
     # it from the user's status), so one user-wide command per drifted user.
@@ -481,12 +620,12 @@ def reconcile(
                       for u in max_jobs_changes]),
         CommandBatch('Add coordinators', [_add_coordinator(k) for k in coord_add]),
         CommandBatch('Set user default accounts',
-                     [_set_user_default_account(u, desired.default_accounts[u])
-                      for u in default_changes]),
+                     [_set_user_default_account(u, acct)
+                      for u, acct in sorted(default_changes.items())]),
         CommandBatch('Remove coordinators',
                      [_remove_coordinator(k) for k in coord_del], is_deletion=True),
-        CommandBatch('Delete user associations',
-                     [_remove_user(k) for k in user_del], is_deletion=True),
+        CommandBatch('Delete users', remove_users, is_deletion=True),
+        CommandBatch('Delete user associations', remove_assocs, is_deletion=True),
         CommandBatch('Delete QOS', [_remove_qos(n) for n in qos_del], is_deletion=True),
         CommandBatch('Delete accounts',
                      [_remove_account(n) for n in acct_del], is_deletion=True),
@@ -494,7 +633,10 @@ def reconcile(
 
 
 def count_deletions(batches: list[CommandBatch]) -> int:
-    return sum(len(b.specs) for b in batches if b.is_deletion)
+    """Association rows (and coordinator seats) removed by the deletion
+    batches. Each spec counts its `deletions`, so the cap in `SyncSlurm`
+    measures rows whichever form the removal takes."""
+    return sum(s.deletions for b in batches if b.is_deletion for s in b.specs)
 
 
 def parse_state(
@@ -504,8 +646,8 @@ def parse_state(
     """Assemble a `SlurmSyncState` from raw `sacctmgr show -P` output for qos,
     associations, and (optionally) users and account coordinators. Shared by
     the live and dump readers."""
-    associations, accounts, association_max_jobs = parse_association_state(
-        associations_text,
+    associations, accounts, association_max_jobs, protected_users = (
+        parse_association_state(associations_text)
     )
     coords_by_account = parse_account_coordinators(coordinators_text)
     root_coordinators: set[str] = set()
@@ -524,6 +666,7 @@ def parse_state(
         default_accounts=parse_user_default_accounts(user_text),
         coordinators=coordinators,
         root_coordinators=frozenset(root_coordinators),
+        protected_users=protected_users,
     )
 
 

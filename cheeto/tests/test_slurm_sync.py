@@ -4,6 +4,10 @@ DB-backed tests for build_desired_slurm_state and the SyncSlurm operation
 live in test_beanie.py alongside the other beanie fixtures.
 """
 
+import logging
+
+import pytest
+
 from ..slurm_sync import (
     AccountState,
     QOSState,
@@ -61,8 +65,9 @@ class TestParsers:
             'lab|alice|hi|lab-q||||\n'
             'lab|bob|hi|lab-q|0|||\n'
         )
-        assocs, accounts, max_jobs = parse_association_state(text)
+        assocs, accounts, max_jobs, protected = parse_association_state(text)
         assert 'root' not in accounts
+        assert protected == frozenset()  # the root row carries no user
         assert accounts['lab'] == AccountState(
             max_user_jobs=10, max_group_jobs=-1,
             max_submit_jobs=20, max_job_length='7-00:00:00',
@@ -87,13 +92,30 @@ class TestParsers:
             'lab|alice|||0|||\n'
             'lab|alice|hi|lab-q||||\n'
         )
-        assocs, accounts, max_jobs = parse_association_state(text)
+        assocs, accounts, max_jobs, _protected = parse_association_state(text)
         assert accounts['lab'] == AccountState(
             max_user_jobs=10, max_group_jobs=-1,
             max_submit_jobs=20, max_job_length='7-00:00:00',
         )
         assert assocs == {('alice', 'lab', 'hi'): 'lab-q'}
         assert max_jobs == {('alice', 'lab', 'hi'): -1}
+
+    def test_parse_associations_records_protected_users(self):
+        # Rows on root are skipped, but the users seen there are returned so
+        # reconcile never removes them as whole Slurm users.
+        text = (
+            'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
+            'root|||||||\n'
+            'root|root|||||||\n'
+            'root|admin|||||||\n'
+            'root|admin|hi|normal||||\n'
+            'lab||||-1|-1|-1|-1\n'
+            'lab|alice|hi|lab-q||||\n'
+        )
+        assocs, accounts, _max_jobs, protected = parse_association_state(text)
+        assert protected == frozenset({'root', 'admin'})
+        assert assocs == {('alice', 'lab', 'hi'): 'lab-q'}
+        assert set(accounts) == {'lab'}
 
     def test_parse_account_coordinators_by_index(self):
         from ..slurm_sync import parse_account_coordinators
@@ -124,7 +146,7 @@ class TestReconcile:
             'Add user associations', 'Modify user associations',
             'Set user MaxJobs',
             'Add coordinators', 'Set user default accounts',
-            'Remove coordinators', 'Delete user associations',
+            'Remove coordinators', 'Delete users', 'Delete user associations',
             'Delete QOS', 'Delete accounts',
         ]
         # The default re-point must precede association deletes: a user's
@@ -132,6 +154,10 @@ class TestReconcile:
         labels = self._labels(batches)
         assert labels.index('Set user default accounts') < \
             labels.index('Delete user associations')
+        # A whole-user removal comes after its seats are removed explicitly
+        # and before the accounts it empties are deleted.
+        assert labels.index('Remove coordinators') < \
+            labels.index('Delete users') < labels.index('Delete accounts')
         # Coordinator seats need the user to exist, and must be removed
         # while the account still exists.
         assert labels.index('Add coordinators') > \
@@ -177,12 +203,15 @@ class TestReconcile:
         assert [s.args[0] for s in by_label['Modify QOS'].specs] == ['keep']
         assert [s.args[0] for s in by_label['Delete QOS'].specs] == ['gone']
         assert [s.args[0] for s in by_label['Modify accounts'].specs] == ['lab']
-        # association add for alice, delete for bob
+        # association add for alice; bob has no desired row at all, so he
+        # is removed as a whole user rather than row by row
         add = by_label['Add user associations'].specs
-        delete = by_label['Delete user associations'].specs
         assert any('user=alice' in s.args for s in add)
-        assert any('user=bob' in s.args for s in delete)
-        # deletions counted: gone QOS + bob assoc
+        assert by_label['Delete user associations'].specs == []
+        assert [str(s) for s in by_label['Delete users'].specs] == [
+            'sacctmgr -iQ remove user user=bob',
+        ]
+        # deletions counted: gone QOS + bob's one row
         assert count_deletions(reconcile(desired, current)) == 2
 
     def test_qos_add_renders_full_arg_set(self):
@@ -348,6 +377,156 @@ class TestCoordinators:
         assert remove.specs == []
 
 
+class TestUserRemoval:
+    """A user with stale rows and no desired row at the site is removed as a
+    whole Slurm user: sacctmgr refuses to delete rows on the user's default
+    account one by one."""
+
+    def _by_label(self, desired, current):
+        return {b.label: b for b in reconcile(desired, current)}
+
+    def test_user_with_no_desired_rows_removed_whole(self):
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+        })
+        by_label = self._by_label(SlurmSyncState(), current)
+        users = by_label['Delete users']
+        assert [str(s) for s in users.specs] == [
+            'sacctmgr -iQ remove user user=alice',
+        ]
+        assert users.is_deletion
+        assert users.specs[0].deletions == 2
+        assert by_label['Delete user associations'].specs == []
+        assert count_deletions(reconcile(SlurmSyncState(), current)) == 2
+
+    def test_user_keeping_rows_uses_scoped_removal(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+        })
+        by_label = self._by_label(desired, current)
+        assert by_label['Delete users'].specs == []
+        assert [str(s) for s in by_label['Delete user associations'].specs] == [
+            'sacctmgr -iQ remove user user=alice account=lab partition=lo',
+        ]
+
+    @pytest.mark.parametrize('username, current_kwargs', [
+        ('root', {}),
+        ('admin', {'protected_users': frozenset({'admin'})}),
+        ('admin', {'root_coordinators': frozenset({'admin'})}),
+    ])
+    def test_protected_users_fall_back_to_scoped_removal(
+        self, username, current_kwargs,
+    ):
+        current = SlurmSyncState(
+            associations={
+                (username, 'lab', 'hi'): 'q', (username, 'lab', 'lo'): 'q',
+            },
+            **current_kwargs,
+        )
+        by_label = self._by_label(SlurmSyncState(), current)
+        assert by_label['Delete users'].specs == []
+        # No desired row on lab: one account-scoped remove, never unscoped.
+        assert [str(s) for s in by_label['Delete user associations'].specs] == [
+            f'sacctmgr -iQ remove user user={username} account=lab',
+        ]
+        assert count_deletions(reconcile(SlurmSyncState(), current)) == 2
+
+    def test_show_user_only_user_untouched(self):
+        # Listed by `show user` but without a managed row: not a candidate.
+        current = SlurmSyncState(default_accounts={'sysadmin': 'root'})
+        batches = reconcile(SlurmSyncState(), current)
+        assert all(not b.specs for b in batches)
+
+    def test_removed_user_seat_still_removed_explicitly(self):
+        desired = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            associations={('bob', 'lab', 'hi'): 'q'},
+        )
+        current = SlurmSyncState(
+            accounts={'lab': AccountState()},
+            associations={('alice', 'lab', 'hi'): 'q', ('bob', 'lab', 'hi'): 'q'},
+            coordinators={('lab', 'alice')},
+        )
+        by_label = self._by_label(desired, current)
+        assert [str(s) for s in by_label['Remove coordinators'].specs] == [
+            'sacctmgr -iQ remove coordinator account=lab names=alice',
+        ]
+        assert [str(s) for s in by_label['Delete users'].specs] == [
+            'sacctmgr -iQ remove user user=alice',
+        ]
+        assert count_deletions(reconcile(desired, current)) == 2
+
+    def test_whole_user_removals_sorted(self):
+        current = SlurmSyncState(associations={
+            ('zed', 'lab', 'hi'): 'q', ('amy', 'lab', 'hi'): 'q',
+        })
+        by_label = self._by_label(SlurmSyncState(), current)
+        assert [s.args[0] for s in by_label['Delete users'].specs] == [
+            'user=amy', 'user=zed',
+        ]
+
+    def test_whole_user_needs_no_repoint(self):
+        current = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q'},
+            default_accounts={'alice': 'lab'},
+        )
+        by_label = self._by_label(SlurmSyncState(), current)
+        assert by_label['Set user default accounts'].specs == []
+        assert len(by_label['Delete users'].specs) == 1
+
+
+class TestAccountLevelRemoval:
+    """A user who keeps no desired row on an account loses every row there
+    with one account-scoped remove, which also drops the partition-less
+    parent row. Partial partition loss stays per-partition."""
+
+    def _delete_specs(self, desired, current):
+        batch = next(
+            b for b in reconcile(desired, current)
+            if b.label == 'Delete user associations'
+        )
+        return batch.specs
+
+    def test_losing_every_row_on_account_removes_at_account_level(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q',
+            ('alice', 'old', 'hi'): 'q', ('alice', 'old', 'lo'): 'q',
+        })
+        specs = self._delete_specs(desired, current)
+        assert [str(s) for s in specs] == [
+            'sacctmgr -iQ remove user user=alice account=old',
+        ]
+        assert specs[0].deletions == 2
+        assert not any(a.startswith('partition=') for a in specs[0].args)
+        assert count_deletions(reconcile(desired, current)) == 2
+
+    def test_partial_partition_loss_stays_per_partition(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+        })
+        specs = self._delete_specs(desired, current)
+        assert [str(s) for s in specs] == [
+            'sacctmgr -iQ remove user user=alice account=lab partition=lo',
+        ]
+        assert specs[0].deletions == 1
+
+    def test_mixed_account_and_partition_loss(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+            ('alice', 'old', 'hi'): 'q', ('alice', 'old', 'lo'): 'q',
+        })
+        specs = self._delete_specs(desired, current)
+        assert [str(s) for s in specs] == [
+            'sacctmgr -iQ remove user user=alice account=lab partition=lo',
+            'sacctmgr -iQ remove user user=alice account=old',
+        ]
+        assert count_deletions(reconcile(desired, current)) == 3
+
+
 class TestDumpSAcctMgr:
 
     QOS_DUMP = (
@@ -358,6 +537,7 @@ class TestDumpSAcctMgr:
     ASSOC_DUMP = (
         'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
         'root|||||||\n'
+        'root|root|||||||\n'
         'lab||||-1|-1|-1|-1\n'
         'lab|alice|hi|lab-q||||\n'
     )
@@ -383,6 +563,8 @@ class TestDumpSAcctMgr:
         # `coordinators` and is masked by reconcile.
         assert state.root_coordinators == frozenset({'admin'})
         assert state.coordinators == {('lab', 'alice'), ('lab', 'admin')}
+        # root's own row is skipped but marks root as a protected user.
+        assert state.protected_users == frozenset({'root'})
 
     async def test_from_files(self, tmp_path):
         from ..slurm_sync import DumpSAcctMgr
@@ -418,6 +600,7 @@ class TestDumpSAcctMgr:
         assert state.associations == {}
         assert state.coordinators == set()
         assert state.root_coordinators == frozenset()
+        assert state.protected_users == frozenset()
 
 
 class TestDefaultAccounts:
@@ -460,6 +643,158 @@ class TestDefaultAccounts:
     def test_default_batch_not_counted_as_deletion(self):
         desired = SlurmSyncState(default_accounts={'bob': 'labacct'})
         assert count_deletions(reconcile(desired, SlurmSyncState())) == 0
+
+
+class TestDefaultAccountRepoint:
+    """With no site default configured, a user losing rows on the account
+    that is their current DefaultAccount is re-pointed to a surviving
+    account before the delete: sacctmgr refuses to delete any row on the
+    default account."""
+
+    def _default_specs(self, desired, current):
+        batch = next(
+            b for b in reconcile(desired, current)
+            if b.label == 'Set user default accounts'
+        )
+        return [str(s) for s in batch.specs]
+
+    def test_repoint_when_default_account_has_deletions(self):
+        desired = SlurmSyncState(associations={('alice', 'other', 'hi'): 'q'})
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q', ('alice', 'other', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == [
+            'sacctmgr -iQ modify user set defaultaccount=other where user=alice',
+        ]
+
+    def test_repoint_when_default_account_removed_at_account_level(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q',
+                ('alice', 'old', 'hi'): 'q', ('alice', 'old', 'lo'): 'q',
+            },
+            default_accounts={'alice': 'old'},
+        )
+        batches = reconcile(desired, current)
+        by_label = {b.label: b for b in batches}
+        assert [str(s) for s in by_label['Set user default accounts'].specs] == [
+            'sacctmgr -iQ modify user set defaultaccount=lab where user=alice',
+        ]
+        assert [str(s) for s in by_label['Delete user associations'].specs] == [
+            'sacctmgr -iQ remove user user=alice account=old',
+        ]
+        labels = [b.label for b in batches]
+        assert labels.index('Set user default accounts') < \
+            labels.index('Delete user associations')
+
+    def test_repoint_picks_sorted_first(self):
+        desired = SlurmSyncState(associations={
+            ('alice', 'zeta', 'hi'): 'q', ('alice', 'beta', 'hi'): 'q',
+        })
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q',
+                ('alice', 'zeta', 'hi'): 'q', ('alice', 'beta', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == [
+            'sacctmgr -iQ modify user set defaultaccount=beta where user=alice',
+        ]
+
+    def test_repoint_prefers_account_without_deletions(self):
+        # alpha sorts first but loses a partition this run; beta is clean.
+        desired = SlurmSyncState(associations={
+            ('alice', 'alpha', 'hi'): 'q', ('alice', 'beta', 'hi'): 'q',
+        })
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q',
+                ('alice', 'alpha', 'hi'): 'q', ('alice', 'alpha', 'lo'): 'q',
+                ('alice', 'beta', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == [
+            'sacctmgr -iQ modify user set defaultaccount=beta where user=alice',
+        ]
+
+    def test_repoint_triggered_by_partition_loss_on_default(self):
+        # Every row on the default account carries is_def, so losing one
+        # partition there is refused as well.
+        desired = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'other', 'hi'): 'q',
+        })
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+                ('alice', 'other', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == [
+            'sacctmgr -iQ modify user set defaultaccount=other where user=alice',
+        ]
+
+    def test_no_repoint_when_default_unaffected(self):
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q', ('alice', 'old', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == []
+
+    def test_no_repoint_when_current_default_unknown(self):
+        # No `show user` dump: nothing to compare against, nothing emitted.
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(associations={
+            ('alice', 'lab', 'hi'): 'q', ('alice', 'old', 'hi'): 'q',
+        })
+        assert self._default_specs(desired, current) == []
+
+    def test_configured_default_wins(self):
+        desired = SlurmSyncState(
+            associations={
+                ('alice', 'sticky', 'hi'): 'q', ('alice', 'zed', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'sticky'},
+        )
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q', ('alice', 'sticky', 'hi'): 'q',
+                ('alice', 'zed', 'hi'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        assert self._default_specs(desired, current) == [
+            'sacctmgr -iQ modify user set defaultaccount=sticky where user=alice',
+        ]
+
+    def test_no_viable_replacement_warns(self, caplog):
+        # The only account is the default: nothing can take it over. The
+        # delete is still planned and left to fail, as before.
+        desired = SlurmSyncState(associations={('alice', 'lab', 'hi'): 'q'})
+        current = SlurmSyncState(
+            associations={
+                ('alice', 'lab', 'hi'): 'q', ('alice', 'lab', 'lo'): 'q',
+            },
+            default_accounts={'alice': 'lab'},
+        )
+        with caplog.at_level(logging.WARNING, logger='cheeto.slurm_sync'):
+            by_label = {b.label: b for b in reconcile(desired, current)}
+        assert by_label['Set user default accounts'].specs == []
+        assert [str(s) for s in by_label['Delete user associations'].specs] == [
+            'sacctmgr -iQ remove user user=alice account=lab partition=lo',
+        ]
+        assert any(
+            'default account lab' in r.getMessage() for r in caplog.records
+        )
 
 
 class TestAsyncSAcctMgrExecPrefix:
