@@ -1,4 +1,5 @@
 cheeto/**/__pycache__
+.claude/worktrees/
 .ipynb_checkpoints
 *.txt
 .vscode
