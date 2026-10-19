@@ -17,6 +17,7 @@ from beanie.operators import In
 
 SlurmRole = Literal['member', 'slurmer', 'sticky-member', 'sticky']
 
+from ..constants import SLURM_STATUS_MAX_JOBS
 from ..models.group import Group
 from ..models.base import link_target_id
 from ..models.site import Site
@@ -32,7 +33,7 @@ from ..models.user import User
 from ..models.user_site_info import UserSiteInfo
 from ..utils import megs_to_size, size_to_megs, size_to_megs_exact
 from .group import group_members_at_site, user_groups_at_site
-from .user import find_users
+from .user import effective_status_names_at_site, find_users
 
 logger = logging.getLogger(__name__)
 
@@ -489,11 +490,15 @@ async def build_desired_slurm_state(site: Site):
     """Assemble the site's desired Slurm state (QOS, accounts, associations,
     coordinators) from beanie into a `SlurmSyncState` for reconciliation
     against a controller. Associations are the cross product of each group's
-    SlurmAssociations with its slurm-eligible members/slurmers at the site
-    (users whose effective access at the site includes `slurm`). Only
-    accounts that end up with at least one association are included, and
-    coordinator seats are emitted only for those accounts and only for users
-    that hold at least one association at the site.
+    SlurmAssociations with its slurm-eligible members/slurmers at the site:
+    users whose effective access at the site includes `slurm` AND whose
+    effective status is in `SLURM_STATUS_MAX_JOBS` (`active`, `offboarding`,
+    `disabled`; an `inactive` or status-less user holds no associations).
+    The map value is the MaxJobs limit recorded per association — 0 for
+    `disabled` users so no new job starts, -1 otherwise. Only accounts that
+    end up with at least one association are included, and coordinator seats
+    are emitted only for those accounts and only for users that hold at
+    least one association at the site.
     """
     from ..slurm_sync import (
         AccountState,
@@ -516,8 +521,17 @@ async def build_desired_slurm_state(site: Site):
             flags=frozenset(qos.flags),
         )
 
-    # slurm-eligible users at the site (effective access includes 'slurm').
-    eligible = {u.name for u in await find_users(access='slurm', site=site.name)}
+    # slurm-eligible users at the site: effective access includes 'slurm'
+    # AND the effective status may hold Slurm associations. The map value is
+    # the MaxJobs limit for the user's associations. A user with no status at
+    # all is ineligible.
+    status_by_user = await effective_status_names_at_site(site)
+    max_jobs_by_name: dict[str, int] = {}
+    for u in await find_users(access='slurm', site=site.name):
+        max_jobs = SLURM_STATUS_MAX_JOBS.get(status_by_user.get(u.id))
+        if max_jobs is not None:
+            max_jobs_by_name[u.name] = max_jobs
+    eligible = set(max_jobs_by_name)
 
     # All accounts at the site, keyed by owning group name.
     accounts = await SlurmAccount.find(
@@ -555,7 +569,9 @@ async def build_desired_slurm_state(site: Site):
         if members:
             used_groups.add(group.name)
         for username in members:
-            state.associations[(username, group.name, partition_name)] = qos_name
+            key = (username, group.name, partition_name)
+            state.associations[key] = qos_name
+            state.association_max_jobs[key] = max_jobs_by_name[username]
 
     state.accounts = {
         gname: acct for gname, acct in account_state_by_group.items()

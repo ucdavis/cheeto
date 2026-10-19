@@ -70,6 +70,17 @@ USER_STATUSES : Final = (
     'offboarding'
 )
 
+# Slurm treatment per user status. A status in this map may hold Slurm
+# associations; the value is the MaxJobs limit the sync sets on the user's
+# associations: -1 is unlimited, 0 stops new jobs from starting while
+# running jobs finish. A status absent from the map (`inactive`) holds no
+# associations, so the sync deletes them.
+SLURM_STATUS_MAX_JOBS : Final = {
+    'active': -1,
+    'offboarding': -1,
+    'disabled': 0,
+}
+
 ACCESS_TYPES : Final = (
     'login-ssh',
     'ondemand',

@@ -141,6 +141,13 @@ class SlurmSyncState:
     qos: dict[str, QOSState] = field(default_factory=dict)
     accounts: dict[str, AccountState] = field(default_factory=dict)
     associations: dict[AssocKey, str] = field(default_factory=dict)
+    # MaxJobs on each user association (-1 is unlimited). Desired side: the
+    # per-status value from `SLURM_STATUS_MAX_JOBS`, uniform across a user's
+    # associations (0 for `disabled` users). Current side: parsed per row.
+    # Reconciled per *user* with one `modify user ... set MaxJobs=` because
+    # sacctmgr applies that to every association of the user, and because it
+    # succeeds while the user has running jobs (unlike `remove user`).
+    association_max_jobs: dict[AssocKey, int] = field(default_factory=dict)
     # Per-user default account (sacctmgr's user-level DefaultAccount), keyed
     # by username. Empty when the site has no configured default account.
     default_accounts: dict[str, str] = field(default_factory=dict)
@@ -181,30 +188,39 @@ def parse_qos_state(text: str) -> dict[str, QOSState]:
 
 def parse_association_state(
     text: str,
-) -> tuple[dict[AssocKey, str], dict[str, AccountState]]:
+) -> tuple[dict[AssocKey, str], dict[str, AccountState], dict[AssocKey, int]]:
     """Parse `sacctmgr show -P associations` output into
-    (associations, accounts). Account-level rows (no Partition) carry the
-    account limits; user rows carry the (user, account, partition) -> QOS
-    mapping. The root account is skipped."""
+    (associations, accounts, association_max_jobs). Account-level rows (no
+    User) carry the account limits; partition-scoped user rows carry the
+    (user, account, partition) -> QOS mapping and that association's MaxJobs
+    (empty -> -1). A user row without a Partition is the user's parent
+    association, which this sync does not manage: it is skipped rather than
+    read as an account row. The root account is skipped."""
     associations: dict[AssocKey, str] = {}
     accounts: dict[str, AccountState] = {}
+    association_max_jobs: dict[AssocKey, int] = {}
     for row in csv.DictReader(io.StringIO(text), delimiter='|'):
         account = (row.get('Account') or '').strip()
         if not account or account in PROTECTED_ACCOUNTS:
             continue
         partition = (row.get('Partition') or '').strip()
         user = (row.get('User') or '').strip()
-        if not partition:
-            # Account-level definition row.
-            accounts[account] = AccountState(
-                max_user_jobs=int((row.get('MaxJobs') or '-1').strip() or -1),
-                max_group_jobs=int((row.get('GrpJobs') or '-1').strip() or -1),
-                max_submit_jobs=int((row.get('MaxSubmit') or '-1').strip() or -1),
-                max_job_length=(row.get('MaxWall') or '-1').strip() or '-1',
-            )
-        elif user:
-            associations[(user, account, partition)] = (row.get('QOS') or '').strip()
-    return associations, accounts
+        if user:
+            if partition:
+                key = (user, account, partition)
+                associations[key] = (row.get('QOS') or '').strip()
+                association_max_jobs[key] = int(
+                    (row.get('MaxJobs') or '-1').strip() or -1
+                )
+            continue
+        # Account-level definition row.
+        accounts[account] = AccountState(
+            max_user_jobs=int((row.get('MaxJobs') or '-1').strip() or -1),
+            max_group_jobs=int((row.get('GrpJobs') or '-1').strip() or -1),
+            max_submit_jobs=int((row.get('MaxSubmit') or '-1').strip() or -1),
+            max_job_length=(row.get('MaxWall') or '-1').strip() or '-1',
+        )
+    return associations, accounts, association_max_jobs
 
 
 def parse_user_default_accounts(text: str) -> dict[str, str]:
@@ -372,6 +388,16 @@ def _set_user_default_account(user: str, account: str) -> CommandSpec:
     ))
 
 
+def _set_user_max_jobs(user: str, max_jobs: int) -> CommandSpec:
+    # MaxJobs is an association limit. A `where user=` without account or
+    # partition reaches every association of the user, including the
+    # partition-less parent row this sync does not otherwise track. Unlike
+    # `remove user`, sacctmgr accepts this while the user has running jobs.
+    return CommandSpec('modify', 'user', (
+        'set', f'MaxJobs={max_jobs}', 'where', f'user={user}',
+    ))
+
+
 # ---------------------------------------------------------------------------
 # Reconcile
 # ---------------------------------------------------------------------------
@@ -401,6 +427,11 @@ def reconcile(
       - Add-sets and delete-sets are disjoint by name/key (a same-named change
         is a modify, never delete+add), so doing all adds before all deletes
         introduces no collisions.
+      - Per-user MaxJobs is set after user associations are added/modified
+        so a new `disabled` user's fresh rows are capped in the same run.
+        Only desired associations are compared (a stale row about to be
+        deleted never triggers a modify); a row missing from the current
+        side is a new association, which sacctmgr creates unlimited (-1).
       - Coordinator seats are added after user associations (slurmctld only
         honors a seat for a user it knows) and removed before accounts are
         deleted (the account must still exist for the removal to apply).
@@ -417,6 +448,16 @@ def reconcile(
         u for u, acct in desired.default_accounts.items()
         if current.default_accounts.get(u) != acct
     ]
+
+    # The desired value is uniform per user (build_desired_slurm_state derives
+    # it from the user's status), so one user-wide command per drifted user.
+    max_jobs_by_user = {
+        key[0]: v for key, v in desired.association_max_jobs.items()
+    }
+    max_jobs_changes = sorted({
+        key[0] for key, want in desired.association_max_jobs.items()
+        if current.association_max_jobs.get(key, -1) != want
+    })
 
     mask = current.root_coordinators
     desired_coords = {k for k in desired.coordinators if k[1] not in mask}
@@ -435,6 +476,9 @@ def reconcile(
                      [_add_user(k, desired.associations[k]) for k in user_add]),
         CommandBatch('Modify user associations',
                      [_modify_user(k, desired.associations[k]) for k in user_upd]),
+        CommandBatch('Set user MaxJobs',
+                     [_set_user_max_jobs(u, max_jobs_by_user[u])
+                      for u in max_jobs_changes]),
         CommandBatch('Add coordinators', [_add_coordinator(k) for k in coord_add]),
         CommandBatch('Set user default accounts',
                      [_set_user_default_account(u, desired.default_accounts[u])
@@ -460,7 +504,9 @@ def parse_state(
     """Assemble a `SlurmSyncState` from raw `sacctmgr show -P` output for qos,
     associations, and (optionally) users and account coordinators. Shared by
     the live and dump readers."""
-    associations, accounts = parse_association_state(associations_text)
+    associations, accounts, association_max_jobs = parse_association_state(
+        associations_text,
+    )
     coords_by_account = parse_account_coordinators(coordinators_text)
     root_coordinators: set[str] = set()
     for name in PROTECTED_ACCOUNTS:
@@ -474,6 +520,7 @@ def parse_state(
         qos=parse_qos_state(qos_text),
         accounts=accounts,
         associations=associations,
+        association_max_jobs=association_max_jobs,
         default_accounts=parse_user_default_accounts(user_text),
         coordinators=coordinators,
         root_coordinators=frozenset(root_coordinators),
