@@ -48,6 +48,34 @@ def effective_status_link(user: User, usi: UserSiteInfo | None):
     return user.status
 
 
+async def effective_status_names_at_site(
+    site: Site,
+) -> dict[PydanticObjectId, str | None]:
+    """User id -> effective status name at `site` for every user with a
+    UserSiteInfo there: the per-site override (`usi.status`) if set, else the
+    global `user.status`; None when neither resolves. Three queries regardless
+    of population size — the site-wide form of `effective_status_link`."""
+    usis = await UserSiteInfo.find(UserSiteInfo.site.id == site.id).to_list()
+    if not usis:
+        return {}
+    user_ids = [link_target_id(usi.user) for usi in usis]
+    users = await User.find(In(User.id, user_ids)).to_list()
+    global_status = {u.id: link_target_id(u.status) for u in users}
+    status_name = {
+        sg.id: sg.status_name
+        for sg in await StatusGroup.find_all().to_list()
+    }
+    out: dict[PydanticObjectId, str | None] = {}
+    for usi in usis:
+        user_id = link_target_id(usi.user)
+        if usi.status is not None:
+            sg_id = link_target_id(usi.status)
+        else:
+            sg_id = global_status.get(user_id)
+        out[user_id] = status_name.get(sg_id)
+    return out
+
+
 async def list_user_ssh_keys(user: User) -> list[SshKey]:
     """Every SshKey belonging to `user`."""
     return await SshKey.find(SshKey.user.id == user.id).to_list()

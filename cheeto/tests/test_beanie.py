@@ -3393,6 +3393,49 @@ class TestUserActiveSites:
         assert await user_active_sites(user) == []
 
 
+class TestEffectiveStatusNamesAtSite:
+    """`effective_status_names_at_site` maps every at-site user id to the
+    status that applies there: the UserSiteInfo override when set, else the
+    global User.status; None when neither resolves."""
+
+    async def _user(self, name, uid, status):
+        user = User(
+            name=name, email=f'{name}@esn.test', uid=uid, gid=uid,
+            fullname=name, home_directory=f'/home/{name}',
+            status=await status_link(status) if status else None,
+        )
+        await user.insert()
+        return user
+
+    async def test_override_global_and_missing(self, beanie_client):
+        from cheeto.queries import effective_status_names_at_site
+        site = Site(name='esnsite', fqdn='esn.test')
+        await site.insert()
+        other = Site(name='esnother', fqdn='esn2.test')
+        await other.insert()
+        empty = Site(name='esnempty', fqdn='esn3.test')
+        await empty.insert()
+
+        overridden = await self._user('esn_over', 76001, 'active')
+        inherited = await self._user('esn_inh', 76002, 'inactive')
+        statusless = await self._user('esn_none', 76003, None)
+        elsewhere = await self._user('esn_else', 76004, 'active')
+
+        await UserSiteInfo(
+            user=overridden, site=site, status=await status_link('disabled'),
+        ).insert()
+        await UserSiteInfo(user=inherited, site=site).insert()
+        await UserSiteInfo(user=statusless, site=site).insert()
+        await UserSiteInfo(user=elsewhere, site=other).insert()
+
+        assert await effective_status_names_at_site(site) == {
+            overridden.id: 'disabled',
+            inherited.id: 'inactive',
+            statusless.id: None,
+        }
+        assert await effective_status_names_at_site(empty) == {}
+
+
 class TestUserSiteOverrides:
     """`user_site_overrides` reports per-site status/access overrides, with
     None/[] marking 'inherit from global'."""
@@ -5587,6 +5630,25 @@ async def _seed_slurm_site(with_default=False, partition_name='hi',
     return site
 
 
+async def _set_slurm_site_status(username, status_name):
+    """Set (or clear, with None) `username`'s per-site status override at
+    slsite. `_seed_slurm_site` gives every seeded user an explicit `active`
+    override, so the global status is shadowed until it is cleared."""
+    site = await Site.find_one(Site.name == 'slsite')
+    user = await User.find_one(User.name == username)
+    usi = await UserSiteInfo.find_one(
+        UserSiteInfo.user.id == user.id, UserSiteInfo.site.id == site.id,
+    )
+    usi.status = await status_link(status_name) if status_name else None
+    await usi.save()
+
+
+async def _set_slurm_global_status(username, status_name):
+    user = await User.find_one(User.name == username)
+    user.status = await status_link(status_name)
+    await user.save()
+
+
 class TestBuildDesiredSlurmState:
 
     async def test_desired_state_excludes_ineligible_users(self, beanie_client):
@@ -5665,6 +5727,81 @@ class TestBuildDesiredSlurmState:
         assert 'sl_bob' in caplog.text
         assert 'sllab' in caplog.text
         assert 'sl_alice' not in caplog.text
+
+    # -- status gating ------------------------------------------------------
+
+    async def test_inactive_user_excluded(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(with_default=True)
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        state = await build_desired_slurm_state(site)
+        # alice was the only slurm-eligible user: nothing is left, not even
+        # the sticky default account.
+        assert state.associations == {}
+        assert state.association_max_jobs == {}
+        assert state.accounts == {}
+        assert state.default_accounts == {}
+
+    async def test_disabled_user_kept_with_max_jobs_zero(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', 'disabled')
+        state = await build_desired_slurm_state(site)
+        assert state.associations == {('sl_alice', 'sllab', 'hi'): 'sllab-q'}
+        assert state.association_max_jobs == {('sl_alice', 'sllab', 'hi'): 0}
+
+    async def test_active_and_offboarding_unlimited(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site()
+        state = await build_desired_slurm_state(site)   # seeded active
+        assert state.association_max_jobs == {('sl_alice', 'sllab', 'hi'): -1}
+
+        await _set_slurm_site_status('sl_alice', 'offboarding')
+        state = await build_desired_slurm_state(site)
+        assert state.associations == {('sl_alice', 'sllab', 'hi'): 'sllab-q'}
+        assert state.association_max_jobs == {('sl_alice', 'sllab', 'hi'): -1}
+
+    async def test_global_status_used_without_site_override(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', None)
+        await _set_slurm_global_status('sl_alice', 'inactive')
+        state = await build_desired_slurm_state(site)
+        assert state.associations == {}
+
+        await _set_slurm_global_status('sl_alice', 'disabled')
+        state = await build_desired_slurm_state(site)
+        assert state.association_max_jobs == {('sl_alice', 'sllab', 'hi'): 0}
+
+    async def test_site_override_wins_over_global(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(with_default=True, extra_sticky_user=True)
+        # alice: globally inactive but active at the site -> kept, unlimited.
+        await _set_slurm_global_status('sl_alice', 'inactive')
+        # carol: globally active but inactive at the site -> the sticky
+        # roster must not pick her up either.
+        await _set_slurm_site_status('sl_carol', 'inactive')
+        state = await build_desired_slurm_state(site)
+        assert state.association_max_jobs[('sl_alice', 'sllab', 'hi')] == -1
+        assert not any(u == 'sl_carol' for (u, _, _) in state.associations)
+        assert 'sl_carol' not in state.default_accounts
+
+    async def test_coordinator_seats_follow_eligibility(self, beanie_client):
+        from cheeto.queries import build_desired_slurm_state
+
+        site = await _seed_slurm_site(coordinators=('sl_alice',))
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        state = await build_desired_slurm_state(site)
+        assert state.coordinators == set()
+
+        await _set_slurm_site_status('sl_alice', 'disabled')
+        state = await build_desired_slurm_state(site)
+        assert state.coordinators == {('sllab', 'sl_alice')}
 
 
 class _FakeSAcctMgr:
@@ -5774,6 +5911,46 @@ class TestSyncSlurmOperation:
         )
         assert fake.dispatched == []
         assert result['plan']['Delete QOS'] == ['sacctmgr -iQ remove qos stale-q']
+
+    async def test_inactive_user_association_deleted(self, beanie_client):
+        from cheeto.slurm_sync import AccountState, SlurmSyncState
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', 'inactive')
+        current = SlurmSyncState(
+            accounts={'sllab': AccountState()},
+            associations={('sl_alice', 'sllab', 'hi'): 'sllab-q'},
+            association_max_jobs={('sl_alice', 'sllab', 'hi'): -1},
+        )
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name,
+            sacctmgr=_FakeSAcctMgr(current), apply=False,
+        )
+        assert result['plan']['Delete user associations'] == [
+            'sacctmgr -iQ remove user user=sl_alice account=sllab partition=hi',
+        ]
+        assert 'Add user associations' not in result['plan']
+        assert 'Set user MaxJobs' not in result['plan']
+
+    async def test_disabled_user_gets_max_jobs_zero(self, beanie_client):
+        from cheeto.slurm_sync import SlurmSyncState
+        site = await _seed_slurm_site()
+        await _set_slurm_site_status('sl_alice', 'disabled')
+        fake = _FakeSAcctMgr(SlurmSyncState())  # empty controller
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake, apply=True,
+        )
+        assert result['plan']['Set user MaxJobs'] == [
+            'sacctmgr -iQ modify user set MaxJobs=0 where user=sl_alice',
+        ]
+        # The cap is dispatched after the association exists.
+        add_idx = next(
+            i for i, c in enumerate(fake.dispatched)
+            if 'add user user=sl_alice' in c
+        )
+        cap_idx = next(
+            i for i, c in enumerate(fake.dispatched) if 'set MaxJobs=0' in c
+        )
+        assert add_idx < cap_idx
 
     async def test_offline_dump_idempotent(self, beanie_client):
         """A DumpSAcctMgr whose captured state matches the site's desired

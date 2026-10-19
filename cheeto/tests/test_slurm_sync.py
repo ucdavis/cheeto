@@ -59,9 +59,9 @@ class TestParsers:
             'root|||||||\n'
             'lab||||10|-1|20|7-00:00:00\n'
             'lab|alice|hi|lab-q||||\n'
-            'lab|bob|hi|lab-q||||\n'
+            'lab|bob|hi|lab-q|0|||\n'
         )
-        assocs, accounts = parse_association_state(text)
+        assocs, accounts, max_jobs = parse_association_state(text)
         assert 'root' not in accounts
         assert accounts['lab'] == AccountState(
             max_user_jobs=10, max_group_jobs=-1,
@@ -71,6 +71,29 @@ class TestParsers:
             ('alice', 'lab', 'hi'): 'lab-q',
             ('bob', 'lab', 'hi'): 'lab-q',
         }
+        # Per-association MaxJobs: empty cell is unlimited (-1).
+        assert max_jobs == {
+            ('alice', 'lab', 'hi'): -1,
+            ('bob', 'lab', 'hi'): 0,
+        }
+
+    def test_parse_user_parent_row_does_not_clobber_account(self):
+        # A user row without a partition is the user's parent association.
+        # It is neither an association nor an account row: it must not
+        # overwrite the limits parsed from the real account row.
+        text = (
+            'Account|User|Partition|QOS|MaxJobs|GrpJobs|MaxSubmit|MaxWall\n'
+            'lab||||10|-1|20|7-00:00:00\n'
+            'lab|alice|||0|||\n'
+            'lab|alice|hi|lab-q||||\n'
+        )
+        assocs, accounts, max_jobs = parse_association_state(text)
+        assert accounts['lab'] == AccountState(
+            max_user_jobs=10, max_group_jobs=-1,
+            max_submit_jobs=20, max_job_length='7-00:00:00',
+        )
+        assert assocs == {('alice', 'lab', 'hi'): 'lab-q'}
+        assert max_jobs == {('alice', 'lab', 'hi'): -1}
 
     def test_parse_account_coordinators_by_index(self):
         from ..slurm_sync import parse_account_coordinators
@@ -99,6 +122,7 @@ class TestReconcile:
         assert self._labels(batches) == [
             'Add QOS', 'Modify QOS', 'Add accounts', 'Modify accounts',
             'Add user associations', 'Modify user associations',
+            'Set user MaxJobs',
             'Add coordinators', 'Set user default accounts',
             'Remove coordinators', 'Delete user associations',
             'Delete QOS', 'Delete accounts',
@@ -114,6 +138,9 @@ class TestReconcile:
             labels.index('Add user associations')
         assert labels.index('Remove coordinators') < \
             labels.index('Delete accounts')
+        # A new disabled user's fresh rows are capped in the same run.
+        assert labels.index('Set user MaxJobs') > \
+            labels.index('Add user associations')
 
     def test_identical_states_produce_no_commands(self):
         q = QOSState(group=TRESLimit(cpus=8), priority=5, flags=frozenset({'DenyOnLimit'}))
@@ -169,6 +196,77 @@ class TestReconcile:
         assert 'GrpTRES=cpu=8,mem=16384,gres/gpu=2' in cmd
         assert 'Priority=10' in cmd
         assert 'Flags=DenyOnLimit' in cmd
+
+
+class TestUserMaxJobs:
+    """Per-user MaxJobs is reconciled from the per-association values with
+    one user-wide `modify user ... set MaxJobs=` per drifted user."""
+
+    def _batch(self, desired, current):
+        return next(
+            b for b in reconcile(desired, current)
+            if b.label == 'Set user MaxJobs'
+        )
+
+    def test_new_disabled_user_capped_in_same_run(self):
+        # No current rows: the add creates them unlimited, so the cap is due.
+        desired = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q'},
+            association_max_jobs={('alice', 'lab', 'hi'): 0},
+        )
+        batch = self._batch(desired, SlurmSyncState())
+        assert [str(s) for s in batch.specs] == [
+            'sacctmgr -iQ modify user set MaxJobs=0 where user=alice',
+        ]
+        assert not batch.is_deletion
+        assert count_deletions(reconcile(desired, SlurmSyncState())) == 0
+
+    def test_unlimited_in_sync_emits_nothing(self):
+        desired = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q'},
+            association_max_jobs={('alice', 'lab', 'hi'): -1},
+        )
+        current = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q'},
+            association_max_jobs={('alice', 'lab', 'hi'): -1},
+        )
+        assert self._batch(desired, current).specs == []
+        # A not-yet-created association is unlimited by default as well.
+        assert self._batch(desired, SlurmSyncState()).specs == []
+
+    def test_reactivated_user_reset_to_unlimited(self):
+        keys = (('alice', 'lab', 'hi'), ('alice', 'lab', 'lo'))
+        desired = SlurmSyncState(
+            associations={k: 'q' for k in keys},
+            association_max_jobs={k: -1 for k in keys},
+        )
+        current = SlurmSyncState(
+            associations={k: 'q' for k in keys},
+            association_max_jobs={keys[0]: 0, keys[1]: -1},
+        )
+        assert [str(s) for s in self._batch(desired, current).specs] == [
+            'sacctmgr -iQ modify user set MaxJobs=-1 where user=alice',
+        ]
+
+    def test_one_command_per_user(self):
+        keys = (('alice', 'lab', 'hi'), ('alice', 'lab', 'lo'))
+        desired = SlurmSyncState(
+            associations={k: 'q' for k in keys},
+            association_max_jobs={k: 0 for k in keys},
+        )
+        assert len(self._batch(desired, SlurmSyncState()).specs) == 1
+
+    def test_stale_association_not_compared(self):
+        # bob's row is about to be deleted; its MaxJobs is irrelevant.
+        desired = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q'},
+            association_max_jobs={('alice', 'lab', 'hi'): -1},
+        )
+        current = SlurmSyncState(
+            associations={('alice', 'lab', 'hi'): 'q', ('bob', 'lab', 'hi'): 'q'},
+            association_max_jobs={('alice', 'lab', 'hi'): -1, ('bob', 'lab', 'hi'): 0},
+        )
+        assert self._batch(desired, current).specs == []
 
 
 class TestCoordinators:
