@@ -1,6 +1,5 @@
 import os
 from argparse import Namespace
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ponderosa import ArgParser
@@ -64,6 +63,7 @@ from ._args import (
     user_args,
     yaml_args,
 )
+from ._iam_show import add_offboarding_rows, iam_offboarding
 from ._slurm_show import user_slurm_at_site
 
 
@@ -76,28 +76,6 @@ def _write_class_passwords(fp, credentials: list[tuple[str, str]]) -> None:
     # v1 format: one 'username password' line per user.
     for name, password in credentials:
         fp.write(f'{name} {password}\n')
-
-
-def _project_iam_dates(
-    first_missing_at: datetime,
-    grace_days: int,
-    expiry_offset_days: int,
-) -> dict:
-    """Compute the fixed grace-end and projected-expiry dates from
-    first_missing_at + the configured offsets, plus a 'grace_remaining'
-    timedelta relative to now (None if grace has already passed)."""
-    fma = first_missing_at
-    if fma.tzinfo is None:
-        fma = fma.replace(tzinfo=timezone.utc)
-    grace_ends = fma + timedelta(days=grace_days)
-    projected_expiry = grace_ends + timedelta(days=expiry_offset_days)
-    now = datetime.now(timezone.utc)
-    remaining = grace_ends - now
-    return {
-        'grace_ends_on': grace_ends,
-        'projected_expires_at': projected_expiry,
-        'grace_remaining': remaining if remaining.total_seconds() > 0 else None,
-    }
 
 
 async def _user_to_dict(user: User,
@@ -151,12 +129,16 @@ async def _user_to_dict(user: User,
                 }
                 for a in iam.person.associations
             ]
-        if iam.first_missing_at is not None and iam_config is not None:
-            iam_data.update(_project_iam_dates(
-                iam.first_missing_at,
-                iam_config.grace_days,
-                iam_config.expiry_offset_days,
-            ))
+        if iam_config is not None:
+            offboarding = iam_offboarding(
+                iam,
+                status=data['status'],
+                expires_at=user.expires_at,
+                grace_days=iam_config.grace_days,
+                expiry_offset_days=iam_config.expiry_offset_days,
+            )
+            if offboarding is not None:
+                iam_data['offboarding'] = offboarding
         data['iam'] = iam_data
     if site_info is not None:
         data['site_info'] = site_info
@@ -244,26 +226,9 @@ def _render_user_iam(iam: dict) -> Table:
             f'[red]{iam["first_missing_at"]}[/]',
         )
 
-    # Grace/projection: only set when iam_config was passed AND the user
-    # is currently in a missing streak.
-    if iam.get('grace_ends_on'):
-        remaining = iam.get('grace_remaining')
-        if remaining is not None:
-            days = remaining.days
-            hours = remaining.seconds // 3600
-            table.add_row(
-                'grace remaining', f'[yellow]{days}d {hours}h[/]',
-            )
-        else:
-            table.add_row(
-                'grace remaining',
-                '[red]past — next sync will set expires_at[/]',
-            )
-        table.add_row('grace ends on', str(iam['grace_ends_on']))
-        table.add_row(
-            'projected expires_at',
-            f'[red]{iam["projected_expires_at"]}[/]',
-        )
+    # Offboarding phase rows: only set when iam_config was passed and the
+    # user is somewhere in the missing -> offboarding -> inactive pipeline.
+    add_offboarding_rows(table, iam.get('offboarding'))
 
     associations = iam.get('associations') or []
     if associations:

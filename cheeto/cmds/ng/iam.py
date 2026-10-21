@@ -4,7 +4,7 @@ Wraps the SyncUserIAM / SyncAllUsersIAM / ReapOffboardedUsers operations.
 """
 
 from argparse import Namespace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from ponderosa import ArgParser
 from rich.panel import Panel
@@ -26,6 +26,7 @@ from ...queries import find_restorable_users, resolve_status_name
 from ...yaml import print_yaml
 from . import parent
 from ._args import user_args, yaml_args
+from ._iam_show import add_offboarding_rows, iam_offboarding
 
 
 parent('ng', 'iam', help='UC Davis IAM sync operations (async/beanie)')
@@ -153,6 +154,14 @@ async def iam_show_cmd(args: Namespace):
         return 1
 
     cfg = args.config.ucdiam
+    status_name = await resolve_status_name(user.status)
+    offboarding = iam_offboarding(
+        user.iam,
+        status=status_name,
+        expires_at=user.expires_at,
+        grace_days=cfg.grace_days,
+        expiry_offset_days=cfg.expiry_offset_days,
+    )
 
     if args.yaml:
         iam_data = None
@@ -176,11 +185,12 @@ async def iam_show_cmd(args: Namespace):
                 'last_seen_at': iam.last_seen_at,
                 'first_missing_at': iam.first_missing_at,
                 'person': person,
+                'offboarding': offboarding,
             }
         print_yaml({
             'name': user.name,
             'type': user.type,
-            'status': await resolve_status_name(user.status),
+            'status': status_name,
             'expires_at': user.expires_at,
             'iam': iam_data,
         })
@@ -191,9 +201,7 @@ async def iam_show_cmd(args: Namespace):
     table.add_column()
     table.add_row('name', user.name)
     table.add_row('type', user.type)
-    table.add_row(
-        'status', await resolve_status_name(user.status) or '[dim](none)[/]',
-    )
+    table.add_row('status', status_name or '[dim](none)[/]')
     table.add_row('expires_at', str(user.expires_at) if user.expires_at else '—')
 
     if user.iam is None:
@@ -215,29 +223,7 @@ async def iam_show_cmd(args: Namespace):
         table.add_row('last_seen_at', str(iam.last_seen_at) if iam.last_seen_at else '—')
         table.add_row('first_missing_at', str(iam.first_missing_at) if iam.first_missing_at else '—')
 
-        # Project the next state transition based on current bookkeeping.
-        if iam.first_missing_at is not None:
-            now = datetime.now(timezone.utc)
-            # Some test datasets store naive datetimes; normalize for the math.
-            fma = iam.first_missing_at
-            if fma.tzinfo is None:
-                fma = fma.replace(tzinfo=timezone.utc)
-            elapsed = now - fma
-            grace_remaining = timedelta(days=cfg.grace_days) - elapsed
-            if grace_remaining.total_seconds() > 0:
-                table.add_row(
-                    'grace remaining',
-                    f'{grace_remaining.days}d {grace_remaining.seconds // 3600}h',
-                )
-                projected = now + grace_remaining + timedelta(
-                    days=cfg.expiry_offset_days
-                )
-                table.add_row('would expire on', str(projected))
-            else:
-                table.add_row(
-                    'grace remaining',
-                    '[red]past — next sync will set expires_at[/]',
-                )
+        add_offboarding_rows(table, offboarding)
 
         if iam.person is not None and iam.person.associations:
             sub = Table(box=None, pad_edge=False, padding=(0, 1))
