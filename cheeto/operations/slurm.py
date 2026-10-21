@@ -31,7 +31,7 @@ from ..slurm_sync import (
     count_deletions,
     reconcile,
 )
-from .base import UNSET, Operation
+from .base import UNSET, Operation, normalize_max_deletions
 from .group_site import ensure_group_site
 
 
@@ -913,7 +913,7 @@ class SyncSlurm(Operation):
     default (returns the planned command strings); `apply=True` dispatches each
     ordered batch concurrently (bounded by `concurrency`), tolerating per-command
     failures. A `max_deletions` cap aborts before any mutation if the plan would
-    delete more than the cap (pass None to disable).
+    delete more than the cap (pass None or a negative value to disable).
 
     Not transactional: the side effects are external `sacctmgr` calls that can't
     be rolled back, and a full sync can outlast the Mongo transaction lifetime.
@@ -941,7 +941,7 @@ class SyncSlurm(Operation):
         self.sudo = sudo
         self.apply = apply
         self.concurrency = max(1, concurrency)
-        self.max_deletions = max_deletions
+        self.max_deletions = normalize_max_deletions(max_deletions)
         self.dump_commands = dump_commands
         self._plan: dict[str, list[str]] = {}
         self._tally: dict[str, dict[str, int]] = {}

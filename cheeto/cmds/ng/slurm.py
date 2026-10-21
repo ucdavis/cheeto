@@ -876,10 +876,6 @@ def _(parser: ArgParser):
                         "via sacctmgr (dry-run unless --apply)")
 async def slurm_sync(args: Namespace):
     console = Console()
-    max_deletions = (
-        None if args.max_deletions is not None and args.max_deletions < 0
-        else args.max_deletions
-    )
 
     # Offline mode: diff the site's desired state against captured
     # `sacctmgr show -P` dumps instead of a live controller. Preview only —
@@ -909,7 +905,7 @@ async def slurm_sync(args: Namespace):
             sudo=args.sudo,
             apply=args.apply,
             concurrency=args.concurrency,
-            max_deletions=max_deletions,
+            max_deletions=args.max_deletions,
             dump_commands=args.dump_commands,
         )
     except SlurmSyncAborted as e:

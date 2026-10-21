@@ -127,7 +127,7 @@ class LDAPSyncTaskConfig(BaseModel):
     schedule: ScheduleT = None
     sites: Optional[List[str]] = None
     concurrency: int = 1
-    max_deletions: int = 50
+    max_deletions: int = 50   # -1 disables the cap
     prune: bool = True
     force: bool = False
     # Bypass the incremental gate (sync all records via the normal upsert
@@ -143,7 +143,7 @@ class SlurmSyncTaskConfig(BaseModel):
     apply: bool = True
     sudo: bool = False
     concurrency: int = 8
-    max_deletions: int = 50
+    max_deletions: int = 50   # -1 disables the cap
 
 
 @require_kwargs

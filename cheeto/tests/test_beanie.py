@@ -5936,6 +5936,24 @@ class TestSyncSlurmOperation:
             )
         assert fake.dispatched == []  # aborted before any mutation
 
+    async def test_negative_max_deletions_disables_cap(self, beanie_client):
+        """A negative cap means no cap, the same as None. The daemon task
+        passes the config value (-1) through as-is."""
+        from cheeto.slurm_sync import AccountState, QOSState, SlurmSyncState
+        site = await _seed_slurm_site()
+        current = SlurmSyncState(
+            qos={'stale-q': QOSState()},
+            accounts={'stalelab': AccountState()},
+            associations={('ghost', 'stalelab', 'hi'): 'stale-q'},
+        )
+        fake = _FakeSAcctMgr(current)
+        result = await SyncSlurm.run(
+            beanie_client, None, sitename=site.name, sacctmgr=fake,
+            apply=True, max_deletions=-1,
+        )
+        assert 'sacctmgr -iQ remove qos stale-q' in fake.dispatched
+        assert result['tally']['Delete QOS']['ok'] == 1
+
     async def test_dry_run_over_cap_does_not_abort(self, beanie_client):
         """The cap only gates apply; a dry-run preview shows the full plan
         including deletions even when it exceeds the cap."""
@@ -9414,6 +9432,25 @@ class TestPruneSiteLDAPGroups:
         plan = await PruneSiteLDAP.run(
             beanie_client, None,
             sitename='prsite', ldap=ldap, scope=['groups'], dry_run=True,
+        )
+        assert plan['groups'] == ['pr_goner']
+
+    async def test_negative_max_deletions_disables_cap(self, beanie_client):
+        """-1 (what the daemon config passes through) means no cap. The cap
+        is checked before the dry-run return, so a bare `1 > -1` would
+        abort here."""
+        from cheeto.operations import PruneSiteLDAP
+        site = Site(name='prsite', fqdn='pr.test')
+        await site.insert()
+        keep = Group(name='pr_keep', gid=79300)
+        await keep.insert()
+        await GroupSiteInfo(group=keep, site=site).insert()
+
+        ldap = _FakePruneLDAP(['pr_keep', 'pr_goner'])
+        plan = await PruneSiteLDAP.run(
+            beanie_client, None,
+            sitename='prsite', ldap=ldap, scope=['groups'],
+            max_deletions=-1, dry_run=True,
         )
         assert plan['groups'] == ['pr_goner']
 
