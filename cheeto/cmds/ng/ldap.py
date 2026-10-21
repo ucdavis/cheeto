@@ -121,10 +121,7 @@ async def ldap_sync_site_cmd(args: Namespace):
             concurrency=args.concurrency,
             scope=scope,
             prune=not args.no_prune,
-            max_deletions=(
-                None if args.max_deletions is not None and args.max_deletions < 0
-                else args.max_deletions
-            ),
+            max_deletions=args.max_deletions,
             dry_run=args.dry_run,
         )
 
@@ -327,11 +324,7 @@ async def ldap_prune_site_cmd(args: Namespace):
                 args.db, args.author,
                 sitename=args.site, ldap=ldap,
                 scope=scope,
-                max_deletions=(
-                    None if args.max_deletions is not None
-                    and args.max_deletions < 0
-                    else args.max_deletions
-                ),
+                max_deletions=args.max_deletions,
                 dry_run=args.dry_run,
             )
         except LDAPPruneAborted as e:
@@ -415,10 +408,6 @@ async def ldap_clear_tree_cmd(args: Namespace):
         [b.strip() for b in args.exclude.split(',') if b.strip()]
         if args.exclude else None
     )
-    max_deletions = (
-        None if args.max_deletions is not None and args.max_deletions < 0
-        else args.max_deletions
-    )
     # sitename is unused for clear-tree but required by the manager.
     sitename = args.site or '__clear__'
     async with AsyncLDAPManager(cfg, sitename=sitename) as ldap:
@@ -428,7 +417,7 @@ async def ldap_clear_tree_cmd(args: Namespace):
                 ldap=ldap,
                 base=args.base,
                 exclude_bases=exclude_bases,
-                max_deletions=max_deletions,
+                max_deletions=args.max_deletions,
                 dry_run=True,
             )
         except LDAPPruneAborted as e:
@@ -470,7 +459,7 @@ async def ldap_clear_tree_cmd(args: Namespace):
             ldap=ldap,
             base=args.base,
             exclude_bases=exclude_bases,
-            max_deletions=max_deletions,
+            max_deletions=args.max_deletions,
             dry_run=False,
         )
 

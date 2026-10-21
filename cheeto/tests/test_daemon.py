@@ -33,7 +33,7 @@ from ..daemon.schedule import (
     build_enqueue_entries,
     parse_schedule,
 )
-from ..daemon.tasks import _puppet_sync, _reap, _sympa_export
+from ..daemon.tasks import _puppet_sync, _reap, _slurm_sync, _sympa_export
 from ..models import ALL_MODELS
 from ..models.history import History
 from ..models.site import Site
@@ -114,6 +114,14 @@ class TestDaemonConfig:
         assert tasks.iam_sync.schedule == '0 2 * * *'  # crontab stays str
         assert tasks.iam_sync.concurrency == 2
         assert tasks.slurm_sync.max_deletions == 10
+
+    def test_negative_max_deletions_means_no_cap(self):
+        # The ops normalize the config value, so -1 reaches them as-is.
+        from ..operations.base import normalize_max_deletions
+        assert normalize_max_deletions(None) is None
+        assert normalize_max_deletions(0) == 0
+        assert normalize_max_deletions(50) == 50
+        assert normalize_max_deletions(-1) is None
 
     def test_absent_tasks_disabled(self, config):
         assert config.daemon.tasks.ldap_sync is None
@@ -394,6 +402,30 @@ def _with_puppet_repo(config, repo: Path):
     return replace(config, daemon=replace(config.daemon, tasks=tasks))
 
 
+def _with_slurm_max_deletions(config, max_deletions: int):
+    tasks = replace(
+        config.daemon.tasks,
+        slurm_sync=replace(config.daemon.tasks.slurm_sync,
+                           max_deletions=max_deletions),
+    )
+    return replace(config, daemon=replace(config.daemon, tasks=tasks))
+
+
+class _EmptySAcctMgr:
+    """Stand-in for AsyncSAcctMgr over an empty controller: every plan is
+    adds-only, and dispatch records the command instead of running it."""
+
+    def __init__(self):
+        self.dispatched: list[str] = []
+
+    async def read_current_state(self):
+        from ..slurm_sync import SlurmSyncState
+        return SlurmSyncState()
+
+    async def dispatch(self, spec):
+        self.dispatched.append(str(spec))
+
+
 @pytest.fixture
 def puppet_repo(tmp_path):
     """Bare origin + working clone, like test_git_async.py's fixture."""
@@ -569,6 +601,24 @@ class TestTaskBodies:
         cfg = _with_puppet_repo(config, tmp_path / 'not-a-repo')
         with pytest.raises(ValueError, match='not a git repository'):
             await _puppet_sync(cfg, beanie_client, None, 'test-site')
+
+    async def test_slurm_sync_negative_max_deletions_disables_cap(
+        self, beanie_client, clean_db, config, monkeypatch,
+    ):
+        """`max_deletions: -1` in the daemon config disables the cap, the
+        same as `--max-deletions -1` on the CLI. The op used to compare
+        `0 > -1` and abort every apply run, even with nothing to delete."""
+        from ..operations import slurm as slurm_ops
+        await Site(name='test-site', fqdn='test.site').insert()
+        fake = _EmptySAcctMgr()
+        monkeypatch.setattr(slurm_ops, 'AsyncSAcctMgr', lambda **kw: fake)
+
+        cfg = _with_slurm_max_deletions(config, -1)
+        result = await _slurm_sync(cfg, beanie_client, None, 'test-site')
+
+        assert result['apply'] is True
+        assert result['plan'] == {}
+        assert fake.dispatched == []
 
 
 class TestCeleryEagerSmoke:

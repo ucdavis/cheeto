@@ -73,7 +73,7 @@ from ..queries.user import (
     root_key_blocks,
     root_ssh_keys,
 )
-from .base import Operation
+from .base import Operation, normalize_max_deletions
 
 logger = logging.getLogger(__name__)
 
@@ -695,8 +695,8 @@ class ClearLDAPTree(Operation):
     it.
 
     Safety guards mirror PruneSiteLDAP: `max_deletions` cap (default
-    `_CLEAR_DEFAULT_MAX`, pass `None` to disable), `dry_run` preview
-    that returns the would-delete list without writing.
+    `_CLEAR_DEFAULT_MAX`, pass `None` or a negative value to disable) and a
+    `dry_run` preview that returns the would-delete list without writing.
     """
 
     op_name = 'clear_ldap_tree'
@@ -721,7 +721,7 @@ class ClearLDAPTree(Operation):
             list(exclude_bases) if exclude_bases is not None
             else [f'ou=Services,{ldap.config.searchbase}']
         )
-        self.max_deletions = max_deletions
+        self.max_deletions = normalize_max_deletions(max_deletions)
         self.dry_run = dry_run
         self._deleted: list[str] = []
 
@@ -742,8 +742,8 @@ class ClearLDAPTree(Operation):
         ):
             raise LDAPPruneAborted(
                 f'ClearLDAPTree would delete {len(dns)} entries, exceeding '
-                f'cap of {self.max_deletions}. Pass max_deletions=None '
-                f'(or --max-deletions=-1 on the CLI) to disable.',
+                f'cap of {self.max_deletions}. Pass --max-deletions=-1 to '
+                f'disable.',
                 would_delete={'tree': dns},
             )
 
@@ -798,8 +798,8 @@ class PruneSiteLDAP(Operation):
         in beanie's Storage rows.
 
     `max_deletions` caps total deletions across phases; passing it as None
-    disables the cap. When the cap would be exceeded, raises
-    `LDAPPruneAborted` with the would-delete list before any mutations.
+    or a negative value disables the cap. When the cap would be exceeded,
+    raises `LDAPPruneAborted` with the would-delete list before any mutations.
 
     `dry_run=True` returns what would be deleted without writing.
     """
@@ -823,7 +823,7 @@ class PruneSiteLDAP(Operation):
         self.scope = scope if scope is not None else [
             'users', 'groups', 'automounts',
         ]
-        self.max_deletions = max_deletions
+        self.max_deletions = normalize_max_deletions(max_deletions)
         self.dry_run = dry_run
         self._deleted: dict[str, list[str]] = {
             'users': [], 'groups': [], 'automounts': [],
@@ -1029,7 +1029,7 @@ class SyncSiteLDAP(Operation):
             'users', 'groups', 'automounts', 'prune',
         ]
         self.prune = prune
-        self.max_deletions = max_deletions
+        self.max_deletions = normalize_max_deletions(max_deletions)
         self.dry_run = dry_run
         self._users_tally: dict[str, int] = {k: 0 for k in _SYNC_TALLY_KEYS}
         self._groups_tally: dict[str, int] = {k: 0 for k in _SYNC_TALLY_KEYS}

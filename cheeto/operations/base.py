@@ -61,6 +61,18 @@ def get_operation(op_name: str) -> type['Operation'] | None:
     return OPERATIONS.get(op_name)
 
 
+def normalize_max_deletions(max_deletions: int | None) -> int | None:
+    """Normalize a deletion cap: None or a negative value disables it.
+
+    The CLI (`--max-deletions -1`) and the daemon task config
+    (`max_deletions: -1`) both use -1 for "no cap"; the ops that take a cap
+    run their argument through this so every caller gets the same meaning.
+    """
+    if max_deletions is not None and max_deletions < 0:
+        return None
+    return max_deletions
+
+
 class Operation(ABC):
     """Base class for all database write operations.
 
