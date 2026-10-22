@@ -72,10 +72,40 @@ def _announce_password(console: Console, password: str) -> None:
     console.print('[red]Save this password now \u2014 it will not be displayed again.[/]')
 
 
-def _write_class_passwords(fp, credentials: list[tuple[str, str]]) -> None:
+def _open_password_file(console: Console, path: Path):
+    """Create `path` with mode 0600 for plaintext passwords. Prints the
+    error and returns None if the path cannot be opened."""
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        return os.fdopen(fd, 'w')
+    except OSError as e:
+        console.print(f'[red]Cannot open {path}: {e}[/]')
+        return None
+
+
+def _write_password_file(fp, credentials: list[tuple[str, str]]) -> None:
     # v1 format: one 'username password' line per user.
     for name, password in credentials:
         fp.write(f'{name} {password}\n')
+
+
+def _report_passwords(console: Console, credentials: list[tuple[str, str]],
+                      fp, path: Path | None) -> None:
+    """Write the credentials to the open password file, or print them as
+    a table when no file was requested."""
+    if fp is not None:
+        with fp:
+            _write_password_file(fp, credentials)
+        console.print(f'Passwords written to [bold]{path}[/] (mode 0600)')
+    else:
+        table = Table('user', 'password')
+        for name, password in credentials:
+            table.add_row(name, f'[yellow]{password}[/]')
+        console.print(table)
+        console.print(
+            '[red]Save these passwords now — '
+            'they will not be displayed again.[/]'
+        )
 
 
 async def _user_to_dict(user: User,
@@ -489,13 +519,8 @@ async def user_new_class(args: Namespace):
     # passwords is the worst outcome).
     fp = None
     if args.file is not None:
-        try:
-            fd = os.open(
-                args.file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600,
-            )
-            fp = os.fdopen(fd, 'w')
-        except OSError as e:
-            console.print(f'[red]Cannot open {args.file}: {e}[/]')
+        fp = _open_password_file(console, args.file)
+        if fp is None:
             return 1
 
     try:
@@ -530,21 +555,7 @@ async def user_new_class(args: Namespace):
         )
 
     credentials = [(user.name, password) for user, password in results]
-    if fp is not None:
-        with fp:
-            _write_class_passwords(fp, credentials)
-        console.print(
-            f'Passwords written to [bold]{args.file}[/] (mode 0600)'
-        )
-    else:
-        table = Table('user', 'password')
-        for name, password in credentials:
-            table.add_row(name, f'[yellow]{password}[/]')
-        console.print(table)
-        console.print(
-            '[red]Save these passwords now — '
-            'they will not be displayed again.[/]'
-        )
+    _report_passwords(console, credentials, fp, args.file)
 
 
 @user_new_class.args()
@@ -715,18 +726,47 @@ def _(parser: ArgParser):
     parser.add_argument('--shell', required=True)
 
 
-@user_args.apply(required=True)
+@user_args.apply(required=True, multiple=True)
 @commands.register('ng', 'user', 'set', 'password',
-                   help='Generate and set a new password for a user')
+                   help='Generate and set new passwords for one or more users')
 async def user_password(args: Namespace):
     console = Console()
-    password = generate_password()
-    await SetUserPassword.run(
-        args.db, args.author,
-        name=args.user, password=password,
-    )
-    console.print(f'Set password for [green]{args.user}[/]')
-    _announce_password(console, password)
+
+    # Open the password file before changing anything: an unwritable path
+    # must fail while no password has been reset yet.
+    fp = None
+    if args.file is not None:
+        fp = _open_password_file(console, args.file)
+        if fp is None:
+            return 1
+
+    credentials: list[tuple[str, str]] = []
+
+    async def _one(name: str) -> None:
+        password = generate_password()
+        await SetUserPassword.run(
+            args.db, args.author,
+            name=name, password=password,
+        )
+        credentials.append((name, password))
+
+    rc = await run_per_target(console, args.user, _one, ok='password set')
+
+    if credentials:
+        _report_passwords(console, credentials, fp, args.file)
+    elif fp is not None:
+        # Nothing was reset: do not leave an empty 0600 file behind.
+        fp.close()
+        os.unlink(args.file)
+    return rc
+
+
+@user_password.args()
+def _(parser: ArgParser):
+    parser.add_argument('--file', '-f', type=Path, default=None,
+                        help='Write plaintext "username password" lines to '
+                             'this file (created mode 0600); default prints '
+                             'them to the console')
 
 
 @site_args.apply()

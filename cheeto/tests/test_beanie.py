@@ -1670,6 +1670,115 @@ class TestUserMutationOps:
         assert first != second
 
 
+class TestUserSetPasswordCmd:
+    """`cheeto ng user set password` command body: several --user targets
+    and the --file output, which uses the `user new class` file format."""
+
+    async def _seed(self, beanie_client, names):
+        for i, name in enumerate(names):
+            await CreateUser.run(
+                beanie_client, None,
+                name=name, email=f'{name}@test.com', uid=42000 + i,
+                fullname=f'Pw {name}',
+            )
+
+    async def _hashes(self, names):
+        hashes = {}
+        for name in names:
+            user = await User.find_one(User.name == name)
+            hashes[name] = None if user is None else user.password
+        return hashes
+
+    @staticmethod
+    def _args(db, users, file=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(db=db, author=None, user=list(users), file=file)
+
+    @staticmethod
+    async def _run(args):
+        # @commands.register wraps the coroutine in a ponderosa SubCmd.
+        from cheeto.cmds.ng.user import user_password
+        return await user_password.func(args)
+
+    @staticmethod
+    def _read_credentials(path):
+        lines = path.read_text().splitlines()
+        return [tuple(line.split(' ', 1)) for line in lines]
+
+    async def test_writes_file_for_all_users(self, beanie_client, tmp_path):
+        import stat
+        from cheeto.encrypt import get_mcf_hasher
+
+        names = ['pwa', 'pwb']
+        await self._seed(beanie_client, names)
+        before = await self._hashes(names)
+        path = tmp_path / 'class.pw'
+
+        rc = await self._run(self._args(beanie_client, names, path))
+
+        assert rc == 0
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        credentials = self._read_credentials(path)
+        assert [name for name, _ in credentials] == names
+        after = await self._hashes(names)
+        hasher = get_mcf_hasher()
+        for name, plaintext in credentials:
+            assert plaintext
+            assert after[name].startswith('$y$')
+            assert after[name] != before[name]
+            # Raises if the file's plaintext does not match the stored hash.
+            hasher.compare(plaintext.encode(), after[name].encode())
+
+    async def test_missing_user_does_not_block_others(self, beanie_client,
+                                                      tmp_path):
+        await self._seed(beanie_client, ['pwa'])
+        before = await self._hashes(['pwa'])
+        path = tmp_path / 'class.pw'
+
+        rc = await self._run(
+            self._args(beanie_client, ['pwa', 'nosuch'], path),
+        )
+
+        assert rc == 1
+        credentials = self._read_credentials(path)
+        assert [name for name, _ in credentials] == ['pwa']
+        after = await self._hashes(['pwa'])
+        assert after['pwa'] != before['pwa']
+
+    async def test_all_missing_leaves_no_file(self, beanie_client, tmp_path):
+        path = tmp_path / 'class.pw'
+        rc = await self._run(
+            self._args(beanie_client, ['nosuch', 'nosuch2'], path),
+        )
+
+        assert rc == 1
+        assert not path.exists()
+
+    async def test_unwritable_file_changes_nothing(self, beanie_client,
+                                                   tmp_path):
+        await self._seed(beanie_client, ['pwa'])
+        before = await self._hashes(['pwa'])
+        path = tmp_path / 'missing-dir' / 'class.pw'
+
+        rc = await self._run(self._args(beanie_client, ['pwa'], path))
+
+        assert rc == 1
+        assert not path.exists()
+        assert (await self._hashes(['pwa'])) == before
+
+    async def test_console_output_without_file(self, beanie_client):
+        names = ['pwa', 'pwb']
+        await self._seed(beanie_client, names)
+        before = await self._hashes(names)
+
+        rc = await self._run(self._args(beanie_client, names))
+
+        assert rc == 0
+        after = await self._hashes(names)
+        for name in names:
+            assert after[name] != before[name]
+
+
 class TestSiteUserOps:
 
     async def test_add_and_remove_site_user(self, beanie_client):
