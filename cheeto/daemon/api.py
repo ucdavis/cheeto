@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, FastAPI
 
 from ..config import Config
 from ..db import connect_beanie
+from .cache import ResponseCache
 from .deps import require_api_key
 from .routes import groups, puppet, sites, slurm, storage, users
 
@@ -41,8 +42,16 @@ def create_api(config: Config, client=None) -> FastAPI:
                   root_path=config.api.root_path if config.api else '')
     if client is not None:
         api.state.client = client
-    # Read by `deps.require_api_key`; None disables the check.
+    # Read by `deps.check_api_key`; None disables the check.
     api.state.api_key = config.api.api_key if config.api else None
+    # Read by `cache.CachedRoute`; None (no `api.cache` block) means every
+    # request runs its handler. One cache per app instance.
+    cache_config = config.api.cache if config.api else None
+    api.state.cache = (
+        ResponseCache(ttl=cache_config.ttl, stale=cache_config.stale,
+                      max_entries=cache_config.max_entries)
+        if cache_config is not None else None
+    )
 
     # All routes live on one router so they can be mounted under a
     # configurable path prefix; the API key is enforced router-wide.

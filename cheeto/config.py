@@ -217,6 +217,20 @@ class DaemonConfig(BaseModel):
 
 @require_kwargs
 @dataclass(frozen=True)
+class ApiCacheConfig(BaseModel):
+    """In-process response cache of the REST API (cheeto/daemon/cache.py).
+    All values are seconds, except `max_entries`."""
+    # How long a stored response is fresh (served with no database work).
+    ttl: int = 60
+    # How much longer it can still be served while one background refresh
+    # runs. Past ttl + stale a request waits for a new response.
+    stale: int = 600
+    # LRU bound. One entry is one (path, query string).
+    max_entries: int = 4096
+
+
+@require_kwargs
+@dataclass(frozen=True)
 class ApiConfig(BaseModel):
     host: str = '127.0.0.1'
     port: int = 8000
@@ -225,6 +239,8 @@ class ApiConfig(BaseModel):
     # Path prefix the routes are mounted under (e.g. '/cheeto'); normalized
     # to a leading-slash, no-trailing-slash form when the router is built.
     prefix: str = ''
+    # Response cache; an absent block means no cache.
+    cache: Optional[ApiCacheConfig] = None
 
 
 @require_kwargs

@@ -15,6 +15,7 @@ from ...queries.slurm import (
     resolve_slurm_account_label,
     resolve_slurm_account_labels,
 )
+from ..cache import CachedRoute
 from ..convert import storage_out, storages_out
 from ..deps import resolved_site
 from ..schemas import (
@@ -26,7 +27,8 @@ from ..schemas import (
     UserGroupOut,
 )
 
-router = APIRouter(prefix='/sites', tags=['sites'])
+router = APIRouter(prefix='/sites', tags=['sites'],
+                   route_class=CachedRoute)
 
 
 def _site_user_out(v: SiteUserView) -> SiteUserOut:

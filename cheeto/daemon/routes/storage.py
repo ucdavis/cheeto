@@ -14,11 +14,13 @@ from ...queries.storage import (
     list_site_volumes,
 )
 from ...queries.user import find_user_by_name
+from ..cache import CachedRoute
 from ..convert import storages_out, volume_out
 from ..deps import resolved_site
 from ..schemas import AutomountMapOut, StorageOut, VolumeOut
 
-router = APIRouter(prefix='/sites/{site}/storage', tags=['storage'])
+router = APIRouter(prefix='/sites/{site}/storage', tags=['storage'],
+                   route_class=CachedRoute)
 
 StorageCategory = Literal[tuple(STORAGE_CATEGORIES)]  # type: ignore[valid-type]
 

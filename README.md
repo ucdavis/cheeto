@@ -157,6 +157,36 @@ If `api.api_key` is set in the config, requests must send a matching
 `/puppet/root-keys`, which then returns the global key set. The API never
 returns a password hash.
 
+#### Response cache
+
+The slow routes are CPU work in the one event loop of the API process, so
+concurrent requests queue. An `api.cache` block turns on an in-process
+cache of the finished responses (`cheeto/daemon/cache.py`):
+
+```yaml
+api:
+  default:
+    cache:
+      ttl: 60           # seconds a response is fresh
+      stale: 600        # more seconds it is served while one refresh runs
+      max_entries: 4096
+```
+
+- Concurrent requests for one URL share one computation.
+- A response older than `ttl` is still returned at once, and one background
+  task replaces it. A response older than `ttl + stale` is computed again
+  before the request returns.
+- Only `200` responses are stored. The API key is checked on every request.
+- Writes come from other processes, so entries expire by time only. A
+  change shows after `ttl` seconds, or after about two poll intervals for a
+  client that polls at the `ttl` interval.
+- Response headers: `X-Cache` (`hit`, `stale` or `miss`), `Age`, `ETag` and
+  `Cache-Control`. A request with a matching `If-None-Match` gets `304`.
+- To get a new response after a manual change, send `Cache-Control: no-cache`:
+  `CURL_OPTS='-H Cache-Control:no-cache' scripts/query-api.sh sites/farm/users`.
+
+Without the block, every request runs its handler.
+
 ### Monitoring (Flower)
 
 `cheeto daemon flower` launches [Flower](https://flower.readthedocs.io/), the

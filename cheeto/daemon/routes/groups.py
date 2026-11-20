@@ -19,6 +19,7 @@ from ...queries.group import (
 from ...queries.site import find_site
 from ...queries.slurm import group_slurm_at_site, slurm_account_at_site
 from ...queries.storage import list_site_storages
+from ..cache import CachedRoute
 from ..convert import account_out, storages_out
 from ..deps import resolved_group, resolved_site
 from ..schemas import (
@@ -31,7 +32,8 @@ from ..schemas import (
     StorageOut,
 )
 
-router = APIRouter(prefix='/groups', tags=['groups'])
+router = APIRouter(prefix='/groups', tags=['groups'],
+                   route_class=CachedRoute)
 
 GroupType = Literal[GROUP_TYPES]          # type: ignore[valid-type]
 

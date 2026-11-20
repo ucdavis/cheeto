@@ -23,17 +23,26 @@ from ..queries.user import find_user_by_name, find_user_site_info
 _api_key_header = APIKeyHeader(name='X-API-Key', auto_error=False)
 
 
-async def require_api_key(
-    request: Request, key: str | None = Security(_api_key_header),
-) -> None:
-    """Compare `X-API-Key` with `app.state.api_key`; no check when the
-    configured key is None."""
+def check_api_key(request: Request) -> None:
+    """Compare `X-API-Key` with `app.state.api_key`, or raise 401; no check
+    when the configured key is None. Also called by `cache.CachedRoute`,
+    which answers from the cache before the dependencies run."""
     expected = request.app.state.api_key
     if expected is None:
         return
-    if key is None or not secrets.compare_digest(key, expected):
+    key = request.headers.get('x-api-key')
+    if key is None or not secrets.compare_digest(key.encode(),
+                                                 expected.encode()):
         raise HTTPException(status_code=401,
                             detail='invalid or missing API key')
+
+
+async def require_api_key(
+    request: Request, key: str | None = Security(_api_key_header),
+) -> None:
+    """The router-wide dependency. `Security(...)` is here for the OpenAPI
+    schema; the check itself is `check_api_key`."""
+    check_api_key(request)
 
 
 async def resolved_site(site: str) -> Site:

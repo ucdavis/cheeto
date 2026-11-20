@@ -23,6 +23,7 @@ from ...queries.user import (
     list_user_site_infos,
     list_user_ssh_keys,
 )
+from ..cache import CachedRoute
 from ..convert import storages_out
 from ..deps import UserAtSite, resolved_user, resolved_user_site
 from ..schemas import (
@@ -37,7 +38,8 @@ from ..schemas import (
     UserSummary,
 )
 
-router = APIRouter(prefix='/users', tags=['users'])
+router = APIRouter(prefix='/users', tags=['users'],
+                   route_class=CachedRoute)
 
 # The filter values are validated against the constants, so a typo is a 422
 # and not an empty list.

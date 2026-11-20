@@ -23,6 +23,7 @@ from ...queries.slurm import (
     partition_at_site,
     qos_at_site,
 )
+from ..cache import CachedRoute
 from ..convert import account_out, allocation_out, qos_out
 from ..deps import resolved_site
 from ..schemas import (
@@ -34,7 +35,8 @@ from ..schemas import (
     UserAssociationOut,
 )
 
-router = APIRouter(prefix='/sites/{site}/slurm', tags=['slurm'])
+router = APIRouter(prefix='/sites/{site}/slurm', tags=['slurm'],
+                   route_class=CachedRoute)
 
 
 async def _filters(site: Site, group, partition, qos) -> dict:
