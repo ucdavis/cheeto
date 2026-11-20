@@ -117,15 +117,45 @@ would exceed its `max_deletions` guard fails the task — visible in
 
 ### REST API
 
-FastAPI app served by `cheeto daemon api`:
+FastAPI app served by `cheeto daemon api`. Every route is a `GET` and
+returns JSON. `{site}` is a site name, an fqdn or an alias.
 
 ```
-GET /puppet/root-keys/{site}   root authorized_keys for site admins (text)
-GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
+GET /puppet/root-keys/{site}   root authorized_keys entries for site admins
+GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure
+
+GET /sites                     sites
+GET /sites/{site}              one site, with its sticky groups and accounts
+GET /sites/{site}/users        every user at the site (bulk)
+GET /sites/{site}/groups       every group at the site (bulk)
+
+GET /users                     users; filters: type, status, access, site, group
+GET /users/{username}          global record
+GET /users/{username}/ssh-keys
+GET /users/{username}/sites    per-site overrides and effective values
+GET /users/{username}/sites/{site}
+GET /users/{username}/sites/{site}/groups|slurm|storage
+
+GET /groups                    groups; filters: type, site, user
+GET /groups/{groupname}        global record
+GET /groups/{groupname}/sites/{site}
+GET /groups/{groupname}/sites/{site}/members|slurm|storage
+
+GET /sites/{site}/slurm/accounts|partitions|qos|qos/{name}
+GET /sites/{site}/slurm/associations      configured (account, partition, qos)
+GET /sites/{site}/slurm/allocations
+GET /sites/{site}/slurm/user-associations effective per-user rows (sync state)
+
+GET /sites/{site}/storage/storages|volumes|automount-maps
 ```
+
+The response models are in `cheeto/daemon/schemas.py`. The app serves the
+OpenAPI schema at `/openapi.json` and a browser at `/docs`.
 
 If `api.api_key` is set in the config, requests must send a matching
-`X-API-Key` header; unknown sites return 404.
+`X-API-Key` header. An unknown site, user or group returns 404, except on
+`/puppet/root-keys`, which then returns the global key set. The API never
+returns a password hash.
 
 ### Monitoring (Flower)
 

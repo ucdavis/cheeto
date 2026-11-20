@@ -349,13 +349,15 @@ async def _hydrate_storage_links(storages: list[Storage]) -> None:
 
 async def list_site_storages(
     site: Site, category: str | None = None, *,
-    owner_id=None, group_id=None, host=None,
+    owner_id=None, group_id=None, group_ids=None, host=None,
 ) -> list[Storage]:
     """All Storage records at a site, with volume/owner/group/mount links
     resolved via batched per-field queries (`_hydrate_storage_links`) so the
     derived properties work. Optionally filtered (AND) by category and/or
     owner/group document id (indexed Storage fields), and/or backing-volume
-    host (a derived property, filtered on the hydrated rows)."""
+    host (a derived property, filtered on the hydrated rows). `group_ids`
+    matches any of several groups (the storages of a user's groups); an
+    empty collection matches nothing."""
     filters = [Storage.site.id == site.id]
     if category is not None:
         filters.append(Storage.category == category)
@@ -363,6 +365,11 @@ async def list_site_storages(
         filters.append(Storage.owner.id == owner_id)
     if group_id is not None:
         filters.append(Storage.group.id == group_id)
+    if group_ids is not None:
+        group_ids = list(group_ids)
+        if not group_ids:
+            return []
+        filters.append(In(Storage.group.id, group_ids))
     storages = await Storage.find(*filters).sort('+name').to_list()
     await _hydrate_storage_links(storages)
     if host is not None:

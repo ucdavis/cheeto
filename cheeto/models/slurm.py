@@ -84,6 +84,9 @@ class SlurmAccount(BaseDocument):
                 [('group', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
+            IndexModel([('group.$id', pymongo.ASCENDING)]),
         ]
 
 
@@ -98,6 +101,8 @@ class SlurmPartition(BaseDocument):
                 [('name', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
         ]
 
 
@@ -125,6 +130,8 @@ class SlurmQOS(BaseDocument):
                 [('name', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
         ]
 
 
@@ -146,4 +153,7 @@ class SlurmAssociation(BaseDocument):
                 ],
                 unique=True,
             ),
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
+            IndexModel([('account.$id', pymongo.ASCENDING)]),
         ]

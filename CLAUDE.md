@@ -71,7 +71,7 @@ Uses **ponderosa** `CmdTree` for hierarchical subcommands. Commands are register
 - **`cheeto/ldap_async.py`** + **`cheeto/operations/ldap.py`**: sync beanie state to LDAP directories (bonsai async client).
 - **`cheeto/puppet.py`**: Puppet YAML schema and validation with deep-merge support (`puppet_merge` in `cheeto/yaml.py`).
 - **`cheeto/config.py`**: YAML config loaded from `~/.config/cheeto/config.yaml` with profile support. Sections: `ldap`, `mongo`, `hippo`, `ucdiam`, plus optional profiled `daemon` and `api`.
-- **`cheeto/daemon/`**: Persistent services (`cheeto daemon worker|beat|api`). Celery periodic tasks (RabbitMQ broker, mongodb result backend) run the syncs on schedules from `daemon.tasks` config; `slurm_sync` is routed to per-site `slurm.<site>` queues consumed by cluster head-node workers (`--site`). Task bodies are plain coroutines bridged via `run_op` (fresh event loop + fresh `connect_beanie` per run — AsyncMongoClient is loop-bound). `daemon/api.py` is the FastAPI app (`/puppet/root-keys/{site}`, optional X-API-Key auth).
+- **`cheeto/daemon/`**: Persistent services (`cheeto daemon worker|beat|api`). Celery periodic tasks (RabbitMQ broker, mongodb result backend) run the syncs on schedules from `daemon.tasks` config; `slurm_sync` is routed to per-site `slurm.<site>` queues consumed by cluster head-node workers (`--site`). Task bodies are plain coroutines bridged via `run_op` (fresh event loop + fresh `connect_beanie` per run — AsyncMongoClient is loop-bound). `daemon/api.py` builds the read-only FastAPI app (optional X-API-Key auth): one router per resource in `daemon/routes/` (`sites`, `users`, `groups`, `slurm`, `storage`, `puppet`), pydantic response models in `daemon/schemas.py`, path resolvers in `daemon/deps.py`. Routes read through `cheeto/queries/`; the bulk views are in `queries/site_view.py`. `daemon/schemas.py`, `daemon/deps.py` and `daemon/routes/` set `__eager_imports__`. `cheeto/tests/test_api.py` has tripwires for the route list, the query count and index use.
 
 ### Generated API clients
 
@@ -102,6 +102,10 @@ Prefer consulting `beanie` documentation before introspecting its code: https://
 Remember that `beanie` extends `pydantic` for its models: https://pydantic.dev/docs/
 
 Prefer defining Indexes via the `Settings` subclass rather than using the `Indexed` class. Prefer the `Annotated` pattern for field metadata.
+
+Two query-cost rules for `Link` fields (tripwire: `TestQueryCost` in `cheeto/tests/test_api.py`):
+- A `Link` is stored as a DBRef, and `Model.link.id == x` filters on `link.$id`. Index the sub-path (`[('site.$id', ASCENDING)]`). An index on the whole field (`'site'`) enforces uniqueness but serves no read.
+- With `fetch_links=True`, beanie puts every `$lookup` before the `$match`, so a filtered find joins the whole collection first. In new read paths, run a plain find and resolve the links with one `In()` query per field (`queries/storage.py::_hydrate_storage_links`, `queries/site_view.py`). Several Slurm helpers in `queries/slurm.py` still use the old pattern.
 
 Two beanie traps with CI tripwires (`TestNoLinksInEmbeddedModels` in `cheeto/tests/test_beanie.py`):
 - `Link`/`BackLink` may only be declared on `Document` classes. Beanie never walks embedded `BaseModel`s, so a nested Link silently stores an inline document snapshot. Embedded models reference documents with `DocRef` (`cheeto/models/base.py`) — a bare ObjectId with a coercing validator.

@@ -199,5 +199,6 @@ class SshKey(BaseDocument, Expirable):
     class Settings:
         name = 'ssh_keys'
         indexes = [
-            [('user', pymongo.ASCENDING)],
+            # `user.$id`, not `user`: see the note in group_membership.py.
+            [('user.$id', pymongo.ASCENDING)],
         ]

@@ -76,6 +76,32 @@ async def effective_status_names_at_site(
     return out
 
 
+async def find_user_site_info(user: User, site: Site) -> UserSiteInfo | None:
+    """The `UserSiteInfo` for `(user, site)`; None when the user is not
+    present at the site."""
+    return await UserSiteInfo.find_one(
+        UserSiteInfo.user.id == user.id,
+        UserSiteInfo.site.id == site.id,
+    )
+
+
+async def list_user_site_infos(user: User) -> list[tuple[UserSiteInfo, Site]]:
+    """Every `(UserSiteInfo, Site)` of `user`, sorted by site name. Two
+    queries, no link fetch."""
+    usis = await UserSiteInfo.find(UserSiteInfo.user.id == user.id).to_list()
+    if not usis:
+        return []
+    sites = await Site.find(
+        In(Site.id, [link_target_id(usi.site) for usi in usis]),
+    ).to_list()
+    site_by_id = {s.id: s for s in sites}
+    rows = [
+        (usi, site) for usi in usis
+        if (site := site_by_id.get(link_target_id(usi.site))) is not None
+    ]
+    return sorted(rows, key=lambda row: row[1].name)
+
+
 async def list_user_ssh_keys(user: User) -> list[SshKey]:
     """Every SshKey belonging to `user`."""
     return await SshKey.find(SshKey.user.id == user.id).to_list()
