@@ -191,12 +191,21 @@ def _cached_response(request: Request, cache: ResponseCache,
 class CachedRoute(APIRoute):
     """An `APIRoute` whose `GET` responses go through `app.state.cache`.
 
-    Use it as `APIRouter(route_class=CachedRoute)`. The key is the path
-    plus the sorted query parameters. The API key and its scopes are
-    checked on every request, before the lookup (`deps.authorize`): a
-    stored response is never an answer to a request the route would
-    refuse. A request with `Cache-Control: no-cache` computes a new
-    response.
+    Use it as `APIRouter(route_class=CachedRoute)`. The API key and its
+    scopes are checked on every request, before the lookup
+    (`deps.authorize`): a stored response is never an answer to a request
+    the route would refuse. A request with `Cache-Control: no-cache`
+    computes a new response.
+
+    The key is built from what the ROUTER matched: this route, its path
+    parameters, and the query parameters (`cache_key`). Never build it from
+    `request.url`. Starlette rebuilds that from the client's `Host` header
+    and the percent-decoded path and parses the result again, so a `?` or
+    `#` in either one cuts `url.path` short: `GET /sites` with
+    `Host: x/sites/farm/users?` has the `url.path` `/sites/farm/users`. A
+    key from it would let a request that passed the scope check of one
+    route read, or overwrite, the entry of another. With the route in the
+    key, two routes cannot share an entry.
 
     `required_scopes` are the scopes of the route's `Security(...)`
     dependencies (`deps.requires`), the ones FastAPI hands to
@@ -220,6 +229,18 @@ class CachedRoute(APIRoute):
             for scope in dependency.scopes
         )
 
+    def cache_key(self, request: Request) -> tuple:
+        """The identity of the response to `request`, which this route
+        matched. `self.path` is the route template with its prefix
+        (`/sites/{site}/users`), unique per route; the scopes are there so
+        that an entry can never outlive a change of its route's scope."""
+        return (
+            self.path,
+            self.required_scopes,
+            tuple(sorted(request.path_params.items())),
+            tuple(sorted(request.query_params.multi_items())),
+        )
+
     def get_route_handler(self):
         handler = super().get_route_handler()
 
@@ -229,10 +250,7 @@ class CachedRoute(APIRoute):
                 return await handler(request)
 
             await authorize(request, self.required_scopes)
-            key = (
-                request.url.path,
-                tuple(sorted(request.query_params.multi_items())),
-            )
+            key = self.cache_key(request)
             force = 'no-cache' in request.headers.get('cache-control',
                                                       '').lower()
             result, state = await cache.get(

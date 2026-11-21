@@ -27,6 +27,8 @@ from ..daemon.cache import CachedRoute
 from ..daemon.deps import KEY_TOUCH_INTERVAL, require_api_key
 from ..models.apikey import ApiKey
 from ..models.history import History
+from ..models.site import Site
+from ..models.user import SshKey
 from ..operations import CreateApiKey, RevokeApiKey
 from ..queries import find_api_key, list_api_keys
 # The fixtures are used by name; pytest finds them in this namespace.
@@ -35,6 +37,7 @@ from .test_api import (  # noqa: F401
     KEY,
     SITE,
     _counter,
+    _user,
     beanie_client,
     clean_db,
     seeded,
@@ -437,6 +440,97 @@ class TestKeysAndTheCache:
             _counter.active = False
         assert resp.status_code == 200
         return _counter.count
+
+    # -- The cache key must be what the router matched ----------------------
+    #
+    # `request.url` is rebuilt from the Host header and the percent-DECODED
+    # path, then parsed again: a `?` or `#` in either cuts `url.path` short.
+    # A key taken from it lets one route (and its scope) answer from, or
+    # write to, the entry of another route.
+
+    @pytest.mark.parametrize('host', [
+        f'x/sites/{SITE}/users?',
+        f'x/sites/{SITE}/users#',
+    ])
+    async def test_forged_host_cannot_read_another_route(
+        self, cached, beanie_client, host,
+    ):
+        _, users = await _issue(beanie_client, 'users')
+        _, sites = await _issue(beanie_client, 'sites')
+        warm = await cached.get(f'/sites/{SITE}/users', headers=users)
+        assert 'alice' in warm.text
+
+        resp = await cached.get('/sites', headers={**sites, 'Host': host})
+        assert resp.status_code == 200
+        assert 'alice' not in resp.text
+        assert [s['name'] for s in resp.json()] == [SITE, 'othersite']
+
+    async def test_forged_host_cannot_poison_another_route(
+        self, cached, beanie_client,
+    ):
+        _, users = await _issue(beanie_client, 'users')
+        _, sites = await _issue(beanie_client, 'sites')
+        path = f'/sites/{SITE}/users'
+        good = await cached.get(path, headers=users)
+
+        await cached.get('/sites', headers={
+            **sites, 'Host': f'x{path}?', 'Cache-Control': 'no-cache',
+        })
+        after = await cached.get(path, headers=users)
+        assert after.headers['x-cache'] == 'hit'
+        assert after.content == good.content
+
+    @pytest.mark.parametrize('mark', ['%3F', '%23'])
+    async def test_encoded_delimiter_in_path_is_its_own_key(
+        self, cached, beanie_client, mark,
+    ):
+        """`/sites/<site>%3Fx/users` is the users route with the site
+        `<site>?x`; it must not answer from the `/sites/<site>` entry."""
+        _, users = await _issue(beanie_client, 'users')
+        _, sites = await _issue(beanie_client, 'sites')
+        detail = await cached.get(f'/sites/{SITE}', headers=sites)
+        assert detail.json()['fqdn'] == 'api.hpc.test'
+
+        resp = await cached.get(f'/sites/{SITE}{mark}x/users', headers=users)
+        assert resp.status_code == 404
+        assert 'api.hpc.test' not in resp.text
+
+    async def test_unknown_site_cannot_poison_the_root_keys_of_a_site(
+        self, cached, beanie_client,
+    ):
+        """`/puppet/root-keys/<unknown>` answers 200 with the GLOBAL key
+        set. Asked as `<site>%3Fx`, that body must not land in the entry of
+        `<site>`."""
+        other = await Site.find_one(Site.name == 'othersite')
+        admin = await _user('rootadmin', 73900, other, type='admin',
+                            access=('login-ssh', 'root-ssh'))
+        await SshKey(key='ssh-ed25519 AAAAroot root@laptop',
+                     user=admin).insert()
+        _, puppet = await _issue(beanie_client, 'puppet')
+        path = f'/puppet/root-keys/{SITE}'
+
+        good = await cached.get(path, headers=puppet)
+        assert 'rootadmin' not in good.text      # not an admin of this site
+        fallback = await cached.get(f'{path}%3Fx', headers={
+            **puppet, 'Cache-Control': 'no-cache',
+        })
+        assert 'rootadmin' in fallback.text      # the global set
+
+        after = await cached.get(path, headers=puppet)
+        assert after.headers['x-cache'] == 'hit'
+        assert after.content == good.content
+        assert 'rootadmin' not in after.text
+
+    async def test_cache_key_ignores_the_host_header(self, cached,
+                                                     beanie_client):
+        """One entry per route and parameters, whatever the Host is."""
+        _, sites = await _issue(beanie_client, 'sites')
+        first = await cached.get('/sites', headers=sites)
+        again = await cached.get('/sites',
+                                 headers={**sites, 'Host': 'other.test'})
+        assert (first.headers['x-cache'], again.headers['x-cache']) == (
+            'miss', 'hit',
+        )
 
 
 class TestLastUsed:

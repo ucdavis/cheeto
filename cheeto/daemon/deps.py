@@ -107,7 +107,7 @@ async def authorize(request: Request, scopes: Sequence[str]) -> None:
         return
     if not needed:
         logger.error('route %s declares no API scope; refusing',
-                     request.url.path)
+                     request.scope['path'])
         raise HTTPException(status_code=403,
                             detail='this route is not available')
 
@@ -126,17 +126,18 @@ async def authorize(request: Request, scopes: Sequence[str]) -> None:
         if key is None or not secrets.compare_digest(
             key.secret_hash, hash_api_secret(parsed[1]),
         ):
-            logger.warning('refused %s: unknown API key', request.url.path)
+            logger.warning('refused %s: unknown API key',
+                           request.scope['path'])
             raise _unauthorized()
         key_state = key.state()
         if key_state != 'active':
             logger.warning('refused %s: API key %s (%s) is %s',
-                           request.url.path, key.key_id, key.name, key_state)
+                           request.scope['path'], key.key_id, key.name, key_state)
             raise _unauthorized()
         missing = [scope for scope in needed if not key.allows(scope)]
         if missing:
             logger.warning('refused %s: API key %s (%s) lacks scope %s',
-                           request.url.path, key.key_id, key.name,
+                           request.scope['path'], key.key_id, key.name,
                            ', '.join(missing))
             raise HTTPException(
                 status_code=403,
