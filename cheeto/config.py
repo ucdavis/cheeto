@@ -241,6 +241,10 @@ class ApiConfig(BaseModel):
     prefix: str = ''
     # Response cache; an absent block means no cache.
     cache: Optional[ApiCacheConfig] = None
+    # The static key above is optional: keys are normally issued with
+    # `cheeto ng apikey new`. A missing static key does NOT open the API.
+    # Only this switch turns the key check off (development, tests).
+    allow_anonymous: bool = False
 
 
 @require_kwargs

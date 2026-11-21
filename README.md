@@ -152,10 +152,46 @@ GET /sites/{site}/storage/storages|volumes|automount-maps
 The response models are in `cheeto/daemon/schemas.py`. The app serves the
 OpenAPI schema at `/openapi.json` and a browser at `/docs`.
 
-If `api.api_key` is set in the config, requests must send a matching
-`X-API-Key` header. An unknown site, user or group returns 404, except on
-`/puppet/root-keys`, which then returns the global key set. The API never
-returns a password hash.
+An unknown site, user or group returns 404, except on `/puppet/root-keys`,
+which then returns the global key set. The API never returns a password
+hash.
+
+#### API keys and scopes
+
+Every request must send a key in the `X-API-Key` header. A key holds a list
+of scopes, and each route needs one scope:
+
+| Scope | Routes |
+|---|---|
+| `puppet` | `/puppet/*` (includes the root SSH keys) |
+| `sites` | `/sites`, `/sites/{site}` |
+| `users` | `/users/*` and `/sites/{site}/users` |
+| `groups` | `/groups/*` and `/sites/{site}/groups` |
+| `slurm` | `/sites/{site}/slurm/*` |
+| `storage` | `/sites/{site}/storage/*` |
+
+```
+cheeto ng apikey new hippo --scope sites --scope users --scope groups \
+                           --scope slurm --scope storage --comment 'HiPPO team'
+cheeto ng apikey new puppet --scope puppet [--expires 2027-06-01]
+cheeto ng apikey list [--all]
+cheeto ng apikey revoke KEY_ID
+```
+
+- `new` prints the key (`cheeto_<key id>_<secret>`) one time. cheeto stores
+  only a SHA-256 hash of the secret and cannot show the key again.
+  `--scope ALL` gives every scope.
+- `revoke` takes the key id from `list`. The API refuses the key from the
+  next request. The record stays, and `list --all` shows it.
+- To rotate, issue a second key with the same name, change the client, then
+  revoke the old key id. `list` shows when each key was last used (the API
+  records it at most one time in 5 minutes for each key).
+- A missing or invalid key gets `401`. A valid key without the scope of the
+  route gets `403`.
+- `api.api_key` in the config is an optional static key with every scope.
+  It exists for the change from the single shared key; remove it when each
+  client has its own key. Without it the API is NOT open: only
+  `api.allow_anonymous: true` turns the check off.
 
 #### Response cache
 
@@ -176,7 +212,8 @@ api:
 - A response older than `ttl` is still returned at once, and one background
   task replaces it. A response older than `ttl + stale` is computed again
   before the request returns.
-- Only `200` responses are stored. The API key is checked on every request.
+- Only `200` responses are stored. The API key and its scope are checked
+  on every request, before the cache.
 - Writes come from other processes, so entries expire by time only. A
   change shows after `ttl` seconds, or after about two poll intervals for a
   client that polls at the `ttl` interval.

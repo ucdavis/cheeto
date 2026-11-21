@@ -21,7 +21,7 @@ from ...queries.slurm import group_slurm_at_site, slurm_account_at_site
 from ...queries.storage import list_site_storages
 from ..cache import CachedRoute
 from ..convert import account_out, storages_out
-from ..deps import resolved_group, resolved_site
+from ..deps import requires, resolved_group, resolved_site
 from ..schemas import (
     GroupOut,
     GroupRoster,
@@ -33,7 +33,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix='/groups', tags=['groups'],
-                   route_class=CachedRoute)
+                   route_class=CachedRoute,
+                   dependencies=requires('groups'))
 
 GroupType = Literal[GROUP_TYPES]          # type: ignore[valid-type]
 

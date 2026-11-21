@@ -25,7 +25,12 @@ from ...queries.user import (
 )
 from ..cache import CachedRoute
 from ..convert import storages_out
-from ..deps import UserAtSite, resolved_user, resolved_user_site
+from ..deps import (
+    UserAtSite,
+    requires,
+    resolved_user,
+    resolved_user_site,
+)
 from ..schemas import (
     PartitionQOS,
     SshKeysOut,
@@ -39,7 +44,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix='/users', tags=['users'],
-                   route_class=CachedRoute)
+                   route_class=CachedRoute,
+                   dependencies=requires('users'))
 
 # The filter values are validated against the constants, so a typo is a 422
 # and not an empty list.

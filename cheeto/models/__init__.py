@@ -48,6 +48,7 @@ from .group_membership import GroupMembership
 from .group_site_info import GroupSiteInfo
 from .history import History
 from .hippo import HippoEvent
+from .apikey import ApiKey
 
 # Rebuild models to resolve forward references (BackLink/Link with string
 # refs). Order matters: the storage classes must be rebuilt (and present in
@@ -98,4 +99,5 @@ ALL_MODELS = [
     Storage,
     History,
     HippoEvent,
+    ApiKey,
 ]

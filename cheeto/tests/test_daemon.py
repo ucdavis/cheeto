@@ -736,7 +736,9 @@ class TestDaemonApi:
     async def test_no_api_key_configured_is_open(
         self, beanie_client, config, rk_site,
     ):
-        open_config = replace(config, api=replace(config.api, api_key=None))
+        open_config = replace(config, api=replace(
+            config.api, api_key=None, allow_anonymous=True,
+        ))
         api = create_api(open_config, client=beanie_client)
         async with _api_client(api) as client:
             resp = await client.get('/puppet/root-keys/api-site')

@@ -26,12 +26,13 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Hashable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Literal
 
-from fastapi import HTTPException, Request, Response
+from fastapi import HTTPException, Request, Response, params
 from fastapi.routing import APIRoute
 
-from .deps import check_api_key
+from .deps import authorize
 
 logger = logging.getLogger(__name__)
 
@@ -191,16 +192,33 @@ class CachedRoute(APIRoute):
     """An `APIRoute` whose `GET` responses go through `app.state.cache`.
 
     Use it as `APIRouter(route_class=CachedRoute)`. The key is the path
-    plus the sorted query parameters. The API key is checked on every
-    request, before the lookup: a stored response is never an answer to a
-    request the route would refuse. A request with `Cache-Control:
-    no-cache` computes a new response.
+    plus the sorted query parameters. The API key and its scopes are
+    checked on every request, before the lookup (`deps.authorize`): a
+    stored response is never an answer to a request the route would
+    refuse. A request with `Cache-Control: no-cache` computes a new
+    response.
+
+    `required_scopes` are the scopes of the route's `Security(...)`
+    dependencies (`deps.requires`), the ones FastAPI hands to
+    `require_api_key`. They are read here because the dependencies do not
+    run on a cache hit.
 
     The wrapped handler can run in a task that outlives the request (the
     background refresh). That is safe here: FastAPI's handler opens its own
     exit stack, a GET reads no body, and no dependency of the API uses
     `yield`. Keep it that way, or compute such a route outside the cache.
     """
+
+    # A property, not an attribute set in __init__: APIRoute.__init__ calls
+    # get_route_handler() itself, before a subclass could set anything.
+    @cached_property
+    def required_scopes(self) -> tuple[str, ...]:
+        return tuple(
+            scope
+            for dependency in self.dependencies
+            if isinstance(dependency, params.Security)
+            for scope in dependency.scopes
+        )
 
     def get_route_handler(self):
         handler = super().get_route_handler()
@@ -210,7 +228,7 @@ class CachedRoute(APIRoute):
             if cache is None or request.method != 'GET':
                 return await handler(request)
 
-            check_api_key(request)
+            await authorize(request, self.required_scopes)
             key = (
                 request.url.path,
                 tuple(sorted(request.query_params.multi_items())),

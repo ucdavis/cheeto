@@ -9,12 +9,12 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, FastAPI
 
 from ..config import Config
 from ..db import connect_beanie
 from .cache import ResponseCache
-from .deps import require_api_key
+from .deps import KeyTouches
 from .routes import groups, puppet, sites, slurm, storage, users
 
 
@@ -42,8 +42,14 @@ def create_api(config: Config, client=None) -> FastAPI:
                   root_path=config.api.root_path if config.api else '')
     if client is not None:
         api.state.client = client
-    # Read by `deps.check_api_key`; None disables the check.
+    # Read by `deps.authorize`. `api_key` is the static key of the config
+    # (every scope); issued keys are `ApiKey` documents. Without
+    # `allow_anonymous`, a request needs one or the other.
     api.state.api_key = config.api.api_key if config.api else None
+    api.state.allow_anonymous = (
+        config.api.allow_anonymous if config.api else False
+    )
+    api.state.key_touches = KeyTouches()
     # Read by `cache.CachedRoute`; None (no `api.cache` block) means every
     # request runs its handler. One cache per app instance.
     cache_config = config.api.cache if config.api else None
@@ -54,8 +60,9 @@ def create_api(config: Config, client=None) -> FastAPI:
     )
 
     # All routes live on one router so they can be mounted under a
-    # configurable path prefix; the API key is enforced router-wide.
-    router = APIRouter(dependencies=[Depends(require_api_key)])
+    # configurable path prefix. Each resource router declares its own
+    # scope (`deps.requires`); there is no router-wide key check.
+    router = APIRouter()
     for module in (puppet, sites, users, groups, slurm, storage):
         router.include_router(module.router)
 

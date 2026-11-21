@@ -8,10 +8,11 @@ from ...operations.storage import ExportPuppetStorage
 from ...queries.site import find_site
 from ...queries.user import root_ssh_keys
 from ..cache import CachedRoute
-from ..deps import resolved_site
+from ..deps import requires, resolved_site
 
 router = APIRouter(prefix='/puppet', tags=['puppet'],
-                   route_class=CachedRoute)
+                   route_class=CachedRoute,
+                   dependencies=requires('puppet'))
 
 
 @router.get('/root-keys/{site}')

@@ -17,7 +17,7 @@ from ...queries.slurm import (
 )
 from ..cache import CachedRoute
 from ..convert import storage_out, storages_out
-from ..deps import resolved_site
+from ..deps import requires, resolved_site
 from ..schemas import (
     SiteDetail,
     SiteGroupOut,
@@ -27,6 +27,9 @@ from ..schemas import (
     UserGroupOut,
 )
 
+# No router-wide scope: the two bulk lists return user and group data, so
+# they need the `users` and `groups` scopes, not `sites`. Each route
+# declares its own.
 router = APIRouter(prefix='/sites', tags=['sites'],
                    route_class=CachedRoute)
 
@@ -63,7 +66,8 @@ def _site_group_out(v: SiteGroupView) -> SiteGroupOut:
     )
 
 
-@router.get('', response_model=list[SiteSummary])
+@router.get('', response_model=list[SiteSummary],
+            dependencies=requires('sites'))
 async def list_sites():
     sites = await Site.find_all().sort('+name').to_list()
     return [
@@ -72,7 +76,8 @@ async def list_sites():
     ]
 
 
-@router.get('/{site}', response_model=SiteDetail)
+@router.get('/{site}', response_model=SiteDetail,
+            dependencies=requires('sites'))
 async def get_site(site: Site = Depends(resolved_site)):
     return SiteDetail(
         name=site.name, fqdn=site.fqdn, aliases=site.aliases,
@@ -86,7 +91,8 @@ async def get_site(site: Site = Depends(resolved_site)):
     )
 
 
-@router.get('/{site}/users', response_model=list[SiteUserOut])
+@router.get('/{site}/users', response_model=list[SiteUserOut],
+            dependencies=requires('users'))
 async def site_users(site: Site = Depends(resolved_site)):
     """Every user at the site, with the effective status and access, the
     groups and roles, the Slurm accounts and the home storage. The query
@@ -94,7 +100,8 @@ async def site_users(site: Site = Depends(resolved_site)):
     return [_site_user_out(v) for v in await site_users_view(site)]
 
 
-@router.get('/{site}/groups', response_model=list[SiteGroupOut])
+@router.get('/{site}/groups', response_model=list[SiteGroupOut],
+            dependencies=requires('groups'))
 async def site_groups(site: Site = Depends(resolved_site),
                       personal: bool = False):
     """Every group present at the site, with its roster and storages.
