@@ -8,6 +8,7 @@ from .access_status import (
     resolve_status_name,
     resolve_type_ldapname,
 )
+from .apikey import find_api_key, list_api_keys
 from .history import find_history
 from .group import (
     GroupRefs,

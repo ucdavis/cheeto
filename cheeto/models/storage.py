@@ -149,6 +149,8 @@ class AutomountMap(BaseDocument):
                 [('name', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            [('site.$id', pymongo.ASCENDING)],
         ]
 
 
@@ -260,9 +262,10 @@ class StorageVolume(BaseDocument, Expirable):
                 ],
                 unique=True,
             ),
-            [('parent', pymongo.ASCENDING)],
-            [('storage_host', pymongo.ASCENDING)],
-            [('site', pymongo.ASCENDING), ('backend', pymongo.ASCENDING)],
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            [('parent.$id', pymongo.ASCENDING)],
+            [('storage_host.$id', pymongo.ASCENDING)],
+            [('site.$id', pymongo.ASCENDING), ('backend', pymongo.ASCENDING)],
         ]
 
 
@@ -508,8 +511,9 @@ class Storage(LDAPSyncable, BaseDocument, Expirable):
                 ],
                 unique=True,
             ),
-            [('owner', pymongo.ASCENDING)],
-            [('group', pymongo.ASCENDING)],
-            [('site', pymongo.ASCENDING), ('category', pymongo.ASCENDING)],
-            [('volume', pymongo.ASCENDING)],
+            # `<link>.$id` sub-paths: see the note in group_membership.py.
+            [('owner.$id', pymongo.ASCENDING)],
+            [('group.$id', pymongo.ASCENDING)],
+            [('site.$id', pymongo.ASCENDING), ('category', pymongo.ASCENDING)],
+            [('volume.$id', pymongo.ASCENDING)],
         ]

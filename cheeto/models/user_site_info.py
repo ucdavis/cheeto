@@ -48,4 +48,11 @@ class UserSiteInfo(BaseDocument, Expirable):
                 [('user', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
+            # Link fields are stored as DBRefs and beanie filters on the
+            # `<field>.$id` sub-path, which an index on the whole DBRef
+            # cannot serve. The unique indexes above enforce uniqueness;
+            # the sub-path indexes below serve the reads.
+            IndexModel([('user.$id', pymongo.ASCENDING),
+                        ('site.$id', pymongo.ASCENDING)]),
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
         ]

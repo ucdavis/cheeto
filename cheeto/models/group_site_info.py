@@ -44,5 +44,10 @@ class GroupSiteInfo(SiteAssociation):
                 [('group', pymongo.ASCENDING), ('site', pymongo.ASCENDING)],
                 unique=True,
             ),
-            IndexModel([('site', pymongo.ASCENDING)]),
+            # Link fields are stored as DBRefs and beanie filters on the
+            # `<field>.$id` sub-path, which an index on the whole DBRef
+            # cannot serve. The unique indexes above enforce uniqueness;
+            # the sub-path indexes below serve the reads.
+            IndexModel([('site.$id', pymongo.ASCENDING)]),
+            IndexModel([('group.$id', pymongo.ASCENDING)]),
         ]

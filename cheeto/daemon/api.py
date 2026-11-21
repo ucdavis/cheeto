@@ -7,24 +7,23 @@
 # Author : Camille Scott <cswel@ucdavis.edu>
 # Date   : 10.06.2026
 
-import secrets
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Security
-from fastapi.security import APIKeyHeader
+from fastapi import APIRouter, FastAPI
 
 from ..config import Config
 from ..db import connect_beanie
-from ..operations.site import ExportRootSSHKeys
-from ..operations.storage import ExportPuppetStorage
-from ..queries.site import find_site
-from ..queries.user import root_ssh_keys
-
-_api_key_header = APIKeyHeader(name='X-API-Key', auto_error=False)
+from .cache import ResponseCache
+from .deps import KeyTouches
+from .routes import groups, puppet, sites, slurm, storage, users
 
 
 def create_api(config: Config, client=None) -> FastAPI:
-    """Build the cheeto REST API.
+    """Build the cheeto REST API. Every route is a read (`GET`).
+
+    Resources (`cheeto/daemon/routes/`): `/sites`, `/users`, `/groups`,
+    `/sites/{site}/slurm`, `/sites/{site}/storage`, and the `/puppet`
+    exports. The response models are in `cheeto/daemon/schemas.py`.
 
     `client` injects an already-initialized beanie client (tests pass the
     session-loop client; httpx's ASGITransport does not run the lifespan).
@@ -43,48 +42,29 @@ def create_api(config: Config, client=None) -> FastAPI:
                   root_path=config.api.root_path if config.api else '')
     if client is not None:
         api.state.client = client
+    # Read by `deps.authorize`. `api_key` is the static key of the config
+    # (every scope); issued keys are `ApiKey` documents. Without
+    # `allow_anonymous`, a request needs one or the other.
+    api.state.api_key = config.api.api_key if config.api else None
+    api.state.allow_anonymous = (
+        config.api.allow_anonymous if config.api else False
+    )
+    api.state.key_touches = KeyTouches()
+    # Read by `cache.CachedRoute`; None (no `api.cache` block) means every
+    # request runs its handler. One cache per app instance.
+    cache_config = config.api.cache if config.api else None
+    api.state.cache = (
+        ResponseCache(ttl=cache_config.ttl, stale=cache_config.stale,
+                      max_entries=cache_config.max_entries)
+        if cache_config is not None else None
+    )
 
-    expected_key = config.api.api_key if config.api else None
-
-    async def require_api_key(key: str | None = Security(_api_key_header)):
-        if expected_key is None:
-            return
-        if key is None or not secrets.compare_digest(key, expected_key):
-            raise HTTPException(status_code=401,
-                                detail='invalid or missing API key')
-
-    async def resolved_sitename(site: str) -> str:
-        """Map the `{site}` path segment (a site name OR an fqdn) to the
-        canonical site name the export operations key on; 404 if unknown."""
-        resolved = await find_site(site)
-        if resolved is None:
-            raise HTTPException(status_code=404,
-                                detail=f'unknown site {site!r}')
-        return resolved.name
-
-    # All routes live on a router so they can be mounted under a configurable
-    # path prefix; the API key is enforced router-wide.
-    router = APIRouter(dependencies=[Depends(require_api_key)])
-
-    @router.get('/puppet/root-keys/{site}')
-    async def root_keys(site: str, request: Request) -> dict:
-        # Unlike storage, root keys fall back to the global set (every admin
-        # with root-ssh) when the site is unknown rather than 404ing.
-        resolved = await find_site(site)
-        sitename = resolved.name if resolved is not None else None
-        blocks = await ExportRootSSHKeys.run(request.app.state.client,
-                                             None,
-                                             sitename=sitename,
-                                             skip_history=True)
-        return {'root-ssh-public-keys': root_ssh_keys(blocks)}
-
-    @router.get('/puppet/storage/{site}')
-    async def puppet_storage(request: Request,
-                            sitename: str = Depends(resolved_sitename)) -> dict:
-        return await ExportPuppetStorage.run(request.app.state.client,
-                                             None,
-                                             sitename=sitename,
-                                             skip_history=True)
+    # All routes live on one router so they can be mounted under a
+    # configurable path prefix. Each resource router declares its own
+    # scope (`deps.requires`); there is no router-wide key check.
+    router = APIRouter()
+    for module in (puppet, sites, users, groups, slurm, storage):
+        router.include_router(module.router)
 
     api.include_router(router, prefix=_router_prefix(config))
     return api

@@ -74,6 +74,53 @@ def total_tres(allocations: list[SlurmAllocation]) -> SlurmTRES:
     return SlurmTRES(cpus=cpus, gpus=gpus, mem=mem_str)
 
 
+def slurm_max_jobs(
+    access_names, status_name: str | None,
+) -> int | None:
+    """The Slurm gate for one user at one site, from the EFFECTIVE access
+    names and status name. None means the user holds no Slurm associations
+    (no `slurm` access, or a status outside `SLURM_STATUS_MAX_JOBS`);
+    otherwise the MaxJobs value of the user's associations (0 for
+    `disabled`, -1 for no limit). `build_desired_slurm_state` and the API
+    both decide eligibility here."""
+    if 'slurm' not in access_names:
+        return None
+    return SLURM_STATUS_MAX_JOBS.get(status_name)
+
+
+async def list_accounts_at_site(site: Site) -> list[SlurmAccount]:
+    """Every SlurmAccount at a site with `group` and `coordinators`
+    resolved by two batched queries (no `$lookup`), sorted by group name."""
+    accounts = await SlurmAccount.find(
+        SlurmAccount.site.id == site.id,
+    ).to_list()
+    if not accounts:
+        return []
+    group_ids = {link_target_id(a.group) for a in accounts}
+    user_ids = {link_target_id(c) for a in accounts for c in a.coordinators}
+    groups = await Group.find(
+        In(Group.id, list(group_ids)), with_children=True,
+    ).to_list()
+    users = (
+        await User.find(In(User.id, list(user_ids))).to_list()
+        if user_ids else []
+    )
+    group_by_id = {g.id: g for g in groups}
+    user_by_id = {u.id: u for u in users}
+    out: list[SlurmAccount] = []
+    for a in accounts:
+        group = group_by_id.get(link_target_id(a.group))
+        if group is None:
+            continue  # dangling account
+        a.group = group
+        a.coordinators = [
+            u for c in a.coordinators
+            if (u := user_by_id.get(link_target_id(c))) is not None
+        ]
+        out.append(a)
+    return sorted(out, key=lambda a: a.group.name)
+
+
 @dataclass
 class GroupSlurm:
     """The SlurmAccount and SlurmAssociations for a (group, site) pair."""
@@ -528,7 +575,7 @@ async def build_desired_slurm_state(site: Site):
     status_by_user = await effective_status_names_at_site(site)
     max_jobs_by_name: dict[str, int] = {}
     for u in await find_users(access='slurm', site=site.name):
-        max_jobs = SLURM_STATUS_MAX_JOBS.get(status_by_user.get(u.id))
+        max_jobs = slurm_max_jobs(('slurm',), status_by_user.get(u.id))
         if max_jobs is not None:
             max_jobs_by_name[u.name] = max_jobs
     eligible = set(max_jobs_by_name)
