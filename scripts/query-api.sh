@@ -4,11 +4,15 @@
 #   query-api.sh [-c config] [-r profile] [-a address] [-p port] [-P prefix]
 #                [-k api-key] endpoint
 #
-# The defaults for address, port, prefix and API key come from the `api`
-# section of the config (read with mikefarah yq). The section is profiled:
-# `-r` selects the profile, and a missing profile falls back to `default`,
-# as in cheeto/config.py. `endpoint` is relative to the prefix, for example
+# The defaults for address, port and prefix come from the `api` section of
+# the config (read with mikefarah yq). The section is profiled: `-r` selects
+# the profile, and a missing profile falls back to `default`, as in
+# cheeto/config.py. `endpoint` is relative to the prefix, for example
 # `sites/farm/users`. Extra curl options go in $CURL_OPTS.
+#
+# The API key comes from `-k`, else from $CHEETO_API_KEY (issue one with
+# `cheeto ng apikey new`). The static `api.api_key` of the config is not
+# read: it is deprecated.
 
 set -euo pipefail
 
@@ -48,7 +52,7 @@ cfg() {
 [[ -n $address ]] || address=$(cfg host)
 [[ -n $port ]] || port=$(cfg port)
 (( prefix_set )) || prefix=$(cfg prefix)
-(( key_set )) || key=$(cfg api_key)
+(( key_set )) || key=${CHEETO_API_KEY:-}
 
 address=${address:-127.0.0.1}
 port=${port:-8000}
