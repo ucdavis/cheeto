@@ -21,6 +21,7 @@ a translated shell into a local variable that's never read
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import PurePosixPath
 
 from beanie.operators import In
@@ -106,13 +107,124 @@ def _access_names(links, name_by_id: dict) -> list[str]:
     return names
 
 
+@dataclass(frozen=True)
+class LegacyExportData:
+    """Every document `build_puppet_legacy` reads, for one site.
+
+    The export has two phases. `load_legacy_export_data` does all the
+    database reads, on the event loop. `build_puppet_legacy` is the rest:
+    synchronous CPU work with no I/O, so a caller that must keep its event
+    loop free (the REST API) can run it in a thread.
+    """
+
+    site: Site
+    usis: list[UserSiteInfo]
+    users: list[User]
+    # Every membership edge at the site.
+    edges: list[GroupMembership]
+    # The groups with a GroupSiteInfo at the site, special classes included.
+    groups: list[Group]
+    # Automount-backed storages by category, with their links resolved.
+    automap_storages: dict[str, list[Storage]]
+    # With `group` fetched.
+    slurm_accounts: list[SlurmAccount]
+    # id -> name for the sponsors that have no UserSiteInfo at the site.
+    offsite_sponsor_names: dict
+    access_groups: list[AccessGroup]
+    status_groups: list[StatusGroup]
+    type_groups: list[TypeGroup]
+
+
+async def load_legacy_export_data(site: Site) -> LegacyExportData:
+    """Read everything the legacy export of `site` needs. The number of
+    queries is fixed; it does not grow with the site."""
+    usis = await UserSiteInfo.find(UserSiteInfo.site.id == site.id).to_list()
+    user_ids = [usi.user.ref.id for usi in usis]
+    users = await User.find(In(User.id, user_ids)).to_list()
+
+    # Every membership edge at this site, in one query. Roles drive the
+    # member/sudoer/sponsor maps of the build.
+    edges = await GroupMembership.find(
+        GroupMembership.site.id == site.id,
+    ).to_list()
+
+    # Which groups exist at this site is authoritative: exactly the
+    # GroupSiteInfo records. Edges only drive the member/sudoer/sponsor
+    # attribution — an edge to a detached group no longer renders.
+    referenced_group_ids = await site_present_group_ids(site)
+    groups = (
+        await Group.find(
+            In(Group.id, list(referenced_group_ids)), with_children=True,
+        ).to_list()
+        if referenced_group_ids else []
+    )
+
+    # Automount-table storage projections (v1 user_to_puppet /
+    # group_to_puppet / share_to_puppet). One query for every category at
+    # the site, with volume/automount_map/owner/group resolved, which is
+    # all the blocks need.
+    automap_storages = await list_automap_storages_grouped(site)
+
+    slurm_accounts = await SlurmAccount.find(
+        SlurmAccount.site.id == site.id,
+        fetch_links=True,
+        nesting_depth=1,
+    ).to_list()
+
+    # A sponsor need not be at the site. This is every sponsor edge, so it
+    # can name more users than the build reads (the sponsor of a special
+    # group, for example); the map is only a name lookup.
+    user_id_set = set(user_ids)
+    offsite_sponsor_ids = {
+        uid for e in edges
+        if 'sponsor' in e.roles
+        and (uid := link_target_id(e.user)) is not None
+        and uid not in user_id_set
+    }
+    offsite_sponsors = (
+        await User.find(In(User.id, list(offsite_sponsor_ids))).to_list()
+        if offsite_sponsor_ids else []
+    )
+
+    # The special access/status/type groups: the access shorthands resolve
+    # every user's access tags (an id->name map replaces a per-user
+    # `resolve_access_names`), and the records themselves go into the group
+    # map.
+    return LegacyExportData(
+        site=site,
+        usis=usis,
+        users=users,
+        edges=edges,
+        groups=groups,
+        automap_storages=automap_storages,
+        slurm_accounts=slurm_accounts,
+        offsite_sponsor_names={u.id: u.name for u in offsite_sponsors},
+        access_groups=await AccessGroup.find_all().to_list(),
+        status_groups=await StatusGroup.find_all().to_list(),
+        type_groups=await TypeGroup.find_all().to_list(),
+    )
+
+
 async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     """Build a v1-compatible PuppetAccountMap from v2 data at `site`."""
-    usis = await UserSiteInfo.find(UserSiteInfo.site.id == site.id).to_list()
+    return build_puppet_legacy(await load_legacy_export_data(site))
+
+
+def build_puppet_legacy(data: LegacyExportData, *,
+                        passwords: bool = True) -> PuppetAccountMap:
+    """The PuppetAccountMap for the loaded `data`. No I/O: this is safe to
+    run in a thread, and it reads `data` without changing it.
+
+    `passwords=False` leaves the `password` key (the hash) out of every
+    user record. The REST API uses it: no route returns a password hash."""
+    site = data.site
+    usis = data.usis
+    users = data.users
+    edges = data.edges
+    raw_groups = data.groups
 
     user_ids = [usi.user.ref.id for usi in usis]
     usi_by_user_id = {usi.user.ref.id: usi for usi in usis}
-    users = await User.find(In(User.id, user_ids)).to_list()
     user_id_set = set(user_ids)
 
     sticky_group_ids = {
@@ -120,23 +232,6 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     }
     sticky_group_ids.discard(None)
 
-    # Every membership edge at this site, in one query. Roles drive the
-    # member/sudoer/sponsor maps below.
-    edges = await GroupMembership.find(
-        GroupMembership.site.id == site.id,
-    ).to_list()
-
-    # Which groups exist at this site is authoritative: exactly the
-    # GroupSiteInfo records. Edges only drive the member/sudoer/sponsor
-    # attribution below — an edge to a detached group no longer renders.
-    referenced_group_ids = await site_present_group_ids(site)
-
-    raw_groups = (
-        await Group.find(
-            In(Group.id, list(referenced_group_ids)), with_children=True,
-        ).to_list()
-        if referenced_group_ids else []
-    )
     # Access/Status/TypeGroups are v2 metadata, not exportable POSIX groups.
     candidate_groups = [
         g for g in raw_groups
@@ -144,11 +239,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     ]
     group_by_id = {g.id: g for g in candidate_groups}
 
-    # Automount-table storage projections (v1 user_to_puppet /
-    # group_to_puppet / share_to_puppet). One query for every category at the
-    # site, bucketed below. Depth-1 link fetch resolves
-    # volume/automount_map/owner/group, which is all the blocks need.
-    automap_storages = await list_automap_storages_grouped(site)
+    automap_storages = data.automap_storages
 
     home_by_owner: dict = {}
     for s in automap_storages.get('home', []):
@@ -180,11 +271,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
     # An account-owning group should always carry a GroupSiteInfo (the
     # slurm ops ensure one); include strays so the export stays v1-correct,
     # but surface the drift.
-    slurm_accounts = await SlurmAccount.find(
-        SlurmAccount.site.id == site.id,
-        fetch_links=True,
-        nesting_depth=1,
-    ).to_list()
+    slurm_accounts = data.slurm_accounts
     for account in slurm_accounts:
         g = account.group
         if g.id not in group_by_id and not isinstance(
@@ -258,28 +345,24 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
         if (g.name, g.gid) in user_name_uid
     }
 
-    # Batch sponsor name resolution across every sponsor edge.
-    sponsor_ids = {
-        sid for ids in sponsor_ids_by_group.values()
-        for sid in ids if sid is not None
-    }
-    sponsor_name_by_id = {u.id: u.name for u in users if u.id in sponsor_ids}
-    missing_sponsor_ids = sponsor_ids - set(sponsor_name_by_id.keys())
-    if missing_sponsor_ids:
-        extras = await User.find(
-            In(User.id, list(missing_sponsor_ids)),
-        ).to_list()
-        sponsor_name_by_id.update({u.id: u.name for u in extras})
+    # Sponsor names: the users at the site, plus the sponsors that are not.
+    sponsor_name_by_id = {u.id: u.name for u in users}
+    sponsor_name_by_id.update(data.offsite_sponsor_names)
 
-    # Fetch the special access/status/type groups once, up front: the access
-    # shorthands resolve every user's access tags below (an id->name map
-    # replaces a per-user `resolve_access_names`), and the records themselves
-    # are folded into the group map after the edge-attribution maps (so they
-    # never count toward posix memberships).
-    access_groups = await AccessGroup.find_all().to_list()
-    status_groups = await StatusGroup.find_all().to_list()
-    type_groups = await TypeGroup.find_all().to_list()
+    # The access shorthands resolve every user's access tags below. The
+    # special group records themselves are folded into the group map after
+    # the edge-attribution maps (so they never count toward posix
+    # memberships).
+    access_groups = data.access_groups
+    status_groups = data.status_groups
+    type_groups = data.type_groups
     access_name_by_id = {ag.id: ag.access_name for ag in access_groups}
+
+    # One schema instance per record class. `PuppetUserRecord.load` makes a
+    # new schema for each call, and that was a third of the export time.
+    user_schema = PuppetUserRecord.Schema()
+    group_schema = PuppetGroupRecord.Schema()
+    share_schema = PuppetShareRecord.Schema()
 
     user_records: dict[str, PuppetUserRecord] = {}
     for u in users:
@@ -329,7 +412,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             'gid': u.gid,
             'groups': member_names or None,
             'group_sudo': sudoer_names or None,
-            'password': u.password,
+            'password': u.password if passwords else None,
             'shell': u.shell,
             'tag': _tags_for(u, access_names),
             'home': u.home_directory,
@@ -337,7 +420,7 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             'slurm': {'account': account_names} if account_names else None,
             'storage': storage_data,
         })
-        user_records[u.name] = PuppetUserRecord.load(record_data)
+        user_records[u.name] = user_schema.load(record_data)
 
     # v1 exported the special access/status groups (every site carried
     # their SiteGroups); v2 keeps them, plus the user-type groups, as global
@@ -382,10 +465,10 @@ async def site_to_puppet_legacy(site: Site) -> PuppetAccountMap:
             'sponsors': sponsor_names or None,
             'storage': storage_rows,
         })
-        group_records[g.name] = PuppetGroupRecord.load(record_data)
+        group_records[g.name] = group_schema.load(record_data)
 
     share_records = {
-        s.name: PuppetShareRecord.load({'storage': {
+        s.name: share_schema.load({'storage': {
             'owner': s.owner.name,
             'group': s.group.name,
             'autofs': {'nas': s.host, 'path': s.host_path},

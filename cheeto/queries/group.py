@@ -62,6 +62,30 @@ async def site_present_group_ids(site: Site) -> set[PydanticObjectId]:
     return ids
 
 
+async def find_group_site_info(
+    group: Group, site: Site,
+) -> GroupSiteInfo | None:
+    """The `GroupSiteInfo` for `(group, site)`; None when the group is not
+    present at the site."""
+    return await GroupSiteInfo.find_one(
+        GroupSiteInfo.group.id == group.id,
+        GroupSiteInfo.site.id == site.id,
+    )
+
+
+async def group_site_names(group: Group) -> list[str]:
+    """Names of the sites `group` is present at, sorted. Two queries."""
+    gsis = await GroupSiteInfo.find(
+        GroupSiteInfo.group.id == group.id,
+    ).to_list()
+    if not gsis:
+        return []
+    sites = await Site.find(
+        In(Site.id, [link_target_id(g.site) for g in gsis]),
+    ).to_list()
+    return sorted(s.name for s in sites)
+
+
 async def imputed_group_ids_at_site(site: Site) -> set[PydanticObjectId]:
     """Group ids whose presence at `site` is *implied* by existing records:
     membership edges ∪ `site.group.sticky` ∪ SlurmAccount(group, site) ∪
@@ -313,6 +337,64 @@ async def user_groups_at_site(
         UserGroupRoles(group=g, roles=roles_by_group[g.id])
         for g in groups
     ]
+
+
+@dataclass
+class UserSiteGroup:
+    """A group that `user` has an edge to (or reaches through the sticky
+    list) at a site. `roles` are the stored edge roles, all four kinds;
+    `sticky` marks a group in `site.group.sticky`, which makes every user at
+    the site a member without an edge."""
+    group: Group
+    roles: list[str] = field(default_factory=list)
+    sticky: bool = False
+
+    @property
+    def is_member(self) -> bool:
+        return self.sticky or 'member' in self.roles
+
+
+async def user_group_roles_at_site(
+    user: User, site: Site, *, at_site: bool = True,
+) -> list[UserSiteGroup]:
+    """Every group `user` relates to at `site`, with all edge roles
+    (`member`, `sponsor`, `sudoer`, `slurmer`) and the sticky flag. Unlike
+    `user_groups_at_site` this keeps sponsor/sudoer roles and applies the
+    presence gate (only groups with a `GroupSiteInfo` at the site), the same
+    definition the site-wide views use. `at_site=False` (the user has no
+    `UserSiteInfo`) leaves out the sticky groups. Three queries."""
+    edges = await GroupMembership.find(
+        GroupMembership.user.id == user.id,
+        GroupMembership.site.id == site.id,
+    ).to_list()
+    roles_by_group: dict[PydanticObjectId, list[str]] = {
+        link_target_id(e.group): sorted(e.roles) for e in edges
+    }
+    sticky_ids = _sticky_group_ids(site) if at_site else set()
+    group_ids = set(roles_by_group) | sticky_ids
+    group_ids.discard(None)
+    if not group_ids:
+        return []
+
+    gsis = await GroupSiteInfo.find(
+        In(GroupSiteInfo.group.id, list(group_ids)),
+        GroupSiteInfo.site.id == site.id,
+    ).to_list()
+    present = {link_target_id(g.group) for g in gsis}
+    if not present:
+        return []
+    groups = await Group.find(In(Group.id, list(present))).to_list()
+    return sorted(
+        (
+            UserSiteGroup(
+                group=g,
+                roles=roles_by_group.get(g.id, []),
+                sticky=g.id in sticky_ids,
+            )
+            for g in groups
+        ),
+        key=lambda row: row.group.name,
+    )
 
 
 @dataclass

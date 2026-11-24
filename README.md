@@ -117,15 +117,124 @@ would exceed its `max_deletions` guard fails the task — visible in
 
 ### REST API
 
-FastAPI app served by `cheeto daemon api`:
+FastAPI app served by `cheeto daemon api`. Every route is a `GET` and
+returns JSON. `{site}` is a site name, an fqdn or an alias.
 
 ```
-GET /puppet/root-keys/{site}   root authorized_keys for site admins (text)
-GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure (JSON)
+GET /puppet/root-keys/{site}   root authorized_keys entries for site admins
+GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure
+GET /puppet/accounts/{site}    the site in the shape of the legacy all.yaml
+
+GET /sites                     sites
+GET /sites/{site}              one site, with its sticky groups and accounts
+GET /sites/{site}/users        every user at the site (bulk)
+GET /sites/{site}/groups       every group at the site (bulk)
+
+GET /users                     users; filters: type, status, access, site, group
+GET /users/{username}          global record
+GET /users/{username}/ssh-keys
+GET /users/{username}/sites    per-site overrides and effective values
+GET /users/{username}/sites/{site}
+GET /users/{username}/sites/{site}/groups|slurm|storage
+
+GET /groups                    groups; filters: type, site, user
+GET /groups/{groupname}        global record
+GET /groups/{groupname}/sites/{site}
+GET /groups/{groupname}/sites/{site}/members|slurm|storage
+
+GET /sites/{site}/slurm/accounts|partitions|qos|qos/{name}
+GET /sites/{site}/slurm/associations      configured (account, partition, qos)
+GET /sites/{site}/slurm/allocations
+GET /sites/{site}/slurm/user-associations effective per-user rows (sync state)
+
+GET /sites/{site}/storage/storages|volumes|automount-maps
 ```
 
-If `api.api_key` is set in the config, requests must send a matching
-`X-API-Key` header; unknown sites return 404.
+The response models are in `cheeto/daemon/schemas.py`. The app serves the
+OpenAPI schema at `<prefix>/openapi.json` and a browser at `<prefix>/docs`
+(below `api.prefix`, so one reverse proxy rule for the prefix covers them).
+
+An unknown site, user or group returns 404, except on `/puppet/root-keys`,
+which then returns the global key set. The API never returns a password
+hash.
+
+`/puppet/accounts/{site}` is for clients that read
+`domains/<fqdn>/merged/all.yaml` from the puppet.hpc repo today. It returns
+the same `user`, `group` and `share` maps as JSON, from the same code
+(`queries/puppet_legacy.py`), with one difference: the user records have no
+`password` key. It is the slowest route (about 2.5 s for 2200 users). The
+database reads run on the event loop, and the build of the document runs in
+a thread (`asyncio.to_thread`), so other requests get an answer in that
+time. Use `api.cache` with it.
+
+#### API keys and scopes
+
+Every request must send a key in the `X-API-Key` header. A key holds a list
+of scopes, and each route needs one scope:
+
+| Scope | Routes |
+|---|---|
+| `puppet` | `/puppet/root-keys/*`, `/puppet/storage/*` (includes the root SSH keys) |
+| `legacy` | `/puppet/accounts/*` (the legacy `all.yaml` of a site) |
+| `sites` | `/sites`, `/sites/{site}` |
+| `users` | `/users/*` and `/sites/{site}/users` |
+| `groups` | `/groups/*` and `/sites/{site}/groups` |
+| `slurm` | `/sites/{site}/slurm/*` |
+| `storage` | `/sites/{site}/storage/*` |
+
+```
+cheeto ng apikey new hippo --scope sites --scope users --scope groups \
+                           --scope slurm --scope storage --comment 'HiPPO team'
+cheeto ng apikey new puppet --scope puppet [--expires 2027-06-01]
+cheeto ng apikey list [--all]
+cheeto ng apikey revoke KEY_ID
+```
+
+- `new` prints the key (`cheeto_<key id>_<secret>`) one time. cheeto stores
+  only a SHA-256 hash of the secret and cannot show the key again.
+  `--scope ALL` gives every scope.
+- `revoke` takes the key id from `list`. The API refuses the key from the
+  next request. The record stays, and `list --all` shows it.
+- To rotate, issue a second key with the same name, change the client, then
+  revoke the old key id. `list` shows when each key was last used (the API
+  records it at most one time in 5 minutes for each key).
+- A missing or invalid key gets `401`. A valid key without the scope of the
+  route gets `403`.
+- `api.api_key` in the config is an optional static key with every scope.
+  It exists for the change from the single shared key; remove it when each
+  client has its own key. Without it the API is NOT open: only
+  `api.allow_anonymous: true` turns the check off.
+
+#### Response cache
+
+The slow routes are CPU work in the one event loop of the API process, so
+concurrent requests queue. An `api.cache` block turns on an in-process
+cache of the finished responses (`cheeto/daemon/cache.py`):
+
+```yaml
+api:
+  default:
+    cache:
+      ttl: 60           # seconds a response is fresh
+      stale: 600        # more seconds it is served while one refresh runs
+      max_entries: 4096
+```
+
+- Concurrent requests for one URL share one computation.
+- A response older than `ttl` is still returned at once, and one background
+  task replaces it. A response older than `ttl + stale` is computed again
+  before the request returns.
+- Only `200` responses are stored. The API key and its scope are checked
+  on every request, before the cache.
+- Writes come from other processes, so entries expire by time only. A
+  change shows after `ttl` seconds, or after about two poll intervals for a
+  client that polls at the `ttl` interval.
+- Response headers: `X-Cache` (`hit`, `stale` or `miss`), `Age`, `ETag` and
+  `Cache-Control`. A request with a matching `If-None-Match` gets `304`.
+- To get a new response after a manual change, send `Cache-Control: no-cache`:
+  `CURL_OPTS='-H Cache-Control:no-cache' scripts/query-api.sh sites/farm/users`.
+
+Without the block, every request runs its handler.
 
 ### Monitoring (Flower)
 

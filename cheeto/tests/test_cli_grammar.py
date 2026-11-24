@@ -42,6 +42,9 @@ EXCEPTIONS = {
     ('user', 'backfill-sites'),
     ('user', 'clear-offboarding-site-statuses'),
     ('user', 'redundant-site-statuses'),
+    # Not `delete`: a revoked key keeps its record (revoked_at) for the
+    # audit trail, and `revoke` is the usual word for a credential.
+    ('apikey', 'revoke'),
 }
 
 
