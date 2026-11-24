@@ -8,6 +8,7 @@ conftest.py.
 """
 
 import json
+import threading
 from dataclasses import replace
 
 import httpx
@@ -18,6 +19,7 @@ from pymongo import AsyncMongoClient
 from pymongo.monitoring import CommandListener
 
 from ..daemon.api import create_api
+from ..daemon.routes import puppet as puppet_routes
 from ..models import ALL_MODELS
 from ..models.group import Group
 from ..models.group_membership import GroupMembership
@@ -41,6 +43,7 @@ from ..models.storage import (
 )
 from ..models.user import SshKey, User
 from ..models.user_site_info import UserSiteInfo
+from ..puppet import PuppetAccountMap
 from ..queries.puppet_legacy import site_to_puppet_legacy
 from .conftest import (
     MONGODB_PORT,
@@ -236,6 +239,13 @@ def _by_name(rows):
     return {row['name']: row for row in rows}
 
 
+# Not in ALL_ROUTES: the tests below add them where they apply.
+PUPPET_ROUTES = (
+    f'/puppet/root-keys/{SITE}',
+    f'/puppet/storage/{SITE}',
+    f'/puppet/accounts/{SITE}',
+)
+
 ALL_ROUTES = (
     '/sites',
     f'/sites/{SITE}',
@@ -339,8 +349,7 @@ class TestApiContract:
     async def test_no_comment_values_anywhere(self, api):
         """The seeded comment values reach no response, on any route,
         including the puppet exports."""
-        paths = ALL_ROUTES + (
-            f'/puppet/root-keys/{SITE}', f'/puppet/storage/{SITE}',
+        paths = ALL_ROUTES + PUPPET_ROUTES + (
             f'/sites/{SITE}/groups?personal=true',
         )
         for path in paths:
@@ -349,7 +358,7 @@ class TestApiContract:
             assert '"comment' not in body, path
 
     async def test_no_password_hash_anywhere(self, api):
-        for path in ALL_ROUTES:
+        for path in ALL_ROUTES + PUPPET_ROUTES:
             assert '$y$hash' not in json.dumps(await _get(api, path)), path
 
     async def test_no_history_rows(self, api):
@@ -748,6 +757,73 @@ class TestSiteViews:
         shares = await _get(api, f'/sites/{SITE}/storage/storages',
                             category='share')
         assert {s['name'] for s in shares} == set(legacy.share)
+
+
+class TestLegacyExport:
+    """`/puppet/accounts/{site}`: the `all.yaml` of a site as JSON."""
+
+    PATH = f'/puppet/accounts/{SITE}'
+
+    async def test_same_shape_as_the_yaml_export(self, api, seeded):
+        """Equal to the document that `puppet_sync` writes to `all.yaml`,
+        key for key, the `password` of the user records excepted."""
+        expected = json.loads(json.dumps(
+            PuppetAccountMap.Schema().dump(await site_to_puppet_legacy(seeded)),
+        ))
+        # The seed must have a hash, or the test proves nothing.
+        assert expected['user']['alice'].pop('password') == '$y$hash'
+        assert not any('password' in rec for rec in expected['user'].values())
+
+        resp = await api.get(self.PATH)
+        assert resp.status_code == 200
+        assert resp.headers['content-type'] == 'application/json'
+        got = resp.json()
+        assert got == expected
+        # The reference site has all three maps, so none is left out.
+        assert set(got) == {'user', 'group', 'share'}
+        assert set(got['user']) == {'alice', 'bob', 'carol', 'dave'}
+        assert got['user']['alice']['storage']['autofs']['nas'] == 'nas1'
+        assert got['group']['lab']['sponsors'] == ['pi']
+        assert set(got['share']) == {'refdata'}
+
+    async def test_same_order_as_the_yaml_export(self, api, seeded):
+        """The maps are sorted like the YAML, so a text diff is useful."""
+        got = (await api.get(self.PATH)).json()
+        for name in ('user', 'group', 'share'):
+            assert list(got[name]) == sorted(got[name]), name
+
+    async def test_site_alias_and_unknown_site(self, api):
+        by_alias = await api.get('/puppet/accounts/apis')
+        assert by_alias.json() == (await api.get(self.PATH)).json()
+        assert (await api.get('/puppet/accounts/nope')).status_code == 404
+
+    async def test_build_runs_outside_the_event_loop_thread(self, api,
+                                                            monkeypatch):
+        """Tripwire: the CPU half of the export must not run in the thread
+        of the event loop, where it stops every other request."""
+        threads = []
+        render = puppet_routes._accounts_json
+
+        def spy(data):
+            threads.append(threading.current_thread())
+            return render(data)
+
+        monkeypatch.setattr(puppet_routes, '_accounts_json', spy)
+        assert (await api.get(self.PATH)).status_code == 200
+        assert len(threads) == 1
+        assert threads[0] is not threading.current_thread()
+
+    async def test_fixed_query_count(self, api, seeded):
+        cost = TestQueryCost()
+        before = await cost._reads(api, self.PATH)
+        lab = await Group.find_one(Group.name == 'lab')
+        for i in range(10):
+            user = await _user(f'more{i}', 76000 + i, seeded)
+            group = await _group(f'moregrp{i}', 77000 + i, seeded)
+            await _edge(user, group, seeded, 'member', 'sponsor')
+            await _edge(user, lab, seeded, 'member')
+        assert await cost._reads(api, self.PATH) == before
+        assert before <= 20, before
 
 
 class TestQueryCost:

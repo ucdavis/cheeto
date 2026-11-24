@@ -24,6 +24,7 @@ from ..models.user import User
 from .test_api import (  # noqa: F401
     ALL_ROUTES,
     KEY,
+    PUPPET_ROUTES,
     SITE,
     _counter,
     api,
@@ -315,8 +316,7 @@ class TestCachedRoutes:
         assert _counter.count == single
 
     async def test_every_route_gives_the_same_body(self, cached, api):  # noqa: F811
-        for path in ALL_ROUTES + (f'/puppet/root-keys/{SITE}',
-                                  f'/puppet/storage/{SITE}'):
+        for path in ALL_ROUTES + PUPPET_ROUTES:
             plain = await api.get(path)
             miss = await cached.client.get(path)
             hit = await cached.client.get(path)

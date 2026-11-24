@@ -35,6 +35,7 @@ from ..queries import find_api_key, list_api_keys
 from .test_api import (  # noqa: F401
     ALL_ROUTES,
     KEY,
+    PUPPET_ROUTES,
     SITE,
     _counter,
     _user,
@@ -44,12 +45,12 @@ from .test_api import (  # noqa: F401
 )
 
 # The scope each route must need. Keyed by path prefix, longest first.
-PUPPET_ROUTES = (f'/puppet/root-keys/{SITE}', f'/puppet/storage/{SITE}')
 EXPECTED_SCOPE = (
     (f'/sites/{SITE}/slurm/', 'slurm'),
     (f'/sites/{SITE}/storage/', 'storage'),
     (f'/sites/{SITE}/users', 'users'),
     (f'/sites/{SITE}/groups', 'groups'),
+    ('/puppet/accounts/', 'legacy'),
     ('/puppet/', 'puppet'),
     ('/users', 'users'),
     ('/groups', 'groups'),

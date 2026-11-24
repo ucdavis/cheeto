@@ -92,7 +92,9 @@ ACCESS_TYPES : Final = (
 
 
 # REST API key scopes: one per resource group (cheeto/daemon/routes/). A
-# key holds a list of them, or API_SCOPE_ALL for every scope.
+# key holds a list of them, or API_SCOPE_ALL for every scope. `legacy` is
+# the one route that gives a whole site in the shape of the puppet.hpc
+# `all.yaml`; it goes away with that route.
 API_SCOPES : Final = (
     'puppet',
     'sites',
@@ -100,6 +102,7 @@ API_SCOPES : Final = (
     'groups',
     'slurm',
     'storage',
+    'legacy',
 )
 # A word, not '*': the value is typed on the command line, where '*' is a
 # shell glob.

@@ -123,6 +123,7 @@ returns JSON. `{site}` is a site name, an fqdn or an alias.
 ```
 GET /puppet/root-keys/{site}   root authorized_keys entries for site admins
 GET /puppet/storage/{site}     legacy puppet zfs/nfs storage structure
+GET /puppet/accounts/{site}    the site in the shape of the legacy all.yaml
 
 GET /sites                     sites
 GET /sites/{site}              one site, with its sticky groups and accounts
@@ -157,6 +158,15 @@ An unknown site, user or group returns 404, except on `/puppet/root-keys`,
 which then returns the global key set. The API never returns a password
 hash.
 
+`/puppet/accounts/{site}` is for clients that read
+`domains/<fqdn>/merged/all.yaml` from the puppet.hpc repo today. It returns
+the same `user`, `group` and `share` maps as JSON, from the same code
+(`queries/puppet_legacy.py`), with one difference: the user records have no
+`password` key. It is the slowest route (about 2.5 s for 2200 users). The
+database reads run on the event loop, and the build of the document runs in
+a thread (`asyncio.to_thread`), so other requests get an answer in that
+time. Use `api.cache` with it.
+
 #### API keys and scopes
 
 Every request must send a key in the `X-API-Key` header. A key holds a list
@@ -164,7 +174,8 @@ of scopes, and each route needs one scope:
 
 | Scope | Routes |
 |---|---|
-| `puppet` | `/puppet/*` (includes the root SSH keys) |
+| `puppet` | `/puppet/root-keys/*`, `/puppet/storage/*` (includes the root SSH keys) |
+| `legacy` | `/puppet/accounts/*` (the legacy `all.yaml` of a site) |
 | `sites` | `/sites`, `/sites/{site}` |
 | `users` | `/users/*` and `/sites/{site}/users` |
 | `groups` | `/groups/*` and `/sites/{site}/groups` |

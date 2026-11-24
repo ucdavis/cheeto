@@ -7,8 +7,9 @@ Depth guide: `nesting_depth=1` resolves `Storage.volume` and
 automount mount_path (volume host/host_path are concrete, never resolved
 through `parent`). Static-mount `mount_path` additionally needs
 `static_mount.volume` fetched, i.e. `nesting_depth=2` — only `get_storage`
-uses that. The bulk listing (`list_site_storages`) instead resolves links
-with one batched query per field (`_hydrate_storage_links`): a blanket
+uses that. The bulk listings (`list_site_storages`,
+`list_automap_storages_grouped`) instead resolve links with one batched
+query per field (`_hydrate_storage_links`): a blanket
 `nesting_depth=2` find fans every owner out into its status/access/back-links
 and is pathologically slow on a busy site.
 """
@@ -52,16 +53,18 @@ async def list_automap_storages(site: Site, category: str) -> list[Storage]:
 
 async def list_automap_storages_grouped(site: Site) -> dict[str, list[Storage]]:
     """All automount-backed Storage at `site`, bucketed by category, in one
-    query (vs. one `list_automap_storages` call per category). Depth 1
-    resolves volume/automount_map/owner/group — everything the LDAP/puppet
-    projections read."""
+    find (vs. one `list_automap_storages` call per category), with
+    volume/owner/group/automount_map resolved by `_hydrate_storage_links` —
+    everything the puppet projection reads. `site` stays a Link.
+
+    Not `fetch_links=True`: that joins every link of every row before the
+    filter, and at a site with 2000 homes it was 40% of the legacy export."""
     out: dict[str, list[Storage]] = {}
     storages = await Storage.find(
         Storage.site.id == site.id,
         Storage.automount_map != None,  # noqa: E711 — beanie operator quirk
-        fetch_links=True,
-        nesting_depth=1,
     ).to_list()
+    await _hydrate_storage_links(storages)
     for s in storages:
         out.setdefault(s.category, []).append(s)
     return out
