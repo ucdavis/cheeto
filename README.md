@@ -150,7 +150,8 @@ GET /sites/{site}/storage/storages|volumes|automount-maps
 ```
 
 The response models are in `cheeto/daemon/schemas.py`. The app serves the
-OpenAPI schema at `/openapi.json` and a browser at `/docs`.
+OpenAPI schema at `<prefix>/openapi.json` and a browser at `<prefix>/docs`
+(below `api.prefix`, so one reverse proxy rule for the prefix covers them).
 
 An unknown site, user or group returns 404, except on `/puppet/root-keys`,
 which then returns the global key set. The API never returns a password

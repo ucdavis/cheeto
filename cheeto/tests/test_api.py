@@ -373,6 +373,38 @@ class TestApiContract:
             assert (await client.get('/cheeto/api/v1/sites')).status_code == 200
             assert (await client.get('/sites')).status_code == 404
 
+    async def test_docs_and_schema_are_below_the_prefix(self, beanie_client,
+                                                        config):
+        """A reverse proxy forwards only the prefix. The docs page must be
+        there, and must load the schema from there."""
+        cfg = replace(config, api=replace(config.api, prefix='/cheeto/api/v1'))
+        transport = httpx.ASGITransport(
+            app=create_api(cfg, client=beanie_client),
+        )
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url='http://test') as client:
+            docs = await client.get('/cheeto/api/v1/docs')
+            assert docs.status_code == 200
+            assert "url: '/cheeto/api/v1/openapi.json'" in docs.text
+            schema = await client.get('/cheeto/api/v1/openapi.json')
+            assert schema.status_code == 200
+            assert '/cheeto/api/v1/sites' in schema.json()['paths']
+            assert (await client.get('/cheeto/api/v1/redoc')
+                    ).status_code == 200
+            for path in ('/docs', '/openapi.json', '/redoc'):
+                assert (await client.get(path)).status_code == 404, path
+
+    async def test_docs_without_a_prefix(self, beanie_client, config):
+        transport = httpx.ASGITransport(
+            app=create_api(config, client=beanie_client),
+        )
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url='http://test') as client:
+            docs = await client.get('/docs')
+            assert docs.status_code == 200
+            assert "url: '/openapi.json'" in docs.text
+            assert (await client.get('/openapi.json')).status_code == 200
+
 
 class TestUsers:
 

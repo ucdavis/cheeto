@@ -38,8 +38,20 @@ def create_api(config: Config, client=None) -> FastAPI:
         if own_client:
             await api.state.client.close()
 
+    # The schema and the two documentation pages go below the prefix, with
+    # the routes. The docs page tells the browser where to load the schema
+    # from; at the server root (the FastAPI default) that address is outside
+    # what a reverse proxy forwards for the prefix, and the page fails with
+    # "Not Found /openapi.json".
+    prefix = _router_prefix(config)
     api = FastAPI(title='cheeto', lifespan=lifespan,
-                  root_path=config.api.root_path if config.api else '')
+                  root_path=config.api.root_path if config.api else '',
+                  openapi_url=f'{prefix}/openapi.json',
+                  docs_url=f'{prefix}/docs',
+                  redoc_url=f'{prefix}/redoc',
+                  swagger_ui_oauth2_redirect_url=(
+                      f'{prefix}/docs/oauth2-redirect'
+                  ))
     if client is not None:
         api.state.client = client
     # Read by `deps.authorize`. `api_key` is the static key of the config
@@ -66,7 +78,7 @@ def create_api(config: Config, client=None) -> FastAPI:
     for module in (puppet, sites, users, groups, slurm, storage):
         router.include_router(module.router)
 
-    api.include_router(router, prefix=_router_prefix(config))
+    api.include_router(router, prefix=prefix)
     return api
 
 
